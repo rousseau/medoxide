@@ -1,17 +1,10 @@
 # medoxide
 
-Boîte à outils en Rust & [Burn](https://burn.dev) pour l'imagerie médicale
-(reconstruction IRM, segmentation, synthèse, recalage, surface corticale, EEG).
-Projet du GIS BeAChild.
-
-Statut : démarrage. Un seul module existe pour l'instant (`mask`), et il
-n'est pas encore implémenté — juste câblé. Voir `docs/LEARNING.md` pour le
-journal de développement et le raisonnement derrière chaque étape.
+Boîte à outils en Rust & [Burn](https://burn.dev) pour l'imagerie médicale.
 
 ## Prérequis
 
-- Rust stable récent, installé via [rustup](https://rustup.rs) (pas via le
-  gestionnaire de paquets du système, souvent trop ancien pour Burn).
+- Rust installé via [rustup](https://rustup.rs).
 
 ## Compiler
 
@@ -42,10 +35,3 @@ Un nouveau module (reconstruction, recalage, ...) = un nouveau crate dans
 crate `medoxide-core` partagé seulement quand un deuxième module en a
 réellement besoin — pas avant.
 
-## Roadmap
-
-| Module | Référence Python | Statut |
-|---|---|---|
-| `mask` — masque cérébral fœtal | [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction) | 🚧 squelette |
-| `register` — recalage inter-coupes | [ROSI / pyrecon](https://github.com/gis-beachild/pyrecon) | ⏳ |
-| `recon` — reconstruction 3D | NiftyMIC / SVRTK / NeSVoR | ⏳ |
