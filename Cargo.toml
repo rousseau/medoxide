@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/medoxide-mask", "crates/medx"]
+
+# Dépendances partagées, versionnées une seule fois ici et héritées
+# par les crates membres via `workspace = true` dans leur propre Cargo.toml.
+# Évite les divergences de version entre crates du même workspace.
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/rousseau/medoxide"

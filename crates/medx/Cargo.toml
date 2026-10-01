@@ -1,0 +1,12 @@
+[package]
+name = "medx"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "medx"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+medoxide-mask = { path = "../medoxide-mask" }

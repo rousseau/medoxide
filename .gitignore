@@ -1,0 +1,8 @@
+/target
+*.nii
+*.nii.gz
+.DS_Store
+
+# Cargo.lock EST versionné (voir README) : ce workspace produit un
+# binaire, pas seulement une bibliothèque — on fige les versions exactes
+# des dépendances pour que tout le monde compile avec les mêmes.
