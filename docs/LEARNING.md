@@ -31,4 +31,33 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
 
 ---
 
-*(à compléter à la prochaine étape : export ONNX de Fetal-BET)*
+## 2026-10-03 — Lire l'en-tête d'un NIfTI (étape 3a)
+
+- **Quoi** : une *crate* externe (`nifti`) ajoutée comme dépendance. On la
+  déclare une fois dans `[workspace.dependencies]` (racine), et chaque crate
+  membre l'hérite avec `nifti = { workspace = true }`.
+- **Pourquoi ici** : lire du NIfTI (y compris `.nii.gz`) est un problème déjà
+  résolu ; le réécrire n'apporterait rien au projet.
+- **Où** : `Cargo.toml` (racine), `crates/medoxide-mask/Cargo.toml`.
+
+- **Quoi** : `Result<T, E>` et l'opérateur `?`. `?` après un appel falsifiable
+  veut dire « si erreur, quitte la fonction en la renvoyant ; sinon, donne-moi
+  la valeur ». Il appelle au passage `From` pour convertir l'erreur dans le
+  type d'erreur de *notre* fonction.
+- **Pourquoi ici** : ouvrir un fichier peut échouer (absent, invalide) ; on ne
+  veut pas de `panic!` mais une erreur que l'appelant peut traiter.
+- **Où** : `volume_info` dans `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : une variante d'enum qui *contient* une valeur
+  (`MaskError::Nifti(nifti::NiftiError)`) et `impl From<NiftiError> for
+  MaskError`, qui dit à Rust comment passer d'un type d'erreur à l'autre.
+- **Pourquoi ici** : pour que `?` fonctionne directement sur les appels de la
+  crate `nifti` tout en gardant un seul type d'erreur public.
+- **Où** : `MaskError` dans `crates/medoxide-mask/src/lib.rs`.
+
+**Critère 3a atteint** : dimensions et espacement identiques à nibabel sur les
+8 volumes (test `volume_info_matches_nibabel`). Reste 3b : l'orientation.
+
+---
+
+*(à compléter à la prochaine étape : orientation (affine), puis `burn-import`)*

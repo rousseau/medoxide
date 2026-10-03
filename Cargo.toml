@@ -7,6 +7,7 @@ members = ["crates/medoxide-mask", "crates/medx"]
 # Évite les divergences de version entre crates du même workspace.
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+nifti = "0.18"
 
 [workspace.package]
 version = "0.1.0"

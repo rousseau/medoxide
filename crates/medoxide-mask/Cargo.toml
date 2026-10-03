@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nifti = { workspace = true }
+
 # burn + burn-onnx arriveront ici à l'étape "import du modèle ONNX".
 # On les ajoute seulement quand on en a un usage concret (principe YAGNI) :
 # pas de dépendance avant d'avoir le code qui la justifie.

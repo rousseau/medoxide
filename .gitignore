@@ -12,3 +12,6 @@ CLAUDE.md
 
 # Roadmap locale
 docs/ROADMAP.md
+
+# Poids et modèles (gros fichiers : Garage, pas Git)
+/models/
