@@ -56,8 +56,30 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
 - **Où** : `MaskError` dans `crates/medoxide-mask/src/lib.rs`.
 
 **Critère 3a atteint** : dimensions et espacement identiques à nibabel sur les
-8 volumes (test `volume_info_matches_nibabel`). Reste 3b : l'orientation.
+8 volumes (test `volume_info_matches_nibabel`).
+## 2026-10-03 — L'affine et `Option` (étape 3b)
+
+- **Quoi** : l'*affine* d'un volume NIfTI, matrice 4×4 qui convertit un indice
+  de voxel `(i, j, k)` en coordonnées en mm dans l'espace du patient
+  (diagonale = espacement, hors-diagonale = rotation, dernière colonne =
+  origine). On la lit dans le `sform` de l'en-tête, comme nibabel.
+- **Pourquoi ici** : les volumes de test sont *obliques* (coupes non alignées
+  sur les axes du scanner, orientations LPS, LIP, PIR...). Le prétraitement
+  et le ré-échantillonnage inverse (étapes 5 à 7) en dépendront.
+- **Où** : champ `affine` de `VolumeInfo`, `volume_info` dans
+  `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : `Option<T>`, soit `Some(valeur)`, soit `None`. Rust n'a pas de
+  `null` : une valeur possiblement absente est typée comme telle et le
+  compilateur impose de traiter les deux cas.
+- **Pourquoi ici** : si `sform_code == 0`, il n'y a pas de `sform` à lire ;
+  `affine` vaut alors `None`. Le `qform` n'est pas géré (il demanderait la
+  dépendance `nalgebra`) : on l'ajoutera si un volume l'exige.
+- **Où** : `VolumeInfo::affine`.
+
+**Critère 3b atteint** : affine identique à nibabel (tolérance 1e-3) sur 3
+volumes d'orientations différentes ; les 8 volumes ont un `sform`.
 
 ---
 
-*(à compléter à la prochaine étape : orientation (affine), puis `burn-import`)*
+*(à compléter à la prochaine étape : `burn-import` et inférence sur une coupe (étape 4))*

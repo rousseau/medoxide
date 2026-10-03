@@ -51,9 +51,13 @@ pub struct VolumeInfo {
     pub dim: Vec<u16>,
     /// Taille d'un voxel en mm sur les 3 premiers axes (x, y, z).
     pub spacing: [f32; 3],
+    /// Affine voxel → mm (matrice 4×4, ligne par ligne) lue dans le `sform`.
+    /// `None` si l'en-tête n'a pas de `sform` (`sform_code == 0`).
+    pub affine: Option<[[f32; 4]; 4]>,
 }
 
-/// Lit les dimensions et l'espacement d'un volume NIfTI (`.nii` ou `.nii.gz`).
+/// Lit les dimensions, l'espacement et l'affine d'un volume NIfTI
+/// (`.nii` ou `.nii.gz`).
 ///
 /// Seul l'en-tête (348 octets) est lu : les voxels ne sont pas chargés.
 ///
@@ -65,7 +69,19 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo, MaskError> {
     // pixdim[0] sert à autre chose (sens de rotation) : les tailles de voxel
     // sont dans pixdim[1..=3].
     let spacing = [header.pixdim[1], header.pixdim[2], header.pixdim[3]];
-    Ok(VolumeInfo { dim, spacing })
+    // Les 3 premières lignes de l'affine sont stockées dans srow_x/y/z ;
+    // la 4e est toujours [0, 0, 0, 1] par convention.
+    let affine = if header.sform_code != 0 {
+        Some([
+            header.srow_x,
+            header.srow_y,
+            header.srow_z,
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+    } else {
+        None
+    };
+    Ok(VolumeInfo { dim, spacing, affine })
 }
 
 /// Calcule le masque cérébral d'un volume IRM fœtal.
@@ -108,6 +124,45 @@ mod tests {
             let voulu = [pixel, pixel, epaisseur];
             for (lu, v) in info.spacing.iter().zip(voulu) {
                 assert!((lu - v).abs() < 0.005, "{nom} : espacement {lu} != {v}");
+            }
+        }
+    }
+
+    /// Affines de référence (nibabel, `img.affine`) pour 3 volumes dont les
+    /// orientations diffèrent (LPS, LIP, PIR), arrondis à 4 décimales.
+    #[test]
+    fn volume_info_affine_matches_nibabel() {
+        let attendu: [(&str, [[f32; 4]; 4]); 3] = [
+            ("fetus_03", [
+                [-1.1719, 0.0, 0.0, 155.1199],
+                [0.0, -1.0771, 0.7879, 58.3842],
+                [0.0, 0.4617, 1.8383, -254.6115],
+                [0.0, 0.0, 0.0, 1.0],
+            ]),
+            ("fetus_06", [
+                [-0.8439, -0.147, -0.8127, 141.5291],
+                [0.4083, -0.3038, -1.6797, -19.843],
+                [0.0, -0.8747, 0.7199, -69.1684],
+                [0.0, 0.0, 0.0, 1.0],
+            ]),
+            ("fetus_12", [
+                [-0.5306, -0.4462, 1.8271, 96.2711],
+                [-0.866, 0.2733, -1.1193, 46.4229],
+                [0.0, -0.8705, -1.288, -12.331],
+                [0.0, 0.0, 0.0, 1.0],
+            ]),
+        ];
+        for (nom, voulu) in attendu {
+            let chemin = format!(
+                "{}/../../data/sourcedata/{nom}.nii.gz",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let info = volume_info(Path::new(&chemin)).expect(&chemin);
+            let lu = info.affine.expect("sform attendu");
+            for (ligne_lue, ligne_voulue) in lu.iter().zip(voulu) {
+                for (a, b) in ligne_lue.iter().zip(ligne_voulue) {
+                    assert!((a - b).abs() < 1e-3, "{nom} : {lu:?} != {voulu:?}");
+                }
             }
         }
     }
