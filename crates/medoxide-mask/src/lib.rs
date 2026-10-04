@@ -185,6 +185,52 @@ pub fn resample_in_plane(volume: &Array3<f32>, spacing: [f32; 2]) -> Array3<f32>
     resample_axis(&selon_x, 1, spacing[1])
 }
 
+/// Plan de découpage d'un axe en fenêtres glissantes (règles de MONAI).
+#[derive(Debug, PartialEq)]
+struct AxisWindows {
+    /// Zéros ajoutés avant l'axe (0 si l'axe est au moins aussi long que la fenêtre).
+    pad_before: usize,
+    /// Longueur de l'axe après complétion : `max(taille, fenêtre)`.
+    padded_len: usize,
+    /// Positions de départ des fenêtres, dans l'axe complété.
+    starts: Vec<usize>,
+}
+
+/// Calcule les fenêtres d'un axe de longueur `size`, pour une fenêtre `roi` et
+/// un recouvrement `overlap` (entre 0 et 1, exclu), comme
+/// `sliding_window_inference` de MONAI :
+/// - un axe plus court que la fenêtre est complété par des zéros, de façon
+///   symétrique (la moitié arrondie à l'inférieur avant) ;
+/// - l'intervalle entre fenêtres est `roi × (1 - overlap)` tronqué, ou `roi` si
+///   l'axe complété a exactement la taille de la fenêtre ;
+/// - la dernière fenêtre est décalée vers l'arrière pour ne pas dépasser.
+fn window_plan(size: usize, roi: usize, overlap: f64) -> AxisWindows {
+    let diff = roi.saturating_sub(size);
+    let pad_before = diff / 2;
+    let padded_len = size.max(roi);
+
+    let interval = if roi == padded_len {
+        roi
+    } else {
+        ((roi as f64 * (1.0 - overlap)) as usize).max(1)
+    };
+
+    // Nombre de fenêtres : la première `d` telle que d × intervalle + roi
+    // atteint la fin de l'axe, plus un.
+    let candidates = padded_len.div_ceil(interval);
+    let count = (0..candidates)
+        .find(|d| d * interval + roi >= padded_len)
+        .map_or(1, |d| d + 1);
+
+    let starts = (0..count)
+        .map(|i| {
+            let start = i * interval;
+            start - (start + roi).saturating_sub(padded_len)
+        })
+        .collect();
+    AxisWindows { pad_before, padded_len, starts }
+}
+
 /// Calcule le masque cérébral d'un volume IRM fœtal.
 ///
 /// # Étapes prévues (à venir)
@@ -399,6 +445,28 @@ mod tests {
             );
             assert!(rel_rech < 1e-4, "fetus_{nom} : rééchantillonnage {rel_rech:.2e}");
             assert!(rel_prep < 5e-3, "fetus_{nom} : prétraitement {rel_prep:.2e}");
+        }
+    }
+
+    /// Étape 6a : fenêtres identiques à celles de MONAI. Valeurs de référence
+    /// générées avec `dense_patch_slices` (fenêtre 256, recouvrement 0,5) :
+    /// (taille, zéros avant, longueur complétée, départs).
+    #[test]
+    fn window_plan_matches_monai() {
+        let attendu: Vec<(usize, usize, usize, Vec<usize>)> = vec![
+            (100, 78, 256, vec![0]),
+            (200, 28, 256, vec![0]),
+            (240, 8, 256, vec![0]),
+            (256, 0, 256, vec![0]),
+            (257, 0, 257, vec![0, 1]),
+            (260, 0, 260, vec![0, 4]),
+            (300, 0, 300, vec![0, 44]),
+            (400, 0, 400, vec![0, 128, 144]),
+            (513, 0, 513, vec![0, 128, 256, 257]),
+        ];
+        for (taille, pad_before, padded_len, starts) in attendu {
+            let plan = window_plan(taille, 256, 0.5);
+            assert_eq!(plan, AxisWindows { pad_before, padded_len, starts }, "taille {taille}");
         }
     }
 

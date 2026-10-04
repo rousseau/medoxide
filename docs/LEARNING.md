@@ -213,6 +213,22 @@ les centres du premier et du dernier voxel (et non `N × zoom`).
    modèle (fetus_03) : 22 voxels d'argmax différents sur 2,9 millions, Dice
    moyen par coupe 0,9997. Le juge final est le Dice des étapes 6 et 7.
 
+## 2026-10-04 — Plan de fenêtres glissantes (étape 6a)
+
+- **Quoi** : l'arithmétique sur `usize` (entier non signé) : `a - b` provoque
+  une *panique* si `b > a`. `saturating_sub` s'arrête à 0 à la place, ce qui
+  reproduit le `max(..., 0)` de MONAI. On rencontre aussi `div_ceil` (division
+  arrondie au supérieur), `find` (premier élément d'un itérateur qui satisfait
+  une condition) et `map_or` (valeur par défaut si rien n'est trouvé).
+- **Pourquoi ici** : le découpage d'un axe en fenêtres de 256 avec 50 % de
+  recouvrement est un calcul d'indices ; une soustraction négative ne doit
+  jamais passer inaperçue.
+- **Où** : `window_plan` et `AxisWindows` dans `crates/medoxide-mask/src/lib.rs`.
+
+**Critère 6a atteint** : positions de départ, complétion et longueur complétée
+identiques à `dense_patch_slices` de MONAI pour 9 tailles (100, 200, 240, 256,
+257, 260, 300, 400, 513), dont les cas limites.
+
 ---
 
-*(à compléter à la prochaine étape : inférence par tuiles sur le volume prétraité (étape 6))*
+*(à compléter à la prochaine étape : inférence d'un volume (étape 6b) : fenêtres, modèle, moyenne des logits)*
