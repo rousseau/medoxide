@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use ndarray::{Array3, Ix3};
+use ndarray::{Array3, Axis, Ix3};
 
 mod model;
 
@@ -109,6 +109,35 @@ pub fn read_volume(path: &Path) -> Result<Array3<f32>, MaskError> {
     dynamique
         .into_dimensionality::<Ix3>()
         .map_err(|_| MaskError::NotVolume3D(dim))
+}
+
+/// Normalise un volume coupe par coupe, comme Fetal-BET (axe `z`, le 3e).
+///
+/// Dans chaque coupe, les voxels strictement positifs sont divisés par leur
+/// écart-type (non biaisé, `n - 1` : c'est celui de `torch.std`). **La moyenne
+/// n'est pas soustraite** : ce n'est pas un z-score. Les autres voxels (0)
+/// restent inchangés. Une coupe avec moins de 2 voxels positifs est laissée
+/// telle quelle (l'original y produirait des `NaN`).
+///
+/// Le volume est modifié en place (`&mut`) : pas de copie.
+pub fn normalize_slices(volume: &mut Array3<f32>) {
+    for mut coupe in volume.axis_iter_mut(Axis(2)) {
+        // Somme en f64 : plus précise que le f32 de la référence.
+        let positifs: Vec<f64> = coupe
+            .iter()
+            .filter(|&&v| v > 0.0)
+            .map(|&v| f64::from(v))
+            .collect();
+        let n = positifs.len();
+        if n < 2 {
+            continue;
+        }
+        let moyenne = positifs.iter().sum::<f64>() / n as f64;
+        let variance =
+            positifs.iter().map(|v| (v - moyenne).powi(2)).sum::<f64>() / (n - 1) as f64;
+        let ecart_type = variance.sqrt() as f32;
+        coupe.mapv_inplace(|v| if v > 0.0 { v / ecart_type } else { v });
+    }
 }
 
 /// Calcule le masque cérébral d'un volume IRM fœtal.
@@ -256,6 +285,30 @@ mod tests {
             // quel que soit l'ordre mémoire : c'est l'ordre du fichier de référence.
             let diff = volume.iter().zip(&attendu).filter(|(a, b)| a != b).count();
             assert_eq!(diff, 0, "fetus_{nom} : {diff} voxels différents");
+        }
+    }
+
+    /// Étape 5b : normalisation par coupe identique à Fetal-BET (sans
+    /// rééchantillonnage). Critère : écart relatif (max |Δ| / max |valeur|) < 1e-4.
+    #[test]
+    fn normalize_slices_matches_reference() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
+            let mut volume = read_volume(Path::new(&format!(
+                "{racine}/data/sourcedata/fetus_{nom}.nii.gz"
+            )))
+            .unwrap();
+            normalize_slices(&mut volume);
+            let attendu = lire_f32(&format!("{racine}/data/reference/fetus_{nom}_raw_norm.f32"));
+            assert_eq!(volume.len(), attendu.len(), "fetus_{nom} : taille");
+            let max_valeur = attendu.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            let max_ecart = volume
+                .iter()
+                .zip(&attendu)
+                .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+            let relatif = max_ecart / max_valeur;
+            println!("fetus_{nom} : écart relatif {relatif:.2e}");
+            assert!(relatif < 1e-4, "fetus_{nom} : écart relatif {relatif:.2e}");
         }
     }
 

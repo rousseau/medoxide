@@ -45,7 +45,9 @@ vol = np.asarray(vol[0], dtype=np.float32)  # [X, Y, Z] à 1 mm dans le plan
 z = int(nib.load(masque_ref).get_fdata().sum(axis=(0, 1)).argmax())
 sl = vol[:, :, z].copy()
 m = sl > 0
-sl[m] = sl[m] / sl[m].std()  # ÷ écart-type, voxels > 0, SANS retirer la moyenne
+# ÷ écart-type, voxels > 0, SANS retirer la moyenne. ddof=1 : l'original utilise
+# torch.std (non biaisée), pas numpy.std (ddof=0 par défaut).
+sl[m] = sl[m] / sl[m].std(ddof=1)
 x = sl[None, None, :256, :256].astype("<f4")
 
 sess = ort.InferenceSession("models/attunet.onnx", providers=["CPUExecutionProvider"])

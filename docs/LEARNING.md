@@ -154,6 +154,30 @@ z-score), et le rééchantillonnage à 1 mm est indispensable : sur une coupe à
 les 8 volumes (données `uint16`, facteur d'échelle `NaN` = pas de mise à
 l'échelle, géré correctement par `nifti`).
 
+## 2026-10-04 — Normalisation par coupe (étape 5b)
+
+- **Quoi** : `&mut`, l'emprunt mutable. `normalize_slices(volume: &mut
+  Array3<f32>)` ne prend pas possession du volume : elle le modifie en place
+  le temps de l'appel, puis l'appelant le retrouve modifié. Pas de copie de
+  13 Mo, et le compilateur interdit toute autre lecture ou écriture simultanée.
+- **Pourquoi ici** : le prétraitement enchaîne plusieurs étapes sur un gros
+  tableau ; on évite de le recopier à chaque étape.
+- **Où** : `normalize_slices` dans `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : parcourir des coupes avec `axis_iter_mut(Axis(2))` (une vue 2D
+  mutable par coupe, sans copie), calculer avec des itérateurs (`filter`,
+  `map`, `sum`) et modifier avec `mapv_inplace` et une *fermeture*
+  (`|v| ...`, une fonction anonyme).
+- **Pourquoi ici** : la normalisation s'applique séparément à chaque coupe `z`.
+- **Où** : même fonction.
+
+Détail de numérique : l'écart-type de la référence est celui de `torch.std`
+(`n - 1`), pas celui de `numpy.std` (`n`, par défaut). La différence est de
+8e-6 en relatif. On somme en `f64` puis on divise en `f32`.
+
+**Critère 5b atteint** : écart relatif 0 (identique bit à bit) à la référence
+MONAI sur les 8 volumes, sans rééchantillonnage (seuil visé : 1e-4).
+
 ---
 
-*(à compléter à la prochaine étape : normalisation par coupe (5b) puis rééchantillonnage à 1 mm (5c))*
+*(à compléter à la prochaine étape : rééchantillonnage à 1 mm (5c))*
