@@ -15,3 +15,6 @@ docs/ROADMAP.md
 
 # Poids et modèles (gros fichiers : Garage, pas Git)
 /models/
+
+# Données locales (rapatriées depuis Garage)
+/data/

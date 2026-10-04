@@ -11,7 +11,8 @@ Entrée  : models/AttUNet.pth
 Sortie  : models/attunet.onnx
 Sans dossier : coupes gaussiennes seulement. Avec un dossier : on ajoute de
 vraies coupes (volumes 256×256 dans le plan, z-score par coupe sur les
-voxels > 0, sans rééchantillonnage : test numérique, pas du prétraitement).
+voxels > 0, sans rééchantillonnage : test purement numérique, qui n'imite PAS le
+prétraitement officiel ; voir make_reference_slice.py).
 """
 
 import sys
