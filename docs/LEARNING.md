@@ -229,6 +229,30 @@ les centres du premier et du dernier voxel (et non `N × zoom`).
 identiques à `dense_patch_slices` de MONAI pour 9 tailles (100, 200, 240, 256,
 257, 260, 300, 400, 513), dont les cas limites.
 
+## 2026-10-04 — Inférence par tuiles (étape 6b)
+
+- **Quoi** : les sous-fenêtres de `ndarray`. `a.slice(s![sx..sx + 256, sy..sy + 256, z])`
+  est une *vue* (sans copie) sur une fenêtre ; `slice_mut` en donne une
+  modifiable, et `cible += &tuile` additionne terme à terme dans la sortie.
+  `a.zip_mut_with(&b, |x, &y| ...)` applique une fermeture sur les couples
+  d'éléments (ici : diviser par le nombre de fenêtres de chaque voxel) ;
+  `Zip::from(&a).and(&b).map_collect(...)` fait de même en produisant un
+  nouveau tableau (argmax).
+- **Pourquoi ici** : SliceInferer additionne les logits de chaque tuile à la
+  bonne place d'un tableau de sortie, puis moyenne, puis rogne la complétion.
+- **Où** : `infer_logits`, `argmax_mask` dans `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : `#[ignore]`, qui exclut un test de `cargo test` sauf avec
+  `-- --ignored`. On sépare un test rapide (fetus_06) d'un test complet.
+- **Pourquoi ici** : le test complet dure 27 min (176 passages par volume).
+- **Où** : `tiled_inference_matches_monai_fast` / `_all`.
+
+**Critère 6b atteint** : entrée MONAI : Dice 1,00000 sur les 8 volumes, écart
+relatif des logits de fetus_03 : 3,0e-6 (seuil 1e-4). Entrée prétraitée en
+Rust : Dice entre 0,99988 et 1,00000 contre le masque MONAI à 1 mm (seuil
+0,99). Mesure de durée : 0,57 s par tuile (GPU, build debug), soit ~100 s par
+volume de 260 ou 300 ; à reprendre à l'étape 8.
+
 ---
 
-*(à compléter à la prochaine étape : inférence d'un volume (étape 6b) : fenêtres, modèle, moyenne des logits)*
+*(à compléter à la prochaine étape : ré-échantillonnage inverse et écriture du masque (étape 7))*

@@ -8,7 +8,8 @@
 
 use std::path::Path;
 
-use ndarray::{Array3, Axis, Ix3};
+use burn::tensor::{Device, Tensor, TensorData};
+use ndarray::{s, Array2, Array3, Array4, Axis, Ix3};
 
 mod model;
 
@@ -229,6 +230,87 @@ fn window_plan(size: usize, roi: usize, overlap: f64) -> AxisWindows {
         })
         .collect();
     AxisWindows { pad_before, padded_len, starts }
+}
+
+/// Côté des fenêtres d'inférence (celui du modèle Fetal-BET).
+const ROI: usize = 256;
+/// Recouvrement entre fenêtres voisines.
+const OVERLAP: f64 = 0.5;
+
+/// Passe un volume prétraité `[x, y, z]` dans le modèle, coupe par coupe, par
+/// fenêtres de 256×256 avec 50 % de recouvrement, et renvoie les logits moyens
+/// `[2, x, y, z]` (canal 0 : fond, canal 1 : cerveau). Reproduit
+/// `SliceInferer` de MONAI : sur les zones de recouvrement, les logits des
+/// fenêtres sont moyennés ; un axe plus court que 256 est complété par des zéros
+/// puis rogné.
+fn infer_logits(model: &model::Model, device: &Device, volume: &Array3<f32>) -> Array4<f32> {
+    let (nx, ny, nz) = volume.dim();
+    let plan_x = window_plan(nx, ROI, OVERLAP);
+    let plan_y = window_plan(ny, ROI, OVERLAP);
+    let (px, py) = (plan_x.padded_len, plan_y.padded_len);
+
+    // Volume complété par des zéros, avec le volume d'origine à l'intérieur.
+    let mut complete = Array3::<f32>::zeros((px, py, nz));
+    complete
+        .slice_mut(s![
+            plan_x.pad_before..plan_x.pad_before + nx,
+            plan_y.pad_before..plan_y.pad_before + ny,
+            ..
+        ])
+        .assign(volume);
+
+    let mut somme = Array4::<f32>::zeros((2, px, py, nz));
+    // Nombre de fenêtres qui couvrent chaque voxel (identique pour toutes les coupes).
+    let mut compte = Array2::<f32>::zeros((px, py));
+    for &sx in &plan_x.starts {
+        for &sy in &plan_y.starts {
+            compte.slice_mut(s![sx..sx + ROI, sy..sy + ROI]).mapv_inplace(|c| c + 1.0);
+        }
+    }
+
+    for z in 0..nz {
+        for &sx in &plan_x.starts {
+            for &sy in &plan_y.starts {
+                let tuile: Vec<f32> = complete
+                    .slice(s![sx..sx + ROI, sy..sy + ROI, z])
+                    .iter()
+                    .copied()
+                    .collect();
+                let x = Tensor::<4>::from_data(TensorData::new(tuile, [1, 1, ROI, ROI]), device);
+                let logits = model.forward(x).into_data().try_to_vec::<f32>().unwrap();
+                let logits = Array3::from_shape_vec((2, ROI, ROI), logits).unwrap();
+                let mut cible = somme.slice_mut(s![.., sx..sx + ROI, sy..sy + ROI, z]);
+                cible += &logits;
+            }
+        }
+    }
+
+    // Moyenne : division par le nombre de fenêtres de chaque voxel.
+    for mut canal in somme.axis_iter_mut(Axis(0)) {
+        for mut coupe in canal.axis_iter_mut(Axis(2)) {
+            coupe.zip_mut_with(&compte, |a, &c| *a /= c);
+        }
+    }
+
+    // Retire la complétion.
+    somme
+        .slice(s![
+            ..,
+            plan_x.pad_before..plan_x.pad_before + nx,
+            plan_y.pad_before..plan_y.pad_before + ny,
+            ..
+        ])
+        .to_owned()
+}
+
+/// Masque binaire (0 fond, 1 cerveau) : la classe de plus grand logit.
+/// En cas d'égalité exacte, le fond l'emporte (comme `argmax` de torch ici).
+fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
+    let fond = logits.index_axis(Axis(0), 0);
+    let cerveau = logits.index_axis(Axis(0), 1);
+    ndarray::Zip::from(&fond)
+        .and(&cerveau)
+        .map_collect(|&f, &c| u8::from(c > f))
 }
 
 /// Calcule le masque cérébral d'un volume IRM fœtal.
@@ -467,6 +549,86 @@ mod tests {
         for (taille, pad_before, padded_len, starts) in attendu {
             let plan = window_plan(taille, 256, 0.5);
             assert_eq!(plan, AxisWindows { pad_before, padded_len, starts }, "taille {taille}");
+        }
+    }
+
+    /// Coefficient de Dice entre deux masques binaires (octets 0/1, même ordre).
+    fn dice(a: &Array3<u8>, b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let inter = a.iter().zip(b).filter(|(&x, &y)| x == 1 && y == 1).count();
+        let (na, nb) = (a.iter().filter(|&&x| x == 1).count(), b.iter().filter(|&&y| y == 1).count());
+        2.0 * inter as f64 / (na + nb) as f64
+    }
+
+    /// Vérifie l'inférence par tuiles sur un volume, contre `SliceInferer` de MONAI
+    /// sur la grille à 1 mm. Références : `python scripts/make_reference_masks.py`.
+    /// (1) Entrée MONAI (`_prep.f32`) : Dice >= 0,999 (et logits de fetus_03 à
+    ///     < 1e-4 en relatif) : isole le découpage en tuiles.
+    /// (2) Entrée issue du prétraitement Rust (5a à 5c) : Dice >= 0,99.
+    fn verifier_inference(nom: &str, modele: &model::Model, device: &Device) {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let chemin = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
+        let info = volume_info(Path::new(&chemin)).unwrap();
+        let masque_monai =
+            std::fs::read(format!("{racine}/data/reference/fetus_{nom}_mask1mm.u8")).unwrap();
+
+        // Prétraitement Rust ; sa grille donne aussi la forme du volume à 1 mm.
+        let mut prep = resample_in_plane(
+            &read_volume(Path::new(&chemin)).unwrap(),
+            [info.spacing[0], info.spacing[1]],
+        );
+        normalize_slices(&mut prep);
+        let forme = prep.dim();
+
+        // (1) Entrée MONAI.
+        let prep_monai = Array3::from_shape_vec(
+            forme,
+            lire_f32(&format!("{racine}/data/reference/fetus_{nom}_prep.f32")),
+        )
+        .unwrap();
+        let logits = infer_logits(modele, device, &prep_monai);
+        let dice_monai = dice(&argmax_mask(&logits), &masque_monai);
+        let mut message = format!("fetus_{nom} {forme:?} : Dice (entrée MONAI) {dice_monai:.5}");
+        if nom == "03" {
+            let attendu = lire_f32(&format!("{racine}/data/reference/fetus_03_logits1mm.f32"));
+            let max_logit = attendu.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            let max_ecart = logits
+                .iter()
+                .zip(&attendu)
+                .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+            let relatif = max_ecart / max_logit;
+            message += &format!(" ; logits : écart relatif {relatif:.2e}");
+            assert!(relatif < 1e-4, "fetus_03 : logits {relatif:.2e}");
+        }
+        assert!(dice_monai >= 0.999, "fetus_{nom} : Dice (entrée MONAI) {dice_monai:.5}");
+
+        // (2) Entrée issue du prétraitement Rust.
+        let dice_rust = dice(&argmax_mask(&infer_logits(modele, device, &prep)), &masque_monai);
+        println!("{message} ; Dice (prétraitement Rust) {dice_rust:.5}");
+        assert!(dice_rust >= 0.99, "fetus_{nom} : Dice (prétraitement Rust) {dice_rust:.5}");
+    }
+
+    /// Étape 6b, version rapide (~1 min) : fetus_06, dont l'axe 240 est complété
+    /// à 256 (une seule fenêtre par coupe).
+    #[test]
+    fn tiled_inference_matches_monai_fast() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let device = Device::default();
+        let modele = model::Model::from_file(format!("{racine}/models/attunet.bpk"), &device);
+        verifier_inference("06", &modele, &device);
+    }
+
+    /// Étape 6b, version complète : les 8 volumes (~27 min, car 176 passages par
+    /// volume pour les tailles 260 et 300). Lancer avec :
+    /// `cargo test -p medoxide-mask -- --ignored --nocapture tiled_inference`
+    #[test]
+    #[ignore = "27 min : voir la doc du test"]
+    fn tiled_inference_matches_monai_all() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let device = Device::default();
+        let modele = model::Model::from_file(format!("{racine}/models/attunet.bpk"), &device);
+        for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
+            verifier_inference(nom, &modele, &device);
         }
     }
 
