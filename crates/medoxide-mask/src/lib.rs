@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+use ndarray::{Array3, Ix3};
+
 mod model;
 
 /// Erreurs possibles lors de la segmentation.
@@ -22,6 +24,8 @@ pub enum MaskError {
     /// Échec de lecture d'un fichier NIfTI (fichier absent, format invalide...).
     /// La variante *contient* l'erreur d'origine de la crate `nifti`.
     Nifti(nifti::NiftiError),
+    /// Le fichier n'est pas un volume à 3 axes ; contient ses dimensions.
+    NotVolume3D(Vec<usize>),
 }
 
 /// Permet à l'opérateur `?` de convertir automatiquement une erreur de la
@@ -40,6 +44,7 @@ impl std::fmt::Display for MaskError {
                 write!(f, "inférence pas encore branchée (prochaine étape)")
             }
             MaskError::Nifti(e) => write!(f, "lecture NIfTI : {e}"),
+            MaskError::NotVolume3D(dim) => write!(f, "volume 3D attendu, dimensions : {dim:?}"),
         }
     }
 }
@@ -84,6 +89,26 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo, MaskError> {
         None
     };
     Ok(VolumeInfo { dim, spacing, affine })
+}
+
+/// Lit les voxels d'un volume NIfTI (`.nii` ou `.nii.gz`) en `f32`, axes `[x, y, z]`.
+///
+/// Le facteur d'échelle de l'en-tête (`scl_slope`, `scl_inter`) est appliqué.
+///
+/// # Erreurs
+/// `MaskError::Nifti` si le fichier est illisible ou invalide ;
+/// `MaskError::NotVolume3D` s'il n'a pas exactement 3 axes.
+pub fn read_volume(path: &Path) -> Result<Array3<f32>, MaskError> {
+    use nifti::{IntoNdArray, NiftiObject, ReaderOptions};
+
+    let objet = ReaderOptions::new().read_file(path)?;
+    // Tableau à nombre d'axes dynamique, dans l'ordre mémoire du fichier (Fortran).
+    let dynamique = objet.into_volume().into_ndarray::<f32>()?;
+    let dim = dynamique.shape().to_vec();
+    // `map_err` transforme l'erreur de ndarray en la nôtre, avec les dimensions.
+    dynamique
+        .into_dimensionality::<Ix3>()
+        .map_err(|_| MaskError::NotVolume3D(dim))
 }
 
 /// Calcule le masque cérébral d'un volume IRM fœtal.
@@ -213,6 +238,25 @@ mod tests {
         assert!(masque > 0, "tuile de référence sans masque");
         assert!(relatif < 1e-4, "écart relatif {relatif:.2e} >= 1e-4");
         assert_eq!(accord, n, "argmax différent sur {} voxels", n - accord);
+    }
+
+    /// Étape 5a : voxels identiques (bit à bit) à `nibabel.get_fdata()`.
+    /// Références produites par `python scripts/make_reference_volumes.py`.
+    #[test]
+    fn read_volume_matches_nibabel() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
+            let volume = read_volume(Path::new(&format!(
+                "{racine}/data/sourcedata/fetus_{nom}.nii.gz"
+            )))
+            .unwrap();
+            let attendu = lire_f32(&format!("{racine}/data/reference/fetus_{nom}_raw.f32"));
+            assert_eq!(volume.len(), attendu.len(), "fetus_{nom} : taille");
+            // `iter()` parcourt dans l'ordre logique [x, y, z] (z varie le plus vite),
+            // quel que soit l'ordre mémoire : c'est l'ordre du fichier de référence.
+            let diff = volume.iter().zip(&attendu).filter(|(a, b)| a != b).count();
+            assert_eq!(diff, 0, "fetus_{nom} : {diff} voxels différents");
+        }
     }
 
     #[test]

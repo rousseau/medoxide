@@ -3806,6 +3806,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "burn-store",
+ "ndarray 0.17.2",
  "nifti",
 ]
 

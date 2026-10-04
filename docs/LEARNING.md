@@ -130,6 +130,30 @@ par l'écart-type des voxels > 0 *sans soustraire la moyenne* (ce n'est pas un
 z-score), et le rééchantillonnage à 1 mm est indispensable : sur une coupe à
 1,17 mm non rééchantillonnée, le modèle ne détecte aucun voxel de masque.
 
+## 2026-10-04 — Lire les voxels d'un NIfTI (étape 5a)
+
+- **Quoi** : `Array3<f32>` (crate `ndarray`), tableau à 3 axes dont le nombre
+  d'axes est vérifié à la compilation. Indexation `a[[x, y, z]]`, `a.dim()`
+  pour les dimensions, `a.iter()` pour parcourir toutes les valeurs dans
+  l'ordre logique `[x, y, z]`. La crate `nifti` renvoie un tableau à nombre
+  d'axes *dynamique* ; `into_dimensionality::<Ix3>()` le convertit, et peut
+  échouer (d'où `MaskError::NotVolume3D`, via `map_err` qui transforme une
+  erreur en une autre).
+- **Pourquoi ici** : les étapes suivantes (normalisation, rééchantillonnage,
+  tuiles) travaillent sur le volume en mémoire.
+- **Où** : `read_volume` dans `crates/medoxide-mask/src/lib.rs` ; dépendance
+  `ndarray = "0.17"` (même version que `nifti`, un seul `ndarray` compilé).
+
+- **Quoi** : l'*ordre mémoire* d'un tableau. NIfTI stocke colonne par colonne
+  (Fortran), le C ligne par ligne. L'indexation et `iter()` donnent le même
+  résultat logique dans les deux cas ; seule la performance change.
+- **Pourquoi ici** : pour savoir pourquoi la comparaison au fichier de
+  référence (écrit en ordre C par numpy) n'a pas besoin de réordonner.
+
+**Critère 5a atteint** : voxels identiques bit à bit à `nibabel.get_fdata()` sur
+les 8 volumes (données `uint16`, facteur d'échelle `NaN` = pas de mise à
+l'échelle, géré correctement par `nifti`).
+
 ---
 
-*(à compléter à la prochaine étape : prétraitement en Rust : rééchantillonnage à 1 mm et normalisation (étape 5))*
+*(à compléter à la prochaine étape : normalisation par coupe (5b) puis rééchantillonnage à 1 mm (5c))*
