@@ -6,7 +6,7 @@ SliceInferer de Fetal-BET (tuiles 256×256, recouvrement 0,5, logits moyennés)
 avec models/AttUNet.pth, et écrit, sur la grille à 1 mm :
   data/reference/<nom>_mask1mm.u8       masque (argmax des logits), octets 0/1,
                                         ordre C sur [X, Y, Z]
-  data/reference/fetus_03_logits1mm.f32 logits [2, X, Y, Z] (fetus_03 seulement)
+  data/reference/<nom>_logits1mm.f32    logits [2, X, Y, Z], float32, ordre C
 
 Usage : python scripts/make_reference_masks.py
 """
@@ -46,6 +46,5 @@ for f in sorted(glob.glob("data/sourcedata/*.nii.gz")):
         logits = inferer(x, model)  # [1, 2, X, Y, Z]
     masque = logits.argmax(1)[0].numpy().astype(np.uint8)
     np.ascontiguousarray(masque).tofile(f"data/reference/{nom}_mask1mm.u8")
-    if nom == "fetus_03":
-        np.ascontiguousarray(logits[0].numpy(), dtype="<f4").tofile("data/reference/fetus_03_logits1mm.f32")
+    np.ascontiguousarray(logits[0].numpy(), dtype="<f4").tofile(f"data/reference/{nom}_logits1mm.f32")
     print(nom, tuple(forme), "voxels masque", int(masque.sum()))

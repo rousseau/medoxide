@@ -253,6 +253,39 @@ Rust : Dice entre 0,99988 et 1,00000 contre le masque MONAI à 1 mm (seuil
 0,99). Mesure de durée : 0,57 s par tuile (GPU, build debug), soit ~100 s par
 volume de 260 ou 300 ; à reprendre à l'étape 8.
 
+## 2026-10-04 — Retour à la grille d'origine et écriture (étape 7)
+
+- **Quoi** : une *fermeture* qui capture son environnement. Dans
+  `logits_to_mask`, `let canal = |c: usize| { ... logits ... spacing ... }` est
+  une fonction anonyme qui utilise les variables définies autour d'elle, sans
+  qu'on les lui passe ; on s'en sert pour traiter les deux canaux de logits
+  avec le même code.
+- **Pourquoi ici** : le rééchantillonnage inverse s'applique à chaque canal.
+- **Où** : `logits_to_mask` dans `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : généraliser une fonction existante. `resample_axis` prend
+  maintenant la longueur de sortie et le pas en paramètres : le rééchantillonnage
+  à 1 mm (pas `1 / zoom`) et son inverse (pas `zoom`) partagent le même code.
+- **Où** : `resample_axis`.
+
+- **Quoi** : écrire un NIfTI avec un en-tête de référence
+  (`WriterOptions::new(chemin).reference_file(&entrée).write_nifti(&tableau)`).
+  L'affine, l'espacement et l'orientation sont copiés de l'entrée ; seuls les
+  dimensions, le type (`uint8`) et le facteur d'échelle changent. `.nii.gz`
+  active la compression.
+- **Où** : `write_mask`.
+
+Règle d'inversion de MONAI (`Invertd`) : on rééchantillonne les **logits** (pas
+le masque) vers la grille d'origine, l'entrée `i` lisant la position
+`i × zoom`, puis on prend l'argmax. Interpoler le masque puis seuiller à 0,5 donne
+un résultat différent (Dice 0,991 sur fetus_03).
+
+**Critère 7 atteint** :
+- 7a : 0 voxel de différence avec les masques officiels sur les 8 volumes.
+- 7b : dimensions, espacement et affine identiques à l'entrée, masque relu à
+  l'identique ; fichier relu aussi par nibabel (uint8, affine égale, `sform_code`
+  conservé, voxels identiques aux masques officiels).
+
 ---
 
-*(à compléter à la prochaine étape : ré-échantillonnage inverse et écriture du masque (étape 7))*
+*(à compléter à la prochaine étape : `segment` et la commande `medx mask` de bout en bout (étape 8))*

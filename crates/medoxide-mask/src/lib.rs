@@ -148,19 +148,18 @@ fn resampled_len(n: usize, spacing: f32) -> usize {
     (((n - 1) as f64) * f64::from(spacing) + 1.0).round() as usize
 }
 
-/// Rééchantillonne un axe à 1 mm par interpolation linéaire.
-///
-/// Le voxel de sortie `j` lit l'entrée à la position `j / spacing` (le centre
-/// du premier voxel reste au même point). Un voisin hors du volume compte pour 0.
-fn resample_axis(volume: &Array3<f32>, axis: usize, spacing: f32) -> Array3<f32> {
+/// Rééchantillonne un axe par interpolation linéaire : le voxel de sortie `j`
+/// lit l'entrée à la position `j × pas` (le centre du premier voxel reste au même
+/// point), et un voisin hors du volume compte pour 0. La sortie a `n_sortie`
+/// voxels sur cet axe.
+fn resample_axis(volume: &Array3<f32>, axis: usize, n_sortie: usize, pas: f64) -> Array3<f32> {
     let n = volume.len_of(Axis(axis));
-    let n_sortie = resampled_len(n, spacing);
     let mut dim = volume.raw_dim();
     dim[axis] = n_sortie;
     let mut sortie = Array3::<f32>::zeros(dim);
 
     for j in 0..n_sortie {
-        let position = j as f64 / f64::from(spacing);
+        let position = j as f64 * pas;
         let i0 = position.floor();
         let w = (position - i0) as f32; // poids du voisin de droite
         let i0 = i0 as usize;
@@ -182,8 +181,49 @@ fn resample_axis(volume: &Array3<f32>, axis: usize, spacing: f32) -> Array3<f32>
 /// `spacing` : taille de voxel en mm sur x et y (voir [`VolumeInfo::spacing`]).
 /// Les tailles doivent être strictement positives.
 pub fn resample_in_plane(volume: &Array3<f32>, spacing: [f32; 2]) -> Array3<f32> {
-    let selon_x = resample_axis(volume, 0, spacing[0]);
-    resample_axis(&selon_x, 1, spacing[1])
+    let (nx, ny, _) = volume.dim();
+    let selon_x = resample_axis(volume, 0, resampled_len(nx, spacing[0]), 1.0 / f64::from(spacing[0]));
+    resample_axis(&selon_x, 1, resampled_len(ny, spacing[1]), 1.0 / f64::from(spacing[1]))
+}
+
+/// Écrit un masque (octets 0/1) dans un NIfTI (`.nii` ou `.nii.gz`).
+///
+/// L'en-tête est copié depuis `reference` (le volume dont le masque est issu) :
+/// le masque garde donc le même affine et les mêmes espacements. Seuls les
+/// dimensions et le type de donnée (`uint8`) changent. La compression gzip est
+/// activée si `path` se termine par `.gz`.
+///
+/// # Erreurs
+/// `MaskError::Nifti` si `reference` est illisible ou si l'écriture échoue.
+pub fn write_mask(path: &Path, mask: &Array3<u8>, reference: &Path) -> Result<(), MaskError> {
+    nifti::writer::WriterOptions::new(path)
+        .reference_file(&reference)
+        .write_nifti(mask)?;
+    Ok(())
+}
+
+/// Ramène des logits `[2, x, y, z]` (grille à 1 mm) sur la grille d'origine, puis
+/// en déduit le masque (0 fond, 1 cerveau). C'est l'inverse du rééchantillonnage
+/// à 1 mm : le voxel `i` de la grille d'origine lit la position `i × spacing`.
+///
+/// L'interpolation porte sur les **logits**, avant l'argmax, comme `Invertd` de
+/// MONAI (interpoler le masque puis seuiller donne un résultat différent : Dice
+/// 0,991 sur fetus_03). Le softmax du script officiel ne change pas l'argmax.
+///
+/// `spacing` : taille de voxel d'origine sur x et y (mm) ; `original` : nombre
+/// de voxels d'origine sur x et y.
+fn logits_to_mask(logits: &Array4<f32>, spacing: [f32; 2], original: (usize, usize)) -> Array3<u8> {
+    // Fermeture : elle capture `logits`, `spacing` et `original`.
+    let canal = |c: usize| {
+        let v = logits.index_axis(Axis(0), c).to_owned();
+        let selon_x = resample_axis(&v, 0, original.0, f64::from(spacing[0]));
+        resample_axis(&selon_x, 1, original.1, f64::from(spacing[1]))
+    };
+    let fond = canal(0);
+    let cerveau = canal(1);
+    ndarray::Zip::from(&fond)
+        .and(&cerveau)
+        .map_collect(|&f, &c| u8::from(c > f))
 }
 
 /// Plan de découpage d'un axe en fenêtres glissantes (règles de MONAI).
@@ -629,6 +669,71 @@ mod tests {
         let modele = model::Model::from_file(format!("{racine}/models/attunet.bpk"), &device);
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
             verifier_inference(nom, &modele, &device);
+        }
+    }
+
+    /// Étape 7a : logits à 1 mm (MONAI) ramenés sur la grille d'origine puis argmax,
+    /// comparés au masque final de Fetal-BET (étape 2), sur les 8 volumes.
+    /// Critère : Dice >= 0,9999.
+    #[test]
+    fn logits_to_mask_matches_fetal_bet() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
+            let chemin = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
+            let info = volume_info(Path::new(&chemin)).unwrap();
+            let (nx, ny, nz) = (info.dim[0] as usize, info.dim[1] as usize, info.dim[2] as usize);
+            let spacing = [info.spacing[0], info.spacing[1]];
+            let forme = (resampled_len(nx, spacing[0]), resampled_len(ny, spacing[1]), nz);
+
+            let logits = Array4::from_shape_vec(
+                (2, forme.0, forme.1, forme.2),
+                lire_f32(&format!("{racine}/data/reference/fetus_{nom}_logits1mm.f32")),
+            )
+            .unwrap();
+            let masque = logits_to_mask(&logits, spacing, (nx, ny));
+
+            let officiel = read_volume(Path::new(&format!(
+                "{racine}/data/derivatives/fetal-bet/fetus_{nom}_predicted_mask.nii.gz"
+            )))
+            .unwrap();
+            assert_eq!(masque.dim(), officiel.dim(), "fetus_{nom} : dimensions");
+            let officiel: Vec<u8> = officiel.iter().map(|&v| v as u8).collect();
+            let diff = masque.iter().zip(&officiel).filter(|(a, b)| a != b).count();
+            let d = dice(&masque, &officiel);
+            println!("fetus_{nom} : Dice {d:.6} ; voxels différents {diff}/{}", officiel.len());
+            assert!(d >= 0.9999, "fetus_{nom} : Dice {d:.6}");
+        }
+    }
+
+    /// Étape 7b : un masque écrit avec l'en-tête du volume d'entrée garde ses
+    /// dimensions et son affine, et se relit à l'identique.
+    #[test]
+    fn write_mask_roundtrip_keeps_header() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        for nom in ["03", "06", "12"] {
+            let entree = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
+            let masque: Array3<u8> = read_volume(Path::new(&format!(
+                "{racine}/data/derivatives/fetal-bet/fetus_{nom}_predicted_mask.nii.gz"
+            )))
+            .unwrap()
+            .mapv(|v| v as u8);
+
+            let sortie = std::env::temp_dir()
+                .join(format!("medoxide_test_{}_{nom}.nii.gz", std::process::id()));
+            write_mask(&sortie, &masque, Path::new(&entree)).unwrap();
+
+            let (info_in, info_out) = (
+                volume_info(Path::new(&entree)).unwrap(),
+                volume_info(&sortie).unwrap(),
+            );
+            let relu = read_volume(&sortie).unwrap();
+            std::fs::remove_file(&sortie).unwrap();
+
+            assert_eq!(info_out.dim, info_in.dim, "fetus_{nom} : dimensions");
+            assert_eq!(info_out.spacing, info_in.spacing, "fetus_{nom} : espacement");
+            assert_eq!(info_out.affine, info_in.affine, "fetus_{nom} : affine");
+            assert!(info_out.affine.is_some(), "fetus_{nom} : sform attendu");
+            assert_eq!(relu.mapv(|v| v as u8), masque, "fetus_{nom} : voxels relus");
         }
     }
 
