@@ -104,6 +104,32 @@ volumes d'orientations différentes ; les 8 volumes ont un `sform`.
 
 Burn n'a pas de version stable (`0.22.0-pre.4`) : on l'épingle exactement.
 
+## 2026-10-04 — Première inférence en Rust (étape 4b)
+
+- **Quoi** : lire des octets bruts en nombres. `std::fs::read` donne un
+  `Vec<u8>` ; `chunks_exact(4)` le découpe par paquets de 4 octets ;
+  `f32::from_le_bytes` convertit chaque paquet (little-endian) en `f32`.
+- **Pourquoi ici** : les références Python (entrée et logits d'une tuile) sont
+  des `f32` bruts : pas besoin d'une crate pour lire du `.npy`.
+- **Où** : `lire_f32` dans les tests de `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : fabriquer un `Tensor` depuis un `Vec<f32>` :
+  `TensorData::new(vec, [1, 1, 256, 256])` joint les valeurs à une forme, puis
+  `Tensor::from_data(data, &device)` les copie sur le périphérique (GPU). À la
+  sortie, `into_data().try_to_vec::<f32>()` les ramène vers le CPU.
+- **Pourquoi ici** : pour passer une tuile réelle à `Model::forward` et
+  comparer les logits à ceux d'onnxruntime.
+- **Où** : test `inference_matches_onnxruntime`.
+
+**Critère 4 atteint** sur la tuile de `fetus_03` (coupe 24, 4 821 voxels de
+masque) : écart relatif des logits 2,3e-6 (seuil 1e-4), argmax identique sur
+les 65 536 voxels, backend wgpu.
+
+**Leçon sur le prétraitement officiel** : la normalisation de Fetal-BET divise
+par l'écart-type des voxels > 0 *sans soustraire la moyenne* (ce n'est pas un
+z-score), et le rééchantillonnage à 1 mm est indispensable : sur une coupe à
+1,17 mm non rééchantillonnée, le modèle ne détecte aucun voxel de masque.
+
 ---
 
-*(à compléter à la prochaine étape : inférence sur une coupe et comparaison à onnxruntime (étape 4b))*
+*(à compléter à la prochaine étape : prétraitement en Rust : rééchantillonnage à 1 mm et normalisation (étape 5))*

@@ -169,6 +169,52 @@ mod tests {
         }
     }
 
+    /// Lit un fichier de `f32` bruts en little-endian (4 octets par valeur).
+    fn lire_f32(chemin: &str) -> Vec<f32> {
+        let octets = std::fs::read(chemin).expect(chemin);
+        octets
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// Étape 4b : les logits Burn (wgpu) doivent égaler ceux d'onnxruntime.
+    /// Références produites par `python scripts/make_reference_slice.py`.
+    /// Critère : écart relatif (max |Δ| / max |logit|) < 1e-4, argmax identique.
+    #[test]
+    fn inference_matches_onnxruntime() {
+        use burn::tensor::{Device, Tensor, TensorData};
+
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let entree = lire_f32(&format!("{racine}/data/reference/slice_input.f32"));
+        let attendu = lire_f32(&format!("{racine}/data/reference/slice_logits.f32"));
+
+        let device = Device::default();
+        println!("périphérique : {device:?}");
+        let modele = model::Model::from_file(format!("{racine}/models/attunet.bpk"), &device);
+        let x = Tensor::<4>::from_data(TensorData::new(entree, [1, 1, 256, 256]), &device);
+        let lu = modele.forward(x).into_data().try_to_vec::<f32>().unwrap();
+
+        assert_eq!(lu.len(), attendu.len());
+        let max_logit = attendu.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        let max_ecart = lu
+            .iter()
+            .zip(&attendu)
+            .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+        let relatif = max_ecart / max_logit;
+
+        // Sortie [1, 2, 256, 256] : canal 0 = fond, canal 1 = cerveau.
+        let n = 256 * 256;
+        let classe = |v: &[f32], i: usize| usize::from(v[n + i] > v[i]);
+        let accord = (0..n).filter(|&i| classe(&lu, i) == classe(&attendu, i)).count();
+        let masque = (0..n).filter(|&i| classe(&attendu, i) == 1).count();
+        println!("écart relatif {relatif:.2e} ; argmax identique {accord}/{n} ; voxels masque {masque}");
+
+        assert!(masque > 0, "tuile de référence sans masque");
+        assert!(relatif < 1e-4, "écart relatif {relatif:.2e} >= 1e-4");
+        assert_eq!(accord, n, "argmax différent sur {} voxels", n - accord);
+    }
+
     #[test]
     fn volume_info_fails_on_missing_file() {
         let r = volume_info(Path::new("n_existe_pas.nii.gz"));
