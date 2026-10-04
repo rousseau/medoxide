@@ -5,8 +5,10 @@ ordre C sur les axes [X, Y, Z] (donc lisible tel quel avec `Array3::iter()`) :
   data/reference/<nom>_raw.f32       voxels lus par nibabel (get_fdata, float32)
   data/reference/<nom>_raw_norm.f32  idem, puis normalisation par coupe de
                                      Fetal-BET (sans rééchantillonnage)
-
-(La sortie rééchantillonnée sera ajoutée à l'étape 5c.)
+  data/reference/<nom>_resampled.f32 sortie de Spacingd(pixdim=(1,1,-1), bilinéaire,
+                                     bord à zéro) : x et y à 1 mm, z inchangé
+  data/reference/<nom>_prep.f32      Spacingd puis normalisation (prétraitement
+                                     complet de inference.py)
 
 Usage : python scripts/make_reference_volumes.py
 """
@@ -65,4 +67,14 @@ for f in sorted(glob.glob("data/sourcedata/*.nii.gz")):
         ]
     )({"image": f})["image"]
     ecrire(nom, "raw_norm", np.asarray(norm[0]))
-    print(nom, brut.shape, f"brut max {brut.max():.0f} ; normalisé max {float(norm.max()):.2f}")
+    spacing = tr.Compose(
+        [
+            tr.LoadImaged(keys=["image"]),
+            tr.EnsureChannelFirstd(keys=["image"]),
+            tr.Spacingd(keys="image", pixdim=(1.0, 1.0, -1.0), mode="bilinear", padding_mode="zeros"),
+        ]
+    )({"image": f})
+    ecrire(nom, "resampled", np.asarray(spacing["image"][0]))
+    prep = SliceWiseNormalizeIntensityd(keys=["image"])(spacing)["image"]
+    ecrire(nom, "prep", np.asarray(prep[0]))
+    print(nom, brut.shape, "->", tuple(spacing["image"].shape[1:]), f"brut max {brut.max():.0f} ; normalisé max {float(norm.max()):.2f}")

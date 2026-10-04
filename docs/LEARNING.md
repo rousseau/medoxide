@@ -178,6 +178,41 @@ Détail de numérique : l'écart-type de la référence est celui de `torch.std`
 **Critère 5b atteint** : écart relatif 0 (identique bit à bit) à la référence
 MONAI sur les 8 volumes, sans rééchantillonnage (seuil visé : 1e-4).
 
+## 2026-10-04 — Rééchantillonnage à 1 mm (étape 5c)
+
+- **Quoi** : interpolation linéaire séparable. Le voxel de sortie `j` lit
+  l'entrée à la position `j / zoom` ; avec `i0 = floor(p)` et `w = p - i0`, la
+  valeur est `(1 - w) × a[i0] + w × a[i0 + 1]`, un voisin hors du volume
+  comptant pour 0. En 2D on l'applique axe par axe (x puis y).
+- **Pourquoi ici** : le modèle est très sensible à la résolution (sur une coupe
+  à 1,17 mm non rééchantillonnée, il ne détecte rien). Fetal-BET rééchantillonne
+  à 1 mm dans le plan avant l'inférence.
+- **Où** : `resample_axis`, `resample_in_plane` dans
+  `crates/medoxide-mask/src/lib.rs`.
+
+- **Quoi** : `index_axis(Axis(k), i)` (la tranche `i` selon l'axe `k`, vue sans
+  copie), `scaled_add(alpha, &autre)` (`self += alpha × autre` sur toute une
+  tranche) et les conversions explicites `as` (Rust ne convertit jamais
+  `usize`, `f64`, `f32` implicitement).
+- **Pourquoi ici** : une tranche de sortie se construit avec deux
+  `scaled_add`, sans boucle sur les voxels.
+- **Où** : `resample_axis`.
+
+Règle de taille de MONAI : `round((N - 1) × zoom + 1)`, depuis l'étendue entre
+les centres du premier et du dernier voxel (et non `N × zoom`).
+
+**Critère 5c, en deux temps** :
+1. Rééchantillonnage seul : écart relatif à MONAI ≤ 8e-6 sur les 8 volumes
+   (seuil 1e-4) : atteint.
+2. Prétraité (rééchantillonné puis normalisé) : écart relatif 0,9e-3 à 3,8e-3
+   (seuil initial 1e-4 non atteint, seuil provisoire 5e-3). Cause : MONAI
+   interpole en 3D et laisse des valeurs ~1e-15 là où le résultat exact est 0 ;
+   le masque `> 0` de la normalisation les compte, ce qui baisse l'écart-type
+   de chaque coupe d'environ 0,2 %. Ma normalisation appliquée à la sortie
+   MONAI du rééchantillonnage reproduit son prétraitement à 1e-7. Effet sur le
+   modèle (fetus_03) : 22 voxels d'argmax différents sur 2,9 millions, Dice
+   moyen par coupe 0,9997. Le juge final est le Dice des étapes 6 et 7.
+
 ---
 
-*(à compléter à la prochaine étape : rééchantillonnage à 1 mm (5c))*
+*(à compléter à la prochaine étape : inférence par tuiles sur le volume prétraité (étape 6))*
