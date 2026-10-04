@@ -8,6 +8,11 @@ members = ["crates/medoxide-mask", "crates/medx"]
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 nifti = "0.18"
+# Burn est en pré-version (0.22.0-pre.x) : pas de version stable disponible.
+# default-features = false : on évite l'entraînement (autodiff, optim, rl) dont
+# on n'a pas besoin pour de l'inférence.
+burn = { version = "0.22.0-pre.4", default-features = false, features = ["std", "wgpu"] }
+burn-store = "0.22.0-pre.4"
 
 [workspace.package]
 version = "0.1.0"

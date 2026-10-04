@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+mod model;
+
 /// Erreurs possibles lors de la segmentation.
 ///
 /// On définit ce type dès maintenant, même vide de variantes utiles,

@@ -80,6 +80,30 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
 **Critère 3b atteint** : affine identique à nibabel (tolérance 1e-3) sur 3
 volumes d'orientations différentes ; les 8 volumes ont un `sform`.
 
+## 2026-10-04 — Importer le modèle dans Burn (étape 4a)
+
+- **Quoi** : `burn-onnx` (outil `onnx2burn`) convertit un fichier ONNX en code
+  Rust (`attunet.rs`, une struct `Model` avec une méthode `forward`) et en
+  poids au format `burnpack` (`.bpk`). `burn-import` est l'ancien nom, marqué
+  « legacy ».
+- **Pourquoi ici** : on récupère les poids existants de Fetal-BET sans réécrire
+  l'architecture. On lance l'outil à la main et on commite le code généré
+  (20 Ko, lisible) ; ce n'est pas une dépendance du projet. Les poids (121 Mo)
+  restent hors de Git.
+- **Où** : `crates/medoxide-mask/src/model.rs`.
+
+- **Quoi** : un *tenseur* Burn (`Tensor<4>` : le `4` est le rang, c'est-à-dire
+  le nombre d'axes : lot, canaux, hauteur, largeur) et un *`Device`* (la
+  machine qui exécute les calculs). Dans Burn 0.22, le backend se choisit par
+  une *feature* de Cargo (`wgpu` ici, qui utilise Metal sur Mac), pas par un
+  paramètre de type.
+- **Pourquoi ici** : le backend wgpu est le choix du projet ; `Device::default()`
+  désigne le périphérique par défaut du backend activé.
+- **Où** : `burn = { features = ["std", "wgpu"], default-features = false }`
+  dans `Cargo.toml` (racine) ; `Model::forward(&self, Tensor<4>) -> Tensor<4>`.
+
+Burn n'a pas de version stable (`0.22.0-pre.4`) : on l'épingle exactement.
+
 ---
 
-*(à compléter à la prochaine étape : `burn-import` et inférence sur une coupe (étape 4))*
+*(à compléter à la prochaine étape : inférence sur une coupe et comparaison à onnxruntime (étape 4b))*
