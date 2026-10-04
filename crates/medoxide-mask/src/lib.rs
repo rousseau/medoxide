@@ -3,10 +3,8 @@
 //! Portage du modèle de segmentation Fetal-BET (PyTorch) vers Burn,
 //! via un export ONNX intermédiaire. Voir `docs/LEARNING.md` à la racine
 //! du workspace pour le détail de la démarche.
-//!
-//! Statut : squelette. La logique d'inférence arrive à l'étape suivante.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burn::tensor::{Device, Tensor, TensorData};
 use ndarray::{s, Array2, Array3, Array4, Axis, Ix3};
@@ -21,12 +19,13 @@ mod model;
 /// l'implémentation derrière.
 #[derive(Debug)]
 pub enum MaskError {
-    NotImplementedYet,
     /// Échec de lecture d'un fichier NIfTI (fichier absent, format invalide...).
     /// La variante *contient* l'erreur d'origine de la crate `nifti`.
     Nifti(nifti::NiftiError),
     /// Le fichier n'est pas un volume à 3 axes ; contient ses dimensions.
     NotVolume3D(Vec<usize>),
+    /// Le fichier de poids du modèle (`.bpk`) n'existe pas.
+    ModelNotFound(PathBuf),
 }
 
 /// Permet à l'opérateur `?` de convertir automatiquement une erreur de la
@@ -41,11 +40,11 @@ impl From<nifti::NiftiError> for MaskError {
 impl std::fmt::Display for MaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MaskError::NotImplementedYet => {
-                write!(f, "inférence pas encore branchée (prochaine étape)")
-            }
             MaskError::Nifti(e) => write!(f, "lecture NIfTI : {e}"),
             MaskError::NotVolume3D(dim) => write!(f, "volume 3D attendu, dimensions : {dim:?}"),
+            MaskError::ModelNotFound(chemin) => {
+                write!(f, "poids du modèle introuvables : {}", chemin.display())
+            }
         }
     }
 }
@@ -343,7 +342,10 @@ fn infer_logits(model: &model::Model, device: &Device, volume: &Array3<f32>) -> 
         .to_owned()
 }
 
-/// Masque binaire (0 fond, 1 cerveau) : la classe de plus grand logit.
+/// Masque binaire (0 fond, 1 cerveau) : la classe de plus grand logit. Utilisé par
+/// les tests de l'inférence par tuiles (grille à 1 mm) ; `logits_to_mask` fait le
+/// même calcul après le retour à la grille d'origine.
+#[cfg(test)]
 /// En cas d'égalité exacte, le fond l'emporte (comme `argmax` de torch ici).
 fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
     let fond = logits.index_axis(Axis(0), 0);
@@ -353,15 +355,38 @@ fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
         .map_collect(|&f, &c| u8::from(c > f))
 }
 
-/// Calcule le masque cérébral d'un volume IRM fœtal.
+/// Calcule le masque cérébral d'un volume IRM fœtal et l'écrit en NIfTI.
 ///
-/// # Étapes prévues (à venir)
-/// 1. Charger le volume NIfTI depuis `input_path`.
-/// 2. Faire passer chaque coupe (ou le volume) dans le modèle Burn
-///    importé depuis l'ONNX de Fetal-BET.
-/// 3. Ré-assembler et écrire le masque résultant dans `output_path`.
-pub fn segment(_input_path: &Path, _output_path: &Path) -> Result<(), MaskError> {
-    Err(MaskError::NotImplementedYet)
+/// Reproduit l'inférence de Fetal-BET :
+/// 1. lecture du volume (`input_path`) ;
+/// 2. rééchantillonnage à 1 mm dans le plan, puis normalisation par coupe ;
+/// 3. inférence par tuiles de 256×256 (recouvrement 50 %) avec le modèle dont
+///    les poids sont dans `model_path` (fichier `.bpk`, backend wgpu) ;
+/// 4. retour des logits sur la grille d'origine, puis argmax ;
+/// 5. écriture du masque (`uint8`, même affine que l'entrée) dans `output_path`.
+///
+/// # Erreurs
+/// `MaskError::ModelNotFound` si `model_path` n'existe pas ; `MaskError::Nifti`
+/// ou `MaskError::NotVolume3D` si l'entrée est invalide. Un fichier de poids
+/// présent mais invalide fait paniquer le chargement du modèle (code généré).
+pub fn segment(input_path: &Path, output_path: &Path, model_path: &Path) -> Result<(), MaskError> {
+    if !model_path.exists() {
+        return Err(MaskError::ModelNotFound(model_path.to_path_buf()));
+    }
+    let info = volume_info(input_path)?;
+    let volume = read_volume(input_path)?;
+    let (nx, ny, _) = volume.dim();
+    let spacing = [info.spacing[0], info.spacing[1]];
+
+    let mut prep = resample_in_plane(&volume, spacing);
+    normalize_slices(&mut prep);
+
+    let device = Device::default();
+    let modele = model::Model::from_file(model_path, &device);
+    let logits = infer_logits(&modele, &device, &prep);
+
+    let masque = logits_to_mask(&logits, spacing, (nx, ny));
+    write_mask(output_path, &masque, input_path)
 }
 
 #[cfg(test)]
@@ -744,8 +769,54 @@ mod tests {
     }
 
     #[test]
-    fn segment_reports_not_implemented_for_now() {
-        let result = segment(Path::new("in.nii.gz"), Path::new("out.nii.gz"));
-        assert!(matches!(result, Err(MaskError::NotImplementedYet)));
+    fn segment_fails_when_model_is_missing() {
+        let r = segment(
+            Path::new("in.nii.gz"),
+            Path::new("out.nii.gz"),
+            Path::new("n_existe_pas.bpk"),
+        );
+        assert!(matches!(r, Err(MaskError::ModelNotFound(_))));
+    }
+
+    /// Étape 8 : `segment` de bout en bout (fichier NIfTI → fichier NIfTI) contre
+    /// le masque final de Fetal-BET (étape 2). Affiche le temps. Dice >= 0,99.
+    fn verifier_segment(nom: &str) {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let entree = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
+        let sortie = std::env::temp_dir().join(format!("medoxide_e2e_{}_{nom}.nii.gz", std::process::id()));
+
+        let debut = std::time::Instant::now();
+        segment(Path::new(&entree), &sortie, Path::new(&format!("{racine}/models/attunet.bpk")))
+            .unwrap();
+        let duree = debut.elapsed();
+
+        let masque: Array3<u8> = read_volume(&sortie).unwrap().mapv(|v| v as u8);
+        std::fs::remove_file(&sortie).unwrap();
+        let officiel: Vec<u8> = read_volume(Path::new(&format!(
+            "{racine}/data/derivatives/fetal-bet/fetus_{nom}_predicted_mask.nii.gz"
+        )))
+        .unwrap()
+        .iter()
+        .map(|&v| v as u8)
+        .collect();
+        let d = dice(&masque, &officiel);
+        println!("fetus_{nom} : Dice {d:.5} ; {:.1} s", duree.as_secs_f64());
+        assert!(d >= 0.99, "fetus_{nom} : Dice {d:.5}");
+    }
+
+    /// Étape 8, version rapide : fetus_06 (une fenêtre par coupe).
+    #[test]
+    fn segment_end_to_end_fast() {
+        verifier_segment("06");
+    }
+
+    /// Étape 8, version complète : les 8 volumes (long). Lancer avec :
+    /// `cargo test --release -p medoxide-mask -- --ignored --nocapture segment_end_to_end_all`
+    #[test]
+    #[ignore = "long : voir la doc du test"]
+    fn segment_end_to_end_all() {
+        for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
+            verifier_segment(nom);
+        }
     }
 }

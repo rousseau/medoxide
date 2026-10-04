@@ -6,7 +6,7 @@ members = ["crates/medoxide-mask", "crates/medx"]
 # par les crates membres via `workspace = true` dans leur propre Cargo.toml.
 # Évite les divergences de version entre crates du même workspace.
 [workspace.dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 nifti = "0.18"
 # Même version que celle utilisée par nifti (un seul ndarray dans le binaire).
 ndarray = "0.17"

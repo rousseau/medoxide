@@ -286,6 +286,37 @@ un résultat différent (Dice 0,991 sur fetus_03).
   l'identique ; fichier relu aussi par nibabel (uint8, affine égale, `sform_code`
   conservé, voxels identiques aux masques officiels).
 
+## 2026-10-04 — Brancher `segment` et la commande `medx mask` (étape 8)
+
+- **Quoi** : un code de sortie propre. `main` renvoie un `ExitCode` (0 si tout
+  va bien, 1 sinon) au lieu d'afficher l'erreur et de sortir avec 0.
+- **Pourquoi ici** : un outil en ligne de commande est utilisé dans des
+  scripts ; une erreur qui sort avec le code 0 passe inaperçue.
+- **Où** : `main` dans `crates/medx/src/main.rs`.
+
+- **Quoi** : une option `clap` avec variable d'environnement et valeur par
+  défaut : `#[arg(long, env = "MEDOXIDE_MODEL", default_value = "models/attunet.bpk")]`.
+  Priorité : ligne de commande, puis variable, puis défaut. La fonctionnalité
+  `env` de `clap` doit être activée dans `Cargo.toml`.
+- **Pourquoi ici** : les poids (121 Mo) ne sont pas dans Git et peuvent
+  se trouver n'importe où.
+- **Où** : `Command::Mask::model`.
+
+- **Quoi** : un test de bout en bout qui chaîne tout (`.nii.gz` vers `.nii.gz`)
+  contre les masques officiels, et un compilé en `--release` pour mesurer le
+  temps.
+- **Où** : `segment_end_to_end_fast` (fetus_06) et `segment_end_to_end_all`
+  (`#[ignore]`) dans `crates/medoxide-mask/src/lib.rs`.
+
+**Critère 8 atteint** : `medx mask` (build release) produit les 8 masques, code
+de sortie 0. Contre les masques de Fetal-BET : Dice entre 0,999899 et 1,000000
+(0 à 14 voxels différents sur 2,6 à 3,3 millions), affine identique, `uint8`.
+Temps par volume (release, GPU Apple) : 25 s pour fetus_06 (une fenêtre par
+coupe), 90 à 112 s pour les autres (176 passages de 256×256 pour les tailles 260
+et 300). Pas d'optimisation faite (décision : mesurer seulement) : le passage en
+release ne change presque rien par rapport au debug (~100 s), ce qui suggère
+que le temps est dominé par le GPU ou la lecture synchrone des résultats.
+
 ---
 
-*(à compléter à la prochaine étape : `segment` et la commande `medx mask` de bout en bout (étape 8))*
+*(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

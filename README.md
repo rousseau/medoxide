@@ -5,6 +5,10 @@ Boîte à outils en Rust & [Burn](https://burn.dev) pour l'imagerie médicale.
 ## Prérequis
 
 - Rust installé via [rustup](https://rustup.rs).
+- Un GPU compatible `wgpu` (Metal sur Mac, Vulkan ou DX12 ailleurs).
+- Les poids du modèle (`attunet.bpk`, 121 Mo), qui ne sont pas dans Git : à
+  placer dans `models/`, ou à indiquer avec `--model` ou la variable
+  d'environnement `MEDOXIDE_MODEL`.
 
 ## Compiler
 
@@ -16,11 +20,15 @@ cargo build --release
 
 ```bash
 ./target/release/medx mask --input volume.nii.gz --output mask.nii.gz
+# poids ailleurs que dans ./models/attunet.bpk :
+./target/release/medx mask --input volume.nii.gz --output mask.nii.gz --model chemin/attunet.bpk
 ```
 
-Pour l'instant, cette commande se contente de répondre que l'inférence
-n'est pas encore branchée — c'est normal, c'est la prochaine étape
-(voir `docs/LEARNING.md`).
+Le masque est un NIfTI `uint8` (0 fond, 1 cerveau) qui garde l'affine du
+volume d'entrée. Il reproduit [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction) :
+sur les 8 volumes de test, il diffère du masque de référence de 0 à 14 voxels
+(Dice ≥ 0,9998). Compter environ 2 minutes par volume de 50 coupes
+(build `release`, GPU Apple).
 
 ## Structure
 

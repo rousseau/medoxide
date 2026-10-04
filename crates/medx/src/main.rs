@@ -5,6 +5,7 @@
 //! Aujourd'hui une seule sous-commande existe : `mask`.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -25,16 +26,28 @@ enum Command {
         /// Masque NIfTI de sortie
         #[arg(long)]
         output: PathBuf,
+        /// Poids du modèle (fichier .bpk). Priorité : cette option, puis la
+        /// variable d'environnement MEDOXIDE_MODEL, puis ./models/attunet.bpk
+        #[arg(long, env = "MEDOXIDE_MODEL", default_value = "models/attunet.bpk")]
+        model: PathBuf,
     },
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Mask { input, output } => match medoxide_mask::segment(&input, &output) {
-            Ok(()) => println!("Masque écrit dans {output:?}"),
-            Err(e) => eprintln!("medx mask : {e}"),
-        },
+        Command::Mask { input, output, model } => {
+            match medoxide_mask::segment(&input, &output, &model) {
+                Ok(()) => {
+                    println!("Masque écrit dans {output:?}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("medx mask : {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
     }
 }

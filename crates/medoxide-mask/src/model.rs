@@ -5,6 +5,8 @@
 //! Les poids (`attunet.bpk`, 121 Mo) ne sont pas dans Git : voir Garage,
 //! `medoxide-dev/models/`.
 #![allow(clippy::all)]
+// `from_bytes` (chargement depuis la mémoire) est généré mais pas utilisé ici.
+#![allow(dead_code)]
 
 extern crate alloc;
 use burn::prelude::*;
