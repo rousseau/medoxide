@@ -12,6 +12,8 @@
 //!   gauche » : c'est le cas courant, y compris des 96 stacks du jeu de développement) :
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
+pub mod diff;
+
 use std::path::{Path, PathBuf};
 
 use medoxide_core::{read_volume, volume_info, CoreError};

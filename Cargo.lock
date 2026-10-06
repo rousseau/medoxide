@@ -952,6 +952,7 @@ dependencies = [
  "burn-autodiff",
  "burn-core",
  "burn-cubecl",
+ "burn-flex",
  "burn-fusion",
  "burn-std",
 ]
@@ -3893,6 +3894,7 @@ dependencies = [
 name = "medoxide-svr"
 version = "0.1.0"
 dependencies = [
+ "burn",
  "medoxide-core",
  "nalgebra",
  "ndarray 0.17.2",

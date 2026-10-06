@@ -731,4 +731,35 @@ NeSVoR gagne surtout par le GPU (noyau CUDA) et le parallélisme.
 
 ---
 
-*(à compléter à la prochaine étape : étape 3, estimation du mouvement)*
+## 2026-10-07 — Le trilinéaire en tenseurs Burn (étape 3a, sous-étape 1 du SVR)
+
+- **Quoi** : un **tenseur Burn**. Dans la version utilisée (0.22 pré-version), `Tensor<D>` est un tableau de **rang `D`**
+  fixé à la compilation, de type flottant par défaut (`Tensor<D, Int>` pour des entiers). Il n'a plus de paramètre de backend :
+  c'est un objet **`Device`** qui choisit où le calcul se fait, à l'exécution (`Device::flex()` : CPU en Rust pur, utilisé par
+  les tests ; `wgpu` : GPU). Tous les tenseurs d'un calcul vivent sur le même `Device`. (`Device::ndarray()` et `to_vec` sont
+  dépréciés dans cette version : `flex` et `try_to_vec`.)
+- **Quoi** : écrire un calcul **pour qu'on puisse le dériver**. L'interpolation trilinéaire de la sous-étape 2a est refaite en
+  opérations de tenseurs : `floor` donne l'indice du voxel (non différentiable, ce sont des entiers) ; la fraction
+  `t = c − floor(c)` (différentiable) porte le gradient par rapport à la **position**, comme dans `grid_sample` de PyTorch ;
+  `select(0, indices)` lit les voxels et transmet le gradient aux **valeurs** du volume. Les 8 coins se traitent par une boucle
+  sur les bits de `0..8`.
+- **Quoi** : un tenseur ne répond pas `None`. La fonction rend **deux tenseurs** : les valeurs et un masque 0/1 `inside` ;
+  les points dehors sont ramenés au bord (`clamp`) pour que la lecture reste valide et leur valeur est ignorée par le masque.
+- **Où** : `crates/medoxide-svr/src/diff.rs` (`trilinear_sample`, `TrilinearSample`) ; première dépendance `burn` de
+  `medoxide-svr` (backend `flex` en dev-dépendance, pas d'autodiff avant la sous-étape où on dérive).
+
+**Critère** (fixé avant le code) : mêmes valeurs que `Volume::sample` à 1e-5 et même « dans la grille », sur des points tirés
+au hasard dedans et dehors. **Mesuré** : écart max **9,8e-7** (grille 22×20×18, 310 points dedans), 3,4e-7 (axe d'un seul voxel),
+1,2e-7 (2×3×2). Fonction linéaire exacte à 1e-4 ; centres du premier et du dernier voxel dedans, valeur exacte. Écart attendu :
+`Volume` est en `f64`, Burn en `f32`.
+
+**Défaut de mon premier test, corrigé avant de conclure** : sur les grilles à un axe d'un seul voxel et les très petites grilles,
+**aucun point** tiré au hasard n'était dedans (0 sur 400), donc le test ne vérifiait pas le cas qu'il prétendait vérifier. Les
+points sont maintenant tirés pour moitié dans la grille (200 dedans sur 400).
+
+**Vérifié par mutation** (4 sur 4 détectées) : poids `t` et `1−t` échangés ; pas d'indice aplati échangés ; voisin non borné (axe
+d'un seul voxel) ; masque sans borne supérieure.
+
+---
+
+*(à compléter à la prochaine étape : étape 3a, pose de la coupe et coût NCC en tenseurs)*
