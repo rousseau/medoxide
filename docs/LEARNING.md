@@ -825,4 +825,36 @@ carré ; variance de `b` non pondérée.
 
 ---
 
-*(à compléter à la prochaine étape : étape 3a, coût complet pose + échantillonnage + NCC)*
+## 2026-10-07 — Le coût complet d'une coupe (étape 3a, sous-étape 4 du SVR)
+
+- **Quoi** : la **chaîne complète** : centres des pixels dans le monde → pose (sous-étape 2) → indices de voxel par l'inverse de
+  l'affine du volume (`x.matmul(Mᵀ) + b` pour des lignes de points) → trilinéaire (sous-étape 1) → NCC pondérée (sous-étape 3). Le
+  gradient par rapport aux 6 paramètres traverse toute la chaîne : l'autodiff l'enchaîne sans une ligne de plus. `VolumeTensors`
+  convertit un `Volume` en tenseurs ; `slice_ncc` rend la NCC d'une coupe pour une pose.
+- **Quoi** : une dérivée **presque partout**. Le trilinéaire est continu mais **affine par morceaux** : sa dérivée saute quand un point
+  franchit un plan de voxels. Conséquence pratique, mesurée : l'écart entre le gradient automatique et les différences finies
+  **décroît comme le pas** (1,4e-2 à `h = 1e-2`, 1,4e-3 à `1e-4`, 2e-6 à `1e-6`) jusqu'à la limite de l'autodiff en `f32`. Les
+  différences finies à pas moyen ne sont donc pas un oracle de précision ici.
+- **Quoi** : l'arrondi **cache** une erreur. `Volume::sample` rend un `f32` : avec lui comme référence, l'écart remontait à petit pas
+  (3,6e-3 à `h = 1e-5`), ce qui ressemblait à un défaut du gradient. La référence est maintenant en **`f64` exact**
+  (`Volume::trilinear` sans l'arrondi final) et le gradient converge, ce qui a prouvé que l'autodiff était juste. Le test fixe `h = 1e-6`.
+  Le critère (1e-3) n'a pas été relâché : le premier échec venait du pas et de la référence, pas du critère.
+- **Défaut de mon test trouvé par mutation** : l'affine de l'atlas est **diagonale** (−0,8, −0,8, 0,8), donc l'oubli de la transposition
+  de l'inverse n'avait **aucun effet** et la mutation a survécu. L'atlas est maintenant tourné par une rotation arbitraire dans le
+  monde (mêmes voxels, affine oblique) : la même mutation donne alors une NCC de 0,04 au lieu de 1,0.
+- **Où** : `VolumeTensors`, `slice_ncc` dans `crates/medoxide-svr/src/diff.rs` ; données de test : atlas fœtal de Gholipour (CRL,
+  Boston Children's Hospital, STA21, 0,8 mm isotrope), copie **locale** dans `data/atlas/gholipour/` (hors de Git ; usage autorisé).
+
+**Critères** (fixés avant le code) et résultats, sur une coupe oblique de 56 × 56 pixels (2 379 dans le masque) de l'atlas tourné :
+- **Valeur contre une référence `f64` indépendante** (nalgebra, coefficients trilinéaires validés, NCC en `f64`), 5 poses dont une
+  qui envoie la moitié de la coupe hors du volume : écart < 1e-4 (NCC 0,269124 contre 0,269125 en pose nulle).
+- **Gradient automatique contre différences finies `f64`**, 3 poses : **1,5e-6, 1,9e-6, 2,1e-6** (critère 1e-3).
+- **Bout en bout** : NCC **1,000000** à la pose vraie (4 mm de rotation équivalente, 2 mm de translation), gradient **4,2e-7** contre
+  **0,106** à la pose nulle ; le coût baisse dans les 6 directions de 0 à ±5.
+
+**Vérifié par mutation** (5 sur 5 détectées, après correction du test) : inverse non transposé ; décalage de l'inverse oublié ; masque
+sans l'indicateur « dans le volume » ; pose opposée ; pivot ignoré.
+
+---
+
+*(à compléter à la prochaine étape : étape 3a, boucle d'optimisation)*

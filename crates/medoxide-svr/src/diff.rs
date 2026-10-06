@@ -7,6 +7,8 @@
 use burn::prelude::*;
 use nalgebra::Vector3;
 
+use crate::Volume;
+
 /// Résultat de [`trilinear_sample`] : une valeur et un indicateur « dans la grille » par point.
 #[derive(Debug, Clone)]
 pub struct TrilinearSample {
@@ -150,6 +152,60 @@ pub fn rotation_scale_mm(points: &[Vector3<f64>], pivot: &Vector3<f64>) -> Optio
     let moyenne = points.iter().map(|p| (p - pivot).norm_squared()).sum::<f64>() / points.len() as f64;
     let echelle = (2.0 / 3.0 * moyenne).sqrt();
     (echelle > 0.0).then_some(echelle)
+}
+
+/// Un [`Volume`] converti en tenseurs, prêt à être échantillonné par [`slice_ncc`] : voxels aplatis, dimensions, et
+/// l'inverse de l'affine (monde → indices de voxel) en `f32`.
+#[derive(Debug, Clone)]
+pub struct VolumeTensors {
+    data: Tensor<1>,
+    dims: [usize; 3],
+    inverse_linear: Tensor<2>,
+    inverse_offset: Tensor<1>,
+}
+
+impl VolumeTensors {
+    /// Copie les voxels et l'inverse de l'affine du volume sur `device`.
+    pub fn new(volume: &Volume, device: &Device) -> VolumeTensors {
+        let (nx, ny, nz) = volume.dim();
+        let voxels: Vec<f32> = volume.data().iter().copied().collect(); // ordre standard : k varie le plus vite
+        let inverse = &volume.inverse;
+        let lineaire: Vec<f32> = (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| inverse[(r, c)] as f32).collect();
+        let decalage: Vec<f32> = (0..3).map(|r| inverse[(r, 3)] as f32).collect();
+        VolumeTensors {
+            data: Tensor::<1>::from_floats(voxels.as_slice(), device),
+            dims: [nx, ny, nz],
+            inverse_linear: Tensor::<2>::from_floats(TensorData::new(lineaire, [3, 3]), device),
+            inverse_offset: Tensor::<1>::from_floats(decalage.as_slice(), device),
+        }
+    }
+}
+
+/// **NCC d'une coupe** pour une pose donnée : la chaîne complète du coût de recalage.
+///
+/// `points` (`[P, 3]`, mm) sont les centres des pixels de la coupe dans le monde, à la pose d'en-tête. La pose `params`
+/// (`[6]`, voir [`apply_pose`]) les déplace autour de `pivot` ; le volume est lu en ces points (trilinéaire) et comparé à
+/// `intensities` (`[P]`, les pixels de la coupe) par la corrélation normalisée. Le poids d'un pixel est `mask` (`[P]`, 0 ou 1,
+/// par exemple le masque cérébral de la coupe) multiplié par « le point est dans le volume ».
+///
+/// Rend un tenseur de forme `[1]` (la NCC, à maximiser : la perte est son opposé). Le gradient par rapport à `params` existe
+/// presque partout : l'interpolation trilinéaire est continue mais affine par morceaux, donc sa dérivée saute quand un point
+/// franchit un plan de voxels.
+pub fn slice_ncc(
+    volume: &VolumeTensors,
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    params: Tensor<1>,
+    rotation_scale_mm: f64,
+    intensities: Tensor<1>,
+    mask: Tensor<1>,
+) -> Tensor<1> {
+    let p = points.dims()[0];
+    let deplaces = apply_pose(points, pivot, params, rotation_scale_mm);
+    // monde -> indices de voxel : x_vox = A⁻¹ x ; pour des lignes de points, x.matmul(Mᵀ) + b
+    let voxels = deplaces.matmul(volume.inverse_linear.clone().transpose()) + volume.inverse_offset.clone().reshape([1, 3]);
+    let lecture = trilinear_sample(&volume.data, volume.dims, voxels);
+    ncc(intensities.reshape([1, p]), lecture.values.reshape([1, p]), (mask * lecture.inside).reshape([1, p]))
 }
 
 /// Constante ajoutée sous la racine de [`ncc`] : une coupe constante ou sans pixel valide a une variance nulle, donc
@@ -565,5 +621,206 @@ mod tests {
         assert!(erreur < 1e-3, "{erreur:.2e}");
         // un pixel de poids nul a un gradient nul
         assert!(g_auto[2].abs() < 1e-7 && g_auto[7].abs() < 1e-7, "{g_auto:?}");
+    }
+    // ------------------------------------------------------------------ sous-étape 4 : coût complet d'une coupe
+
+    use crate::Stack;
+
+    /// L'atlas de Gholipour, **tourné** dans le monde par une rotation arbitraire : son affine d'origine est diagonale, donc
+    /// la transposition de l'inverse ne serait pas éprouvée (une mutation l'a montré). Mêmes voxels, affine oblique ; l'atlas est
+    /// centré en (0, 0, 0), le volume reste donc autour de l'origine.
+    fn atlas() -> Volume {
+        let chemin = format!("{}/../../data/atlas/gholipour/STA21.nii.gz", env!("CARGO_MANIFEST_DIR"));
+        let original = Volume::from_stack(&Stack::read(std::path::Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
+        let rotation = Rotation3::from_euler_angles(0.3, -0.2, 0.5).to_homogeneous();
+        Volume::new(original.data().clone(), rotation * original.affine()).unwrap()
+    }
+
+    /// Une coupe de 56 × 56 pixels de 1 mm, oblique, au milieu de l'atlas : centres de pixels dans le monde.
+    fn pixels_de_coupe() -> Vec<Vector3<f64>> {
+        let r = Rotation3::from_euler_angles(0.5, -0.4, 0.8);
+        (0..56).flat_map(|j| (0..56).map(move |i| (i, j))).map(|(i, j)| r * Vector3::new(i as f64 - 27.5, j as f64 - 27.5, 0.0) + Vector3::new(1.0, -2.0, 3.0)).collect()
+    }
+
+    /// Cas de test : atlas, pixels, intensités simulées à la pose vraie (échelle et décalage d'intensité arbitraires), masque, pivot.
+    struct Cas {
+        volume: Volume,
+        points: Vec<Vector3<f64>>,
+        intensites: Vec<f64>,
+        masque: Vec<f64>,
+        pivot: Vector3<f64>,
+        echelle: f64,
+    }
+    const POSE_VRAIE: [f64; 6] = [4.0, -3.0, 2.0, 1.5, -1.0, 0.8];
+
+    /// Valeur du volume en `f64` exact (sans l'arrondi en `f32` de `Volume::sample`), avec les mêmes coefficients trilinéaires
+    /// (`Volume::trilinear`, validé contre scipy et SimpleITK par `sample`). Les différences finies ont besoin de cette précision.
+    fn echantillon_f64(v: &Volume, x: &Vector3<f64>) -> Option<f64> {
+        let voisins = v.trilinear(&v.voxel_coordinates(x))?;
+        Some(voisins.iter().map(|(i, w)| w * f64::from(v.data[*i])).sum())
+    }
+
+    /// Pose appliquée en `f64` (référence) : `c + R (x − c) + t`.
+    fn deplace(p: &[f64; 6], x: &Vector3<f64>, pivot: &Vector3<f64>, echelle: f64) -> Vector3<f64> {
+        pivot + Rotation3::from_scaled_axis(Vector3::new(p[0], p[1], p[2]) / echelle) * (x - pivot) + Vector3::new(p[3], p[4], p[5])
+    }
+
+    fn cas() -> Cas {
+        let volume = atlas();
+        let points = pixels_de_coupe();
+        // pivot = barycentre des pixels, échelle = √(2/3) r_rms de ces pixels
+        let pivot = points.iter().sum::<Vector3<f64>>() / points.len() as f64;
+        let echelle = rotation_scale_mm(&points, &pivot).unwrap();
+        // coupe « acquise » : le volume lu à la pose vraie (intensités à échelle et décalage arbitraires), masque = tissu
+        let (mut intensites, mut masque) = (Vec::new(), Vec::new());
+        for x in &points {
+            let v = echantillon_f64(&volume, &deplace(&POSE_VRAIE, x, &pivot, echelle));
+            intensites.push(3.0 * v.unwrap_or(0.0) + 10.0);
+            masque.push(f64::from(u8::from(v.is_some_and(|v| v > 150.0))));
+        }
+        Cas { volume, points, intensites, masque, pivot, echelle }
+    }
+
+    /// Coût de référence en f64 : pose de nalgebra, `Volume::sample` (validé contre scipy et SimpleITK), NCC pondérée.
+    fn ncc_reference(c: &Cas, p: &[f64; 6]) -> f64 {
+        let (mut sw, mut sa, mut sb) = (0.0, 0.0, 0.0);
+        let mut lectures = Vec::new();
+        for (i, x) in c.points.iter().enumerate() {
+            let b = echantillon_f64(&c.volume, &deplace(p, x, &c.pivot, c.echelle));
+            let w = c.masque[i] * f64::from(u8::from(b.is_some()));
+            let b = b.unwrap_or(0.0);
+            lectures.push((c.intensites[i], b, w));
+            sw += w;
+            sa += w * c.intensites[i];
+            sb += w * b;
+        }
+        let (ma, mb) = (sa / sw, sb / sw);
+        let cov: f64 = lectures.iter().map(|(a, b, w)| w * (a - ma) * (b - mb)).sum();
+        let va: f64 = lectures.iter().map(|(a, _, w)| w * (a - ma).powi(2)).sum();
+        let vb: f64 = lectures.iter().map(|(_, b, w)| w * (b - mb).powi(2)).sum();
+        cov / (va * vb + NCC_EPS).sqrt()
+    }
+
+    struct Tenseurs {
+        volume: VolumeTensors,
+        points: Tensor<2>,
+        pivot: Tensor<1>,
+        intensites: Tensor<1>,
+        masque: Tensor<1>,
+    }
+
+    fn en_tenseurs(c: &Cas, device: &Device) -> Tenseurs {
+        let v1 = |v: &[f64]| tenseur_1d(v, device);
+        Tenseurs {
+            volume: VolumeTensors::new(&c.volume, device),
+            points: tenseur_points(&c.points, device),
+            pivot: v1(&[c.pivot.x, c.pivot.y, c.pivot.z]),
+            intensites: v1(&c.intensites),
+            masque: v1(&c.masque),
+        }
+    }
+
+    fn ncc_tenseurs(c: &Cas, t: &Tenseurs, params: Tensor<1>) -> Tensor<1> {
+        slice_ncc(&t.volume, t.points.clone(), t.pivot.clone(), params, c.echelle, t.intensites.clone(), t.masque.clone())
+    }
+
+    /// L'échantillonneur `f64` de référence rend la même valeur que `Volume::sample` à l'arrondi `f32` près.
+    #[test]
+    fn f64_reference_sampler_agrees_with_volume_sample() {
+        let c = cas();
+        let mut pire = 0.0_f64;
+        for x in &c.points {
+            let y = deplace(&POSE_VRAIE, x, &c.pivot, c.echelle);
+            match (c.volume.sample(&y), echantillon_f64(&c.volume, &y)) {
+                (Some(a), Some(b)) => pire = pire.max((f64::from(a) - b).abs() / 3485.0),
+                (None, None) => {}
+                autre => panic!("domaines différents : {autre:?}"),
+            }
+        }
+        assert!(pire < 1e-7, "{pire:.2e}");
+    }
+
+    /// Critère 1 : valeur contre la référence f64 indépendante.
+    #[test]
+    fn slice_ncc_matches_the_f64_reference_on_a_real_volume() {
+        let c = cas();
+        let device = device();
+        let t = en_tenseurs(&c, &device);
+        println!("{} pixels, dont {} dans le masque ; échelle de rotation {:.1} mm", c.points.len(), c.masque.iter().sum::<f64>(), c.echelle);
+        assert!(c.masque.iter().sum::<f64>() > 1000.0, "le masque doit contenir assez de pixels");
+        let mut pire = 0.0_f64;
+        for p in [[0.0; 6], POSE_VRAIE, [2.0, 1.0, -3.0, 0.5, 0.5, -1.0], [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5], [0.0, 0.0, 0.0, 45.0, 0.0, 0.0]] {
+            let n = f64::from(ncc_tenseurs(&c, &t, tenseur_1d(&p, &device)).into_data().try_to_vec::<f32>().unwrap()[0]);
+            let r = ncc_reference(&c, &p);
+            println!("pose {p:?} : NCC tenseurs {n:.6}, référence f64 {r:.6}");
+            pire = pire.max((n - r).abs());
+        }
+        assert!(pire < 1e-4, "{pire:.2e}");
+    }
+
+    /// Critère 2 : gradient automatique contre différences finies de la référence f64, en trois poses.
+    #[test]
+    fn slice_ncc_gradient_matches_finite_differences_on_a_real_volume() {
+        let c = cas();
+        let device = device().autodiff();
+        let t = en_tenseurs(&c, &device);
+        for p0 in [[0.0; 6], [2.0, 1.0, -3.0, 0.5, 0.5, -1.0], [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5]] {
+            let params = tenseur_1d(&p0, &device).require_grad();
+            let grads = ncc_tenseurs(&c, &t, params.clone()).sum().backward();
+            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+            assert!(g_auto.iter().all(|v| v.is_finite()), "{g_auto:?}");
+            // Pas 1e-6 : l'interpolation trilinéaire est affine par morceaux, donc l'écart des différences finies décroît
+            // comme le pas (sauts de voxel dans la fenêtre : 1,4e-2 à 1e-2, 1,4e-3 à 1e-4, 2e-6 à 1e-6, limite de l'autodiff `f32`).
+            let h = 1e-6;
+            let g_diff: Vec<f64> = (0..6)
+                .map(|a| {
+                    let (mut plus, mut moins) = (p0, p0);
+                    plus[a] += h;
+                    moins[a] -= h;
+                    (ncc_reference(&c, &plus) - ncc_reference(&c, &moins)) / (2.0 * h)
+                })
+                .collect();
+            let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let erreur = g_auto.iter().zip(&g_diff).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+            println!("p0 = {p0:?} : |g| = {norme:.4}\n   autodiff {g_auto:.4?}\n   diff. finies {g_diff:.4?}\n   écart relatif {erreur:.2e}");
+            assert!(erreur < 1e-3, "{erreur:.2e} en {p0:?}");
+        }
+    }
+
+    /// Critère 3 : bout en bout. À la pose vraie la NCC vaut 1 et son gradient s'annule ; le coût baisse en s'en éloignant, dans
+    /// chacune des 6 directions.
+    #[test]
+    fn slice_ncc_peaks_at_the_true_pose() {
+        let c = cas();
+        let device = device().autodiff();
+        let t = en_tenseurs(&c, &device);
+        let valeur = |p: &[f64; 6]| f64::from(ncc_tenseurs(&c, &t, tenseur_1d(p, &device)).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let gradient = |p: &[f64; 6]| -> f64 {
+            let params = tenseur_1d(p, &device).require_grad();
+            let g = ncc_tenseurs(&c, &t, params.clone()).sum().backward();
+            params.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v).powi(2)).sum::<f64>().sqrt()
+        };
+        let a_la_verite = valeur(&POSE_VRAIE);
+        let (g_vrai, g_loin) = (gradient(&POSE_VRAIE), gradient(&[0.0; 6]));
+        println!("NCC à la pose vraie {a_la_verite:.6} ; |gradient| à la pose vraie {g_vrai:.2e}, à la pose nulle {g_loin:.2e}");
+        assert!(a_la_verite >= 0.9999, "{a_la_verite}");
+        assert!(g_vrai < 0.01 * g_loin, "{g_vrai:.2e} contre {g_loin:.2e}");
+        for a in 0..6 {
+            let mut precedent = a_la_verite;
+            for pas in 1..=5 {
+                for signe in [1.0, -1.0] {
+                    let mut p = POSE_VRAIE;
+                    p[a] += signe * f64::from(pas);
+                    let v = valeur(&p);
+                    assert!(v < precedent + 1e-6 || signe < 0.0, "paramètre {a}, pas {}", signe * f64::from(pas));
+                    if signe > 0.0 {
+                        precedent = v;
+                    }
+                }
+            }
+            let (plus5, moins5) = ({ let mut p = POSE_VRAIE; p[a] += 5.0; valeur(&p) }, { let mut p = POSE_VRAIE; p[a] -= 5.0; valeur(&p) });
+            println!("paramètre {a} : NCC à ±5 : {plus5:.4} / {moins5:.4}");
+            assert!(plus5 < a_la_verite - 0.001 && moins5 < a_la_verite - 0.001);
+        }
     }
 }
