@@ -695,4 +695,40 @@ décalages inversé) n'est pas détectable : la PSF est symétrique, l'opérateu
 
 ---
 
-*(à compléter à la prochaine étape : comparaison à NeSVoR, étape 2d)*
+## 2026-10-07 — Comparer notre opérateur à celui de NeSVoR (étape 2d du SVR)
+
+- **Quoi** : valider contre une **implémentation externe exécutée, pas copiée**. `scripts/make_reference_acquisition.py`
+  charge `slice_acquisition_torch` depuis un clone local de NeSVoR (MIT) et lui fait simuler des coupes réelles ; un test
+  Rust (ignoré, à lancer en `--release`) compare nos coupes aux siennes. Aucune ligne de NeSVoR n'est dans le dépôt.
+- **Quoi** : le vrai travail est la **traduction de conventions**, établie par lecture de son code : volume `(D, H, W)` =
+  `(z, y, x)` isotrope et centré en unités de voxel ; position d'un pixel = `R · (local + t)` (la translation est appliquée
+  *avant* la rotation) ; PSF sur une grille entière de voxels, orientée par `R` ; positions arrondies au voxel le plus proche ;
+  normalisation par la somme des poids (seuil 1e-2). Notre repère monde RAS+ devient son repère centré en choisissant
+  un volume aligné sur les axes du monde ; `t` se déduit de l'affine de la coupe en résolvant `R t = pos0 + R c_s`
+  (pas par transposition, car les colonnes d'une affine réelle ne sont orthogonales qu'à 1e-3 près : 0,1 mm d'erreur).
+- **Où** : `scripts/make_reference_acquisition.py`, test `simulated_slices_match_nesvor_acquisition_operator`.
+
+**Critère 5 de l'étude 04** : corrélation des coupes simulées ≥ 0,99 (à rapporter, pas à forcer). Mesuré sur **4 sujets réels,
+23 coupes, 588 800 pixels pleinement couverts des deux côtés** (volume isotrope de 0,8 mm tiré du stack axial, coupes du
+stack coronal, affines obliques à déterminant négatif) :
+
+| PSF de notre opérateur | corrélation min / médiane | écart quadratique relatif médian / max |
+|---|---|---|
+| σ identiques à NeSVoR (1,2067 × pixel dans le plan) | 0,9990 / 0,9997 | 1,5 % / 2,3 % |
+| notre réglage (1,2 × pixel) | 0,9990 / 0,9997 | 1,5 % / 2,2 % |
+| *témoin* : σ hors plan appliqué le long de u (mal orienté) | 0,9874 / 0,9946 | 6,3 % / 10,5 % |
+| *témoin* : sans PSF (échantillonnage ponctuel) | 0,9799 / 0,9936 | 6,8 % / 11,5 % |
+
+**Lecture honnête** : le critère de 0,99 est atteint, mais il est **peu discriminant** : un opérateur mal orienté ou sans PSF
+passe presque le même seuil (min 0,987 et 0,980). Le discriminant utile est l'**écart quadratique relatif** : 1,5 % pour une
+PSF correcte contre 6 à 7 % pour les témoins. Les 1,5 % résiduels sont compatibles avec l'arrondi au voxel le plus proche de
+NeSVoR (jusqu'à 0,4 mm, de l'ordre de σ dans le plan) et sa PSF tronquée à 9 × 3 × 3 voxels ; je n'ai **pas** isolé cette cause
+par une expérience. Les deux réglages de σ dans le plan (1,2 et 1,2067) sont indiscernables.
+
+**Coût comparé** : NeSVoR sur CPU (torch, plusieurs fils) : 0,1 s pour un bloc de 160 × 160 pixels, soit ≈ 4 µs par pixel ;
+notre opérateur sur un cœur : ≈ 6 µs par pixel. Le coût mesuré en 2c est donc du même ordre que celui de NeSVoR sur CPU ;
+NeSVoR gagne surtout par le GPU (noyau CUDA) et le parallélisme.
+
+---
+
+*(à compléter à la prochaine étape : étape 3, estimation du mouvement)*

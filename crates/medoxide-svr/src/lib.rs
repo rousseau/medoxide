@@ -2054,4 +2054,92 @@ mod tests {
             psf.samples().len()
         );
     }
+    /// Corrélation de Pearson de deux séries.
+    fn pearson(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len() as f64;
+        let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+        let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let va: f64 = a.iter().map(|x| (x - ma).powi(2)).sum();
+        let vb: f64 = b.iter().map(|y| (y - mb).powi(2)).sum();
+        cov / (va * vb).sqrt()
+    }
+
+    /// Critère 5 de l'étude 04 (étape 2d) : comparaison à l'opérateur `slice_acquisition_torch` de NeSVoR, exécuté
+    /// par `scripts/make_reference_acquisition.py` sur 4 sujets réels (volume isotrope de 0,8 mm tiré du stack axial,
+    /// coupes du stack coronal, bloc central de 160 × 160 pixels). Quatre variantes de PSF pour notre opérateur :
+    /// `nesvor` (σ identiques à ceux de NeSVoR), `defaut` (notre réglage, 1,2 × pixel), `permutee` (témoin :
+    /// σ hors plan appliqué le long de u, donc mal orienté), `sans_psf` (σ minuscule : échantillonnage ponctuel).
+    /// Mesure sur les pixels pleinement couverts des deux côtés. À lancer avec `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales (scripts/make_reference_acquisition.py) ; lent en debug"]
+    fn simulated_slices_match_nesvor_acquisition_operator() {
+        const FWHM_SINC: f64 = 1.206_709_128_803_223; // rapport FWHM sinc / FWHM gaussienne de NeSVoR (SINC_FWHM)
+        let racine = racine();
+        let index = lire_tsv("data/reference/acquisition/index.tsv");
+        assert_eq!(index.len(), 4);
+        let noms = ["nesvor", "defaut", "permutee", "sans_psf"];
+        let mut par_variante: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        let mut rms_rel: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        let mut pixels = 0;
+        for c in &index {
+            let volume = Volume::from_stack(&Stack::read(Path::new(&format!("{racine}/{}", c[0]))).unwrap());
+            let stack = Stack::read(Path::new(&format!("{racine}/{}", c[1]))).unwrap();
+            let ks: Vec<usize> = c[2].split(',').map(|k| k.parse().unwrap()).collect();
+            let (i0, j0, bloc): (usize, usize, usize) = (c[3].parse().unwrap(), c[4].parse().unwrap(), c[5].parse().unwrap());
+            let octets = std::fs::read(format!("{racine}/{}", c[6])).unwrap();
+            let ref_vals: Vec<f32> = octets.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            assert_eq!(ref_vals.len(), ks.len() * 2 * bloc * bloc);
+            let sp = stack.spacing();
+            for (n, &k) in ks.iter().enumerate() {
+                let coupe = stack.slice(k).unwrap();
+                let [u, v] = coupe.in_plane_axes();
+                let axes = [u, v, coupe.normal()];
+                let (s_plan, s_hors) = (FWHM_SINC * sp[0] / FWHM_PER_SIGMA, sp[2] / FWHM_PER_SIGMA);
+                let psfs = [
+                    Psf::new([s_plan, s_plan, s_hors], axes).unwrap(),
+                    coupe.psf(),
+                    Psf::new([s_hors, s_plan, s_plan], axes).unwrap(),
+                    Psf::new([1e-3, 1e-3, 1e-3], axes).unwrap(),
+                ];
+                let base = n * 2 * bloc * bloc;
+                let (vals_ref, poids_ref) = (&ref_vals[base..base + bloc * bloc], &ref_vals[base + bloc * bloc..base + 2 * bloc * bloc]);
+                for (m, psf) in psfs.iter().enumerate() {
+                    let sim = volume.simulate_slice(&coupe, psf);
+                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    for i in 0..bloc {
+                        for j in 0..bloc {
+                            if poids_ref[i * bloc + j] >= 0.99 && sim.coverage[[i0 + i, j0 + j]] >= 0.99 {
+                                a.push(f64::from(sim.values[[i0 + i, j0 + j]]));
+                                b.push(f64::from(vals_ref[i * bloc + j]));
+                            }
+                        }
+                    }
+                    if a.len() < 5000 {
+                        continue; // coupe presque hors du volume : non comparable
+                    }
+                    if m == 0 {
+                        pixels += a.len();
+                    }
+                    par_variante[m].push(pearson(&a, &b));
+                    let rms = (a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
+                    rms_rel[m].push(rms / (b.iter().map(|y| y * y).sum::<f64>() / b.len() as f64).sqrt());
+                }
+            }
+        }
+        println!("{} coupes comparées, {pixels} pixels (variante nesvor)", par_variante[0].len());
+        for m in 0..4 {
+            let mut c = par_variante[m].clone();
+            c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut r = rms_rel[m].clone();
+            r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "{:9} corrélation : min {:.4}, médiane {:.4}, max {:.4} | écart quadratique relatif : médiane {:.3}, max {:.3}",
+                noms[m], c[0], c[c.len() / 2], c[c.len() - 1], r[r.len() / 2], r[r.len() - 1]
+            );
+        }
+        for m in 0..2 {
+            let min = par_variante[m].iter().cloned().fold(f64::MAX, f64::min);
+            assert!(min >= 0.99, "{} : corrélation minimale {min:.4} < 0,99", noms[m]);
+        }
+    }
 }
