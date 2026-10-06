@@ -14,7 +14,7 @@ La commande reste silencieuse pendant le calcul, puis affiche `Masque écrit dan
 |---|---|
 | `--input` | Volume NIfTI d'entrée. |
 | `--output` | Masque NIfTI de sortie. Son dossier doit exister. |
-| `--model` | Poids du modèle. À défaut : variable `MEDOXIDE_MODEL`, puis `models/attunet.bpk` (relatif au dossier courant). |
+| `--model` | Poids du modèle (facultatif). À défaut : variable `MEDOXIDE_MODEL`, puis le cache, où ils sont téléchargés au premier lancement ([Installation](installation.md#poids-du-modèle)). |
 
 ## Entrée et sortie
 
@@ -37,7 +37,8 @@ préfixé par `medx fetalbet :`), 2 si les arguments sont invalides.
 
 | Message | Cause |
 |---|---|
-| `poids du modèle introuvables : …` | Chemin relatif au dossier courant : lancer depuis la racine du dépôt, ou passer `--model`. |
+| `poids du modèle introuvables : …` | Le fichier donné par `--model` ou `MEDOXIDE_MODEL` n'existe pas. |
+| `téléchargement des poids impossible : …` | Réseau ou disque : réessayer, ou télécharger les poids à l'avance et passer `--model`. |
 | `dossier de sortie introuvable : …` | Créer le dossier avant de lancer. |
 | `volume 3D attendu, dimensions : [...]` | Fichier 4D ou plus. |
 | `NIfTI : Io(… NotFound …)` / `NIfTI : Io(… "invalid gzip header" …)` | Image d'entrée absente / fichier non NIfTI. |

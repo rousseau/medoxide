@@ -28,9 +28,11 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
         /// Poids du modèle (fichier .bpk). Priorité : cette option, puis la
-        /// variable d'environnement MEDOXIDE_MODEL, puis ./models/attunet.bpk
-        #[arg(long, env = "MEDOXIDE_MODEL", default_value = "models/attunet.bpk")]
-        model: PathBuf,
+        /// variable d'environnement MEDOXIDE_MODEL, puis le cache
+        /// (~/.cache/medoxide/attunet.bpk), où ils sont téléchargés depuis Hugging
+        /// Face au premier lancement
+        #[arg(long, env = "MEDOXIDE_MODEL")]
+        model: Option<PathBuf>,
     },
 }
 
@@ -39,7 +41,9 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Fetalbet { input, output, model } => {
-            match medoxide_fetalbet::segment(&input, &output, &model) {
+            // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;
+            // `None` : `segment` télécharge les poids par défaut au besoin.
+            match medoxide_fetalbet::segment(&input, &output, model.as_deref()) {
                 Ok(()) => {
                     println!("Masque écrit dans {output:?}");
                     ExitCode::SUCCESS

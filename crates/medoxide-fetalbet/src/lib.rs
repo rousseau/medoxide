@@ -7,10 +7,15 @@
 //! Le modèle est celui de Fetal-BET (Faghihpirayesh et al., 2024, CC BY 4.0) :
 //! voir l'attribution complète dans `model.rs` et dans le `README.md` racine.
 
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use burn::tensor::{Device, Tensor, TensorData};
 use ndarray::{s, Array2, Array3, Array4, Axis, Ix3};
+use sha2::{Digest, Sha256};
 
 mod model;
 
@@ -32,6 +37,9 @@ pub enum MaskError {
     ModelNotFound(PathBuf),
     /// Le dossier où écrire le masque n'existe pas ; contient ce dossier.
     OutputDirNotFound(PathBuf),
+    /// Échec du téléchargement des poids par défaut (réseau, disque, SHA-256) ;
+    /// contient un message explicatif.
+    ModelDownload(String),
 }
 
 /// Permet à l'opérateur `?` de convertir automatiquement une erreur de la
@@ -53,6 +61,9 @@ impl std::fmt::Display for MaskError {
             }
             MaskError::OutputDirNotFound(dossier) => {
                 write!(f, "dossier de sortie introuvable : {}", dossier.display())
+            }
+            MaskError::ModelDownload(message) => {
+                write!(f, "téléchargement des poids impossible : {message}")
             }
         }
     }
@@ -364,6 +375,126 @@ fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
         .map_collect(|&f, &c| u8::from(c > f))
 }
 
+/// Adresse des poids par défaut : le dépôt Hugging Face du projet, épinglé sur la
+/// révision qui contient ce fichier (le contenu à cette adresse ne change jamais).
+const MODEL_URL: &str = "https://huggingface.co/rousseau/medoxide-fetalbet/resolve/645902a2e04be584e3c7acc5faeeb52dab5579eb/attunet.bpk";
+/// Empreinte SHA-256 attendue pour ces poids.
+const MODEL_SHA256: &str = "a70bcbe8da5f791b751c293a851505eb1aa9aa44c50def0afc41fd34bd60c3c2";
+/// Nom du fichier de poids dans le dossier de cache.
+const MODEL_FILE: &str = "attunet.bpk";
+
+/// Dossier de cache de medoxide : `$XDG_CACHE_HOME/medoxide`, sinon
+/// `$HOME/.cache/medoxide`. `None` si aucune de ces variables n'est définie.
+/// Les valeurs sont passées en paramètres pour pouvoir tester sans toucher à
+/// l'environnement du processus.
+fn cache_dir_from(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let base = match xdg_cache_home.filter(|v| !v.is_empty()) {
+        Some(xdg) => PathBuf::from(xdg),
+        // `?` fonctionne aussi sur un `Option` : si `home` est vide ou absent, la
+        // fonction renvoie `None` immédiatement.
+        None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".cache"),
+    };
+    Some(base.join("medoxide"))
+}
+
+/// Télécharge `url` vers `dest` et vérifie son SHA-256.
+///
+/// Le contenu est écrit par blocs dans un fichier temporaire voisin (`.part`),
+/// haché au fur et à mesure, puis renommé en `dest` seulement si l'empreinte est
+/// la bonne : un téléchargement interrompu ou corrompu ne laisse jamais un faux
+/// fichier de poids. Une progression par tranche de 10 % est écrite sur stderr.
+fn download_verified(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), MaskError> {
+    let echec = |contexte: &str, e: &dyn std::fmt::Display| {
+        MaskError::ModelDownload(format!("{contexte} : {e}"))
+    };
+    let partiel = dest.with_extension("part");
+
+    let resultat = (|| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_global(Some(Duration::from_secs(30 * 60)))
+            .build()
+            .into();
+        let reponse = agent.get(url).call().map_err(|e| echec(url, &e))?;
+        let total = reponse.body().content_length();
+        let mut lecteur = reponse.into_body().into_reader();
+
+        let mut fichier = File::create(&partiel).map_err(|e| echec(&partiel.display().to_string(), &e))?;
+        let mut hachage = Sha256::new();
+        let mut tampon = vec![0u8; 64 * 1024];
+        let (mut recu, mut dernier_pourcent) = (0u64, 0u64);
+        loop {
+            let n = lecteur.read(&mut tampon).map_err(|e| echec("lecture réseau", &e))?;
+            if n == 0 {
+                break;
+            }
+            hachage.update(&tampon[..n]);
+            fichier.write_all(&tampon[..n]).map_err(|e| echec("écriture", &e))?;
+            recu += n as u64;
+            if let Some(total) = total.filter(|&t| t > 0) {
+                let pourcent = recu * 100 / total / 10 * 10;
+                if pourcent > dernier_pourcent {
+                    dernier_pourcent = pourcent;
+                    eprintln!("  {pourcent} %");
+                }
+            }
+        }
+        fichier.flush().map_err(|e| echec("écriture", &e))?;
+
+        // Le résultat est un tableau d'octets : chacun s'écrit sur 2 chiffres hexadécimaux.
+        let obtenu: String = hachage.finalize().iter().map(|o| format!("{o:02x}")).collect();
+        if obtenu != expected_sha256 {
+            return Err(MaskError::ModelDownload(format!(
+                "SHA-256 inattendu (obtenu {obtenu}, attendu {expected_sha256})"
+            )));
+        }
+        std::fs::rename(&partiel, dest).map_err(|e| echec(&dest.display().to_string(), &e))
+    })();
+
+    if resultat.is_err() {
+        let _ = std::fs::remove_file(&partiel); // nettoyage ; l'erreur d'origine prime
+    }
+    resultat
+}
+
+/// Chemin des poids par défaut du modèle, téléchargés au besoin.
+///
+/// Les poids sont cherchés dans le cache (`$XDG_CACHE_HOME/medoxide/attunet.bpk`,
+/// sinon `~/.cache/medoxide/attunet.bpk`). S'ils sont absents, ils sont
+/// téléchargés depuis Hugging Face (environ 121 Mo, message sur stderr), vérifiés
+/// par SHA-256, puis conservés pour les lancements suivants. Un fichier déjà
+/// présent n'est pas revérifié.
+///
+/// # Erreurs
+/// `MaskError::ModelDownload` si aucun dossier de cache n'est déterminable, ou si
+/// le téléchargement, l'écriture ou la vérification échoue. Hors ligne, utiliser
+/// un fichier local (`--model`).
+pub fn default_model_path() -> Result<PathBuf, MaskError> {
+    let dossier = cache_dir_from(
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME"),
+    )
+    .ok_or_else(|| {
+        MaskError::ModelDownload(
+            "aucun dossier de cache (ni XDG_CACHE_HOME ni HOME) ; indiquez les poids avec --model"
+                .to_string(),
+        )
+    })?;
+    let chemin = dossier.join(MODEL_FILE);
+    if chemin.exists() {
+        return Ok(chemin);
+    }
+    std::fs::create_dir_all(&dossier)
+        .map_err(|e| MaskError::ModelDownload(format!("{} : {e}", dossier.display())))?;
+    eprintln!(
+        "Téléchargement des poids du modèle (121 Mo) vers {}\n  depuis {MODEL_URL}",
+        chemin.display()
+    );
+    download_verified(MODEL_URL, &chemin, MODEL_SHA256)?;
+    eprintln!("Poids téléchargés et vérifiés.");
+    Ok(chemin)
+}
+
 /// Calcule le masque cérébral d'un volume IRM fœtal et l'écrit en NIfTI.
 ///
 /// Reproduit l'inférence de Fetal-BET :
@@ -374,15 +505,26 @@ fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
 /// 4. retour des logits sur la grille d'origine, puis argmax ;
 /// 5. écriture du masque (`uint8`, même affine que l'entrée) dans `output_path`.
 ///
+/// `model_path` à `None` : poids par défaut, téléchargés au besoin (voir
+/// [`default_model_path`]), **après** la vérification de l'entrée et du dossier de
+/// sortie, pour ne pas télécharger 121 Mo avant une faute de frappe.
+///
 /// # Erreurs
-/// `MaskError::ModelNotFound` si `model_path` n'existe pas ;
+/// `MaskError::ModelNotFound` si `model_path` est donné et n'existe pas ;
 /// `MaskError::OutputDirNotFound` si le dossier de `output_path` n'existe pas
 /// (vérifié avant tout calcul) ; `MaskError::Nifti` ou `MaskError::NotVolume3D`
-/// si l'entrée est invalide. Un fichier de poids
-/// présent mais invalide fait paniquer le chargement du modèle (code généré).
-pub fn segment(input_path: &Path, output_path: &Path, model_path: &Path) -> Result<(), MaskError> {
-    if !model_path.exists() {
-        return Err(MaskError::ModelNotFound(model_path.to_path_buf()));
+/// si l'entrée est invalide ; `MaskError::ModelDownload` si le téléchargement des
+/// poids par défaut échoue. Un fichier de poids présent mais invalide fait
+/// paniquer le chargement du modèle (code généré).
+pub fn segment(
+    input_path: &Path,
+    output_path: &Path,
+    model_path: Option<&Path>,
+) -> Result<(), MaskError> {
+    if let Some(chemin) = model_path {
+        if !chemin.exists() {
+            return Err(MaskError::ModelNotFound(chemin.to_path_buf()));
+        }
     }
     // `parent()` vaut `Some("")` pour un nom de fichier seul : le dossier courant.
     if let Some(dossier) = output_path.parent() {
@@ -395,11 +537,17 @@ pub fn segment(input_path: &Path, output_path: &Path, model_path: &Path) -> Resu
     let (nx, ny, _) = volume.dim();
     let spacing = [info.spacing[0], info.spacing[1]];
 
+    // Les poids par défaut ne sont téléchargés qu'une fois l'entrée validée.
+    let model_path = match model_path {
+        Some(chemin) => chemin.to_path_buf(),
+        None => default_model_path()?,
+    };
+
     let mut prep = resample_in_plane(&volume, spacing);
     normalize_slices(&mut prep);
 
     let device = Device::default();
-    let modele = model::Model::from_file(model_path, &device);
+    let modele = model::Model::from_file(&model_path, &device);
     let logits = infer_logits(&modele, &device, &prep);
 
     let masque = logits_to_mask(&logits, spacing, (nx, ny));
@@ -790,7 +938,7 @@ mod tests {
         let r = segment(
             Path::new("in.nii.gz"),
             Path::new("out.nii.gz"),
-            Path::new("n_existe_pas.bpk"),
+            Some(Path::new("n_existe_pas.bpk")),
         );
         assert!(matches!(r, Err(MaskError::ModelNotFound(_))));
     }
@@ -803,9 +951,46 @@ mod tests {
         let r = segment(
             Path::new("n_existe_pas.nii.gz"),
             Path::new("/dossier_inexistant_medoxide/masque.nii.gz"),
-            Path::new(&format!("{racine}/models/attunet.bpk")),
+            Some(Path::new(&format!("{racine}/models/attunet.bpk"))),
         );
         assert!(matches!(r, Err(MaskError::OutputDirNotFound(_))), "{r:?}");
+    }
+
+    #[test]
+    fn cache_dir_prefers_xdg_then_home() {
+        let os = |v: &str| Some(OsString::from(v));
+        assert_eq!(
+            cache_dir_from(os("/xdg"), os("/home/u")),
+            Some(PathBuf::from("/xdg/medoxide"))
+        );
+        assert_eq!(
+            cache_dir_from(None, os("/home/u")),
+            Some(PathBuf::from("/home/u/.cache/medoxide"))
+        );
+        // Variables vides : traitées comme absentes.
+        assert_eq!(
+            cache_dir_from(os(""), os("/home/u")),
+            Some(PathBuf::from("/home/u/.cache/medoxide"))
+        );
+        assert_eq!(cache_dir_from(None, None), None);
+        assert_eq!(cache_dir_from(os(""), os("")), None);
+    }
+
+    /// Réseau : une empreinte fausse est refusée et ne laisse aucun fichier.
+    /// Lancer avec `cargo test -p medoxide-fetalbet -- --ignored download_rejects`.
+    #[test]
+    #[ignore = "nécessite le réseau"]
+    fn download_rejects_wrong_checksum_and_cleans_up() {
+        let dossier = std::env::temp_dir().join(format!("medoxide_dl_{}", std::process::id()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let dest = dossier.join("fiche.md");
+        // Petit fichier du dépôt Hugging Face (la fiche), avec une empreinte volontairement fausse.
+        let url = "https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/README.md";
+        let r = download_verified(url, &dest, &"0".repeat(64));
+        let reste = std::fs::read_dir(&dossier).unwrap().count();
+        std::fs::remove_dir_all(&dossier).unwrap();
+        assert!(matches!(r, Err(MaskError::ModelDownload(ref m)) if m.contains("SHA-256")), "{r:?}");
+        assert_eq!(reste, 0, "fichier résiduel après un échec");
     }
 
     /// Étape 8 : `segment` de bout en bout (fichier NIfTI → fichier NIfTI) contre
@@ -816,8 +1001,8 @@ mod tests {
         let sortie = std::env::temp_dir().join(format!("medoxide_e2e_{}_{nom}.nii.gz", std::process::id()));
 
         let debut = std::time::Instant::now();
-        segment(Path::new(&entree), &sortie, Path::new(&format!("{racine}/models/attunet.bpk")))
-            .unwrap();
+        let poids = format!("{racine}/models/attunet.bpk");
+        segment(Path::new(&entree), &sortie, Some(Path::new(&poids))).unwrap();
         let duree = debut.elapsed();
 
         let masque: Array3<u8> = read_volume(&sortie).unwrap().mapv(|v| v as u8);

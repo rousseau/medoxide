@@ -8,6 +8,8 @@ nifti = { workspace = true }
 ndarray = { workspace = true }
 burn = { workspace = true }
 burn-store = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
 
 # burn + burn-onnx arriveront ici à l'étape "import du modèle ONNX".
 # On les ajoute seulement quand on en a un usage concret (principe YAGNI) :

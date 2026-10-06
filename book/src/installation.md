@@ -29,24 +29,28 @@ quelques minutes (environ 3 minutes sur notre machine). Le binaire est
 
 ## Poids du modèle
 
-Les poids ne sont pas dans le dépôt Git (121 Mo). `medx fetalbet` les cherche,
-dans cet ordre :
+Les poids (121 Mo, [Hugging Face](https://huggingface.co/rousseau/medoxide-fetalbet))
+sont **téléchargés automatiquement** au premier lancement de `medx fetalbet`, puis
+conservés dans `~/.cache/medoxide/attunet.bpk` (ou `$XDG_CACHE_HOME/medoxide/`). Le
+SHA-256 est vérifié, et un téléchargement interrompu ne laisse pas de fichier
+partiel. Les lancements suivants n'ont pas besoin du réseau.
+
+`medx fetalbet` cherche les poids dans cet ordre :
 
 1. l'option `--model chemin/attunet.bpk` ;
 2. la variable d'environnement `MEDOXIDE_MODEL` ;
-3. le fichier `models/attunet.bpk`, **relatif au dossier depuis lequel vous
-   lancez la commande**.
+3. le cache ci-dessus, où ils sont téléchargés s'ils sont absents.
 
-Ils sont téléchargeables sur Hugging Face :
-[rousseau/medoxide-fetalbet](https://huggingface.co/rousseau/medoxide-fetalbet).
+Un chemin donné par `--model` ou `MEDOXIDE_MODEL` n'est jamais remplacé par un
+téléchargement : s'il n'existe pas, c'est une erreur. Hors ligne, téléchargez le
+fichier à l'avance et indiquez-le avec `--model` :
 
 ```bash
-mkdir -p models
-curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
+curl -L -o attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
 ```
 
 Le SHA-256 attendu est `a70bcbe8da5f791b751c293a851505eb1aa9aa44c50def0afc41fd34bd60c3c2`
-(`shasum -a 256 models/attunet.bpk`).
+(`shasum -a 256 attunet.bpk`).
 
 Ces poids sont ceux de Fetal-BET, convertis au format `burnpack` de Burn, sous la
 même licence CC BY 4.0 : voir [Algorithmes et références](algorithmes.md) pour la
@@ -70,6 +74,9 @@ python scripts/export_onnx.py
 cargo install burn-onnx --version 0.22.0-pre.4 --bin onnx2burn
 onnx2burn models/attunet.onnx /dossier/de/sortie
 cp /dossier/de/sortie/attunet.bpk models/
+
+# 4. L'utiliser
+medx fetalbet --input image.nii.gz --output masque.nii.gz --model models/attunet.bpk
 ```
 
 Le code du modèle (`crates/medoxide-fetalbet/src/model.rs`) vient de la même

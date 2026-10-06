@@ -333,6 +333,46 @@ que le temps est dominé par le GPU ou la lecture synchrone des résultats.
   approbation. Fait dans l'en-tête de `model.rs` et dans le `README.md`.
 - **Où** : `crates/medoxide-fetalbet/src/model.rs`, `README.md`.
 
+## 2026-10-06 — Télécharger les poids automatiquement
+
+- **Quoi** : lire un flux réseau par blocs. La réponse HTTP (crate `ureq`) se lit
+  avec le trait `Read` : `lecteur.read(&mut tampon)` remplit un tampon de 64 Ko et
+  renvoie le nombre d'octets lus (0 = fin). À chaque bloc, on l'écrit dans un
+  fichier (`write_all`, trait `Write`) et on alimente un hachage SHA-256
+  (`Sha256::update`). Jamais plus de 64 Ko en mémoire pour 121 Mo de poids.
+- **Pourquoi ici** : vérifier l'intégrité sans relire le fichier, et ne pas
+  dépendre de la mémoire disponible.
+- **Où** : `download_verified` dans `crates/medoxide-fetalbet/src/lib.rs`.
+
+- **Quoi** : écrire un fichier de façon atomique. On écrit dans `attunet.part`, on
+  vérifie le SHA-256, puis `std::fs::rename` le renomme en `attunet.bpk`. Si
+  quoi que ce soit échoue, on supprime le `.part` : on n'obtient jamais un faux
+  fichier de poids.
+- **Quoi** : une fermeture appelée immédiatement, `let resultat = (|| { ... })();`,
+  qui regroupe plusieurs `?` : quel que soit l'endroit de l'échec, on passe
+  ensuite au nettoyage, puis on renvoie l'erreur d'origine.
+
+- **Quoi** : `?` sur un `Option` (comme sur un `Result`) : `home.filter(..)?` fait
+  sortir de la fonction avec `None` si la valeur est absente. Et
+  `Option<&Path>` : `model.as_deref()` convertit un `Option<PathBuf>` en
+  `Option<&Path>` sans consommer l'original.
+- **Quoi** : passer l'environnement en paramètres (`cache_dir_from(xdg, home)`)
+  plutôt que lire `std::env` dans la fonction : on peut la tester sans modifier
+  les variables d'environnement du processus.
+- **Pourquoi ici** : `segment` accepte maintenant `Option<&Path>` pour les poids ;
+  `None` déclenche le téléchargement **après** avoir validé l'entrée et le dossier
+  de sortie, pour qu'une faute de frappe ne coûte pas 121 Mo.
+
+Choix de conception : l'URL est épinglée sur une révision précise du dépôt
+Hugging Face, et le SHA-256 est vérifié ; un fichier déjà en cache n'est pas
+revérifié (il l'a été au téléchargement, et écrit atomiquement).
+
+**Vérifié** : faute de frappe ou `--model` inexistant : aucun téléchargement ;
+réseau en panne (proxy invalide) : message clair, aucun fichier laissé ; premier
+lancement : téléchargement, SHA-256 correct, masque identique (Dice 0,999987 sur
+fetus_06) ; second lancement : sans réseau. Test réseau `#[ignore]` : une
+empreinte fausse est refusée et ne laisse aucun fichier.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

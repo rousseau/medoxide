@@ -15,6 +15,9 @@ ndarray = "0.17"
 # on n'a pas besoin pour de l'inférence.
 burn = { version = "0.22.0-pre.4", default-features = false, features = ["std", "wgpu"] }
 burn-store = "0.22.0-pre.4"
+# Téléchargement des poids par défaut (client HTTP bloquant) et vérification SHA-256.
+ureq = "3"
+sha2 = "0.11"
 
 [workspace.package]
 version = "0.1.0"

@@ -40,12 +40,15 @@ responsabilité.
 
 ## Utilisation
 
+`medx fetalbet` télécharge et met en cache ces poids automatiquement au premier
+lancement. Pour les récupérer à la main :
+
 ```bash
 hf download rousseau/medoxide-fetalbet attunet.bpk --local-dir models
 # ou, sans outil particulier :
 curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
 
-./target/release/medx fetalbet --input mon_image.nii.gz --output mon_masque.nii.gz
+./target/release/medx fetalbet --input mon_image.nii.gz --output mon_masque.nii.gz --model models/attunet.bpk
 ```
 
 Documentation de medoxide (installation, options) : <https://rousseau.github.io/medoxide/>.
