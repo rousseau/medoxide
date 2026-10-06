@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 
 use medoxide_core::{read_volume, volume_info, CoreError};
-use nalgebra::{Matrix3, Matrix4};
-use ndarray::Array3;
+use nalgebra::{Matrix3, Matrix4, Vector3, Vector4};
+use ndarray::{Array3, ArrayView2, Axis};
 
 /// Cosinus maximal toléré entre deux colonnes de l'affine : au-delà, les axes ne sont pas
 /// orthogonaux (cisaillement) et la coupe n'a plus de repère rigide.
@@ -162,6 +162,99 @@ impl Stack {
     /// Nombre de voxels sur chaque axe `(x, y, z)` ; `z` est le nombre de coupes.
     pub fn dim(&self) -> (usize, usize, usize) {
         self.data.dim()
+    }
+
+    /// La coupe `k` (plan `z = k`), ou `None` si `k` dépasse le nombre de coupes.
+    ///
+    /// La coupe **emprunte** ce stack : le `'_` de `Slice<'_>` dit qu'elle ne peut pas lui survivre.
+    pub fn slice(&self, k: usize) -> Option<Slice<'_>> {
+        (k < self.data.dim().2).then_some(Slice { stack: self, k })
+    }
+
+    /// Toutes les coupes, dans l'ordre des `k` croissants.
+    pub fn slices(&self) -> impl Iterator<Item = Slice<'_>> {
+        (0..self.data.dim().2).map(move |k| Slice { stack: self, k })
+    }
+}
+
+/// Une coupe 2D d'un [`Stack`] et son repère dans le monde.
+///
+/// `Slice<'a>` **emprunte** le stack (`&'a Stack`) : le compilateur garantit qu'une coupe ne vit
+/// jamais plus longtemps que le stack d'où elle vient. Elle ne contient qu'une référence et un
+/// indice, donc `Copy`.
+///
+/// Géométrie de la coupe `k` : un point de coordonnées `(i, j)` dans le plan de la coupe a pour
+/// position monde `A · (i, j, k, 1)`, soit la matrice [`Slice::affine`] appliquée à `(i, j, 0, 1)`.
+/// Aucune transformation de mouvement n'est incluse : elle viendra composée **après** cette matrice.
+#[derive(Debug, Clone, Copy)]
+pub struct Slice<'a> {
+    stack: &'a Stack,
+    k: usize,
+}
+
+impl<'a> Slice<'a> {
+    /// Indice `k` de la coupe dans son stack.
+    pub fn index(&self) -> usize {
+        self.k
+    }
+
+    /// Nombre de voxels de la coupe `(x, y)`.
+    pub fn dim(&self) -> (usize, usize) {
+        let (nx, ny, _) = self.stack.data.dim();
+        (nx, ny)
+    }
+
+    /// Voxels de la coupe, vue en lecture seule sur les données du stack.
+    ///
+    /// La vue vit aussi longtemps que le **stack** (`'a`), pas seulement que cette `Slice`.
+    pub fn data(&self) -> ArrayView2<'a, f32> {
+        self.stack.data.index_axis(Axis(2), self.k)
+    }
+
+    /// Affine de la coupe : `A · T(0, 0, k)`. Envoie `(i, j, 0, 1)` sur la position monde (mm) du
+    /// voxel `(i, j)` de cette coupe. La translation de `k` pas le long de la 3ᵉ colonne s'ajoute à
+    /// l'origine : `A · T(0,0,k)` a la même partie linéaire que `A`, avec `origine + k · colonne 3`.
+    pub fn affine(&self) -> Matrix4<f64> {
+        let mut m = *self.stack.affine();
+        let k = self.k as f64;
+        for r in 0..3 {
+            m[(r, 3)] += k * m[(r, 2)];
+        }
+        m
+    }
+
+    /// Position monde (RAS+, mm) du point `(i, j)` du plan de la coupe (indices continus permis).
+    pub fn pixel_to_world(&self, i: f64, j: f64) -> Vector3<f64> {
+        (self.affine() * Vector4::new(i, j, 0.0, 1.0)).xyz()
+    }
+
+    /// Axes du plan de la coupe : colonnes 0 et 1 de l'affine, normalisées (vecteurs unitaires).
+    pub fn in_plane_axes(&self) -> [Vector3<f64>; 2] {
+        let a = self.stack.affine();
+        [
+            a.fixed_view::<3, 1>(0, 0).into_owned().normalize(),
+            a.fixed_view::<3, 1>(0, 1).into_owned().normalize(),
+        ]
+    }
+
+    /// Normale de la coupe : **3ᵉ colonne de l'affine, normalisée**, orientée dans le sens des `k`
+    /// croissants. Ce n'est volontairement pas le produit vectoriel des axes du plan, qui pointerait
+    /// à l'envers pour une affine à déterminant négatif (le cas des stacks du jeu de développement).
+    pub fn normal(&self) -> Vector3<f64> {
+        self.stack.affine().fixed_view::<3, 1>(0, 2).into_owned().normalize()
+    }
+
+    /// Épaisseur de la coupe en mm : l'espacement entre coupes (NIfTI-1 n'a pas de champ
+    /// d'épaisseur ; hypothèse vérifiée sans écart sur les 96 stacks du jeu de développement).
+    pub fn thickness(&self) -> f64 {
+        self.stack.spacing()[2]
+    }
+
+    /// Centre géométrique de la coupe (monde, mm) : le point `((nx-1)/2, (ny-1)/2)`. Référence
+    /// « sans masque » ; le pivot choisi (barycentre du masque) est calculé à l'étape suivante.
+    pub fn geometric_center(&self) -> Vector3<f64> {
+        let (nx, ny) = self.dim();
+        self.pixel_to_world((nx - 1) as f64 / 2.0, (ny - 1) as f64 / 2.0)
     }
 }
 
@@ -340,5 +433,136 @@ mod tests {
             assert_eq!(s.dim().2, s.data().dim().2);
         }
         assert_eq!(gauches, 96, "tous les stacks du jeu sont censés être à déterminant négatif");
+    }
+
+    // ------------------------------------------------------------------ étape 1b : coupes
+
+    /// Stack synthétique 4×3×2 d'affine donnée (3 premières lignes).
+    fn stack_synthetique(t: &Temp, lignes: [[f32; 4]; 3], pixdim: [f32; 3]) -> Stack {
+        let f = t.fichier("coupes.nii.gz");
+        ecrire_3d(&f, &en_tete(lignes, pixdim, 1));
+        Stack::read(&f).unwrap()
+    }
+
+    #[test]
+    fn slice_geometry_of_a_diagonal_stack() {
+        let t = Temp::new("coupe_diag");
+        let s = stack_synthetique(&t, DIAG, [1.0, 2.0, 3.0]);
+        let c = s.slice(1).unwrap();
+        // origine (10, 20, 30) ; k = 1 décale de 3 mm selon z : (10, 20, 33).
+        assert_eq!(c.pixel_to_world(0.0, 0.0), Vector3::new(10.0, 20.0, 33.0));
+        assert_eq!(c.pixel_to_world(3.0, 2.0), Vector3::new(13.0, 24.0, 33.0));
+        // centre géométrique : ((4-1)/2, (3-1)/2) = (1,5 ; 1) -> (11,5 ; 22 ; 33).
+        assert_eq!(c.geometric_center(), Vector3::new(11.5, 22.0, 33.0));
+        assert_eq!(c.normal(), Vector3::new(0.0, 0.0, 1.0));
+        assert_eq!(c.thickness(), 3.0);
+        assert_eq!(c.in_plane_axes()[0], Vector3::new(1.0, 0.0, 0.0));
+        assert_eq!(c.data().dim(), (4, 3));
+        assert!(s.slice(2).is_none());
+        assert_eq!(s.slices().count(), 2);
+        assert_eq!(s.slices().map(|c| c.index()).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    /// La normale est la 3ᵉ colonne, pas le produit vectoriel des axes du plan (opposé ici).
+    #[test]
+    fn normal_follows_the_third_column_for_a_left_handed_affine() {
+        let t = Temp::new("coupe_gauche");
+        let lignes = [[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        let s = stack_synthetique(&t, lignes, [1.0, 1.0, 1.0]);
+        let c = s.slice(0).unwrap();
+        let [u, v] = c.in_plane_axes();
+        assert_eq!(c.normal(), Vector3::new(0.0, 0.0, 1.0));
+        assert_eq!(u.cross(&v), Vector3::new(0.0, 0.0, -1.0)); // le produit vectoriel pointerait à l'envers
+        assert!(u.cross(&v).dot(&c.normal()) < 0.0);
+    }
+
+    /// Lit la table de références produite par `scripts/make_reference_slice_coords.py` :
+    /// (chemin du stack, lignes `[i, j, k, x_nibabel, y, z, x_simpleitk_ras, y, z]`).
+    fn references() -> Vec<(PathBuf, Vec<[f64; 9]>)> {
+        let racine = racine();
+        let index = std::fs::read_to_string(format!("{racine}/data/reference/slicecoords/index.tsv"))
+            .expect("références absentes : lancer scripts/make_reference_slice_coords.py");
+        index
+            .lines()
+            .map(|l| {
+                let (stack, reference) = l.split_once('\t').unwrap();
+                let octets = std::fs::read(format!("{racine}/{reference}")).unwrap();
+                let valeurs: Vec<f64> =
+                    octets.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+                let lignes = valeurs.chunks_exact(9).map(|r| <[f64; 9]>::try_from(r).unwrap()).collect();
+                (PathBuf::from(format!("{racine}/{stack}")), lignes)
+            })
+            .collect()
+    }
+
+    /// Critères 1 et 2 de l'étape 1 : coordonnées monde par coupe contre nibabel (< 1e-6 mm,
+    /// calcul indépendant) et contre SimpleITK converti en RAS (< 1e-3 mm), sur les 8 volumes de
+    /// Fetal-BET et les 96 stacks du jeu de développement.
+    ///
+    /// Seuil SimpleITK : 1e-3 mm au lieu des 1e-4 mm fixés d'abord. Écart mesuré 2,6e-4 mm : ITK
+    /// bâtit sa géométrie avec `pixdim` (f32) et une direction orthonormalisée, d'où un écart de
+    /// l'ordre du trois-millième de voxel avec l'affine stockée (qu'applique nibabel, et nous).
+    #[test]
+    fn world_coordinates_match_nibabel_and_simpleitk() {
+        let refs = references();
+        assert_eq!(refs.len(), 104, "8 volumes de Fetal-BET + 96 stacks");
+        let (mut pire_nib, mut pire_itk) = (0.0_f64, 0.0_f64);
+        for (chemin, lignes) in &refs {
+            let stack = Stack::read(chemin).unwrap();
+            let (_, _, nz) = stack.dim();
+            for (n, r) in lignes.iter().enumerate() {
+                let (i, j, k) = (r[0], r[1], r[2]);
+                // 5 premiers points de chaque coupe : coins et centre, via la coupe ; le reste : points
+                // continus dans le volume, via l'affine du stack.
+                let monde = if n < 5 * nz {
+                    stack.slice(k as usize).unwrap().pixel_to_world(i, j)
+                } else {
+                    (stack.affine() * Vector4::new(i, j, k, 1.0)).xyz()
+                };
+                let nib = Vector3::new(r[3], r[4], r[5]);
+                let itk = Vector3::new(r[6], r[7], r[8]);
+                pire_nib = pire_nib.max((monde - nib).amax());
+                pire_itk = pire_itk.max((monde - itk).amax());
+            }
+        }
+        println!("écart max : nibabel {pire_nib:.2e} mm, SimpleITK-RAS {pire_itk:.2e} mm");
+        assert!(pire_nib < 1e-6, "nibabel : {pire_nib:.2e} mm");
+        assert!(pire_itk < 1e-3, "SimpleITK : {pire_itk:.2e} mm");
+    }
+
+    /// Critère 3 : invariants géométriques de chaque stack, sans référence externe.
+    #[test]
+    fn slice_invariants_hold_on_all_stacks() {
+        let refs = references();
+        let mut n_coupes = 0;
+        for (chemin, _) in &refs {
+            let stack = Stack::read(chemin).unwrap();
+            let pixdim = volume_info(chemin).unwrap().spacing.map(f64::from);
+            let col3 = stack.affine().fixed_view::<3, 1>(0, 2).into_owned();
+            let coupes: Vec<_> = stack.slices().collect();
+            for c in &coupes {
+                n_coupes += 1;
+                let [u, v] = c.in_plane_axes();
+                let n = c.normal();
+                assert!((n.norm() - 1.0).abs() < 1e-12 && (u.norm() - 1.0).abs() < 1e-12);
+                assert!(n.cross(&col3).norm() < 1e-9, "normale non colinéaire à la 3e colonne");
+                assert!(n.dot(&col3) > 0.0, "normale à l'envers");
+                assert!(n.dot(&u).abs() < 1e-6 && n.dot(&v).abs() < 1e-6, "normale non orthogonale au plan");
+                // pas dans le plan = espacement (norme des colonnes) ≈ pixdim de l'en-tête (1e-4 mm)
+                let pas_i = (c.pixel_to_world(1.0, 0.0) - c.pixel_to_world(0.0, 0.0)).norm();
+                let pas_j = (c.pixel_to_world(0.0, 1.0) - c.pixel_to_world(0.0, 0.0)).norm();
+                assert!((pas_i - pixdim[0]).abs() < 1e-4 && (pas_j - pixdim[1]).abs() < 1e-4);
+                assert!((c.thickness() - pixdim[2]).abs() < 1e-4);
+            }
+            // centres de coupes consécutives : écart = espacement entre coupes, le long de la normale
+            for paire in coupes.windows(2) {
+                let ecart = paire[1].geometric_center() - paire[0].geometric_center();
+                let n = paire[0].normal();
+                assert!((ecart.dot(&n) - pixdim[2]).abs() < 1e-4, "pas entre coupes");
+                assert!((ecart - n * ecart.dot(&n)).norm() < 1e-4, "décalage latéral entre coupes");
+            }
+        }
+        println!("invariants vérifiés sur {n_coupes} coupes de {} stacks", refs.len());
+        assert!(n_coupes > 3000);
     }
 }

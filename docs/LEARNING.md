@@ -436,6 +436,45 @@ cisaillement, `pixdim` incohérent, affine dégénérée, 4D, fichier absent, af
 négatif acceptée) ; affines lues pour 3 volumes de Fetal-BET égales à celles de nibabel (arrondies
 à 4 décimales) ; **les 96 stacks du jeu de développement se chargent, tous à déterminant négatif**.
 
+## 2026-10-06 — Le repère de chaque coupe et la première durée de vie (étape 1b du SVR)
+
+- **Quoi** : une **durée de vie** (*lifetime*), notée `'a`. `Slice<'a>` ne possède pas ses données : elle
+  **emprunte** un `Stack` (`stack: &'a Stack`) et le compilateur garantit qu'une coupe ne survit jamais
+  à son stack (sinon elle pointerait vers de la mémoire libérée). La coupe ne contient qu'une référence et
+  un indice : elle est `Copy` (`#[derive(Clone, Copy)]`).
+- **Pourquoi ici** : une coupe n'est qu'un indice `k` sur le stack ; la copier avec ses voxels n'aurait
+  aucun sens et coûterait cher.
+- **Où** : `Slice<'a>`, `Stack::slice`, `Stack::slices` dans `crates/medoxide-svr/src/lib.rs`.
+
+- **Quoi** : `'_`, la durée de vie *anonyme*. `fn slice(&self, k: usize) -> Option<Slice<'_>>` veut dire
+  « la coupe rendue emprunte `self` » : le compilateur déduit le lien, on ne le nomme pas.
+- **Quoi** : une méthode qui rend une vue de durée de vie **`'a`** (celle du stack) et non celle de `&self` :
+  `fn data(&self) -> ArrayView2<'a, f32>`. On peut ainsi garder la vue après la disparition de l'objet
+  `Slice` (une simple référence), tant que le stack existe.
+- **Quoi** : `impl Iterator<Item = Slice<'_>>` comme type de retour : `slices()` rend un itérateur sans
+  nommer son type ; `.map(move |k| ...)` capture `self` par la fermeture (`move`).
+- **Quoi** : `bool::then_some(valeur)` : `(k < n).then_some(x)` donne `Some(x)` ou `None`.
+
+**Géométrie de la coupe `k`** : `A · T(0,0,k)`, c'est-à-dire la même partie linéaire que `A` et l'origine
+décalée de `k` fois la 3ᵉ colonne ; elle envoie `(i, j, 0, 1)` sur la position monde. **Normale = 3ᵉ colonne
+normalisée** (pas le produit vectoriel des axes du plan, qui pointe à l'envers pour une affine à
+déterminant négatif : un test synthétique le montre). Épaisseur = espacement entre coupes. Centre
+géométrique = point `((nx−1)/2, (ny−1)/2)`.
+
+**Vérifié** (13 tests) :
+- critère 1 : coordonnées monde de 5 points par coupe (coins et centre) et de 2000 points aléatoires par
+  stack, sur les 8 volumes de Fetal-BET et les 96 stacks du jeu de développement : écart maximal à
+  nibabel **1,1e-13 mm** (seuil 1e-6) ;
+- critère 2 : écart maximal à SimpleITK (converti LPS → RAS) **2,6e-4 mm**. Seuil révisé de 1e-4 à 1e-3 mm
+  après diagnostic : ITK construit sa géométrie avec `pixdim` (f32) et une direction orthonormalisée
+  (en recalculant ainsi l'affine de nibabel, l'écart tombe à 5,5e-5 mm), soit un trois-millième de voxel,
+  alors que l'affine stockée (celle de nibabel et de `Stack`) reste la référence stricte ;
+- critère 3 : invariants sur 3413 coupes de 104 stacks (normale unitaire, colinéaire à la 3ᵉ colonne et
+  orthogonale au plan, pas dans le plan et entre coupes égaux à `pixdim` à 1e-4 mm) ;
+- trois **mutations volontaires** du code (mauvaise colonne dans l'affine de coupe, normale par produit
+  vectoriel, centre en `nx/2`) sont chacune détectée par au moins un test. Le centre géométrique n'est
+  contrôlé que par un stack synthétique, pas par les références Python.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*
