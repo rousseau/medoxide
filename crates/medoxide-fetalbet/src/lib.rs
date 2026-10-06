@@ -411,8 +411,8 @@ mod tests {
     use super::*;
 
     /// Valeurs de référence calculées avec nibabel (arrondies à 2 décimales).
-    /// Les volumes se récupèrent avec :
-    /// `rclone sync garage:study-x/medoxide-dev/sourcedata data/sourcedata`
+    /// Les volumes (`data/sourcedata/`) sont les 8 volumes d'exemple du dépôt
+    /// Fetal-BET (`dataset/f0832s1`) ; voir `book/src/validation.md`.
     #[test]
     fn volume_info_matches_nibabel() {
         let attendu: [(&str, u16, f32, f32); 8] = [
