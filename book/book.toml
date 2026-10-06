@@ -6,3 +6,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/rousseau/medoxide"
+# Site publié sur https://rousseau.github.io/medoxide/ (utile pour la page 404)
+site-url = "/medoxide/"
