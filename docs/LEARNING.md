@@ -584,6 +584,43 @@ le stack (dimensions, et affine à 1e-3 près, `sform` obligatoire) et ne pas ê
 **Erreur de ma part, corrigée** : mon premier test comparait mal les groupes parce que le fichier de référence
 liste les stacks groupe par groupe et non par indice ; je l'ai pris pour un défaut du code Rust avant de lire le test.
 
+## 2026-10-07 — Lire un volume en un point du monde (étape 2a du SVR)
+
+- **Quoi** : l'**interpolation trilinéaire**. La valeur en un point est la moyenne pondérée des **8 voxels voisins**,
+  les poids étant les fractions de distance sur chaque axe (`1 - t` d'un côté, `t` de l'autre, sur x puis y puis z).
+  Elle est **exacte pour une fonction linéaire** des indices, ce qui donne un test sans référence externe.
+- **Pourquoi ici** : une coupe simulée a besoin de la valeur de la reconstruction `V` à des positions arbitraires,
+  qui ne tombent presque jamais sur un centre de voxel. Choix de l'étude 04 : trilinéaire plutôt que voxel le plus
+  proche (pas d'erreur d'arrondi de position, fonction continue de la pose, utile au recalage par gradient).
+- **Où** : `Volume`, `Volume::sample` dans `crates/medoxide-svr/src/lib.rs`.
+
+- **Quoi** : la **matrice inverse**. Pour passer d'un point du monde à des indices de voxel continus, on applique
+  l'inverse de l'affine ; `Matrix4::try_inverse()` rend un `Option` (`None` si la matrice est singulière), que
+  `Volume::new` transforme en erreur (`SingularVolumeAffine`). On vérifie aussi que tout est fini.
+- **Quoi** : « dehors » est une **réponse, pas une valeur**. `sample` rend `None` hors de la zone entre les centres du
+  premier et du dernier voxel de chaque axe (un des 8 voisins manquerait) : on ne fabrique pas de zéro. La
+  comparaison `!(v >= a && v <= b)` est vraie aussi pour `NaN`, qui échoue à toute comparaison.
+- **Quoi** : `[0, 1, 2].map(|a| ...)` construit un tableau de 3 éléments en appliquant une fermeture à chaque
+  élément ; `clamp(min, max)` borne une valeur ; `Vector3::from_fn`.
+
+**Défaut trouvé par les tests et corrigé** : un point situé exactement sur le dernier centre de voxel sortait de la
+grille, car l'aller-retour monde → indices par une affine avec rotation donne `3,0000000000000004` au lieu de `3`.
+`sample` accepte désormais 1e-9 voxel de tolérance au bord (`GRID_BOUNDARY_TOLERANCE`), sans sens physique, puis ramène
+la coordonnée sur le bord.
+
+**Critère 1 de l'étude 04, scindé avant la mesure** : contre `scipy.ndimage.map_coordinates` (même correspondance
+monde → indices, interpolation indépendante) : écart relatif au contraste < 1e-5 ; contre SimpleITK
+(`EvaluateAtPhysicalPoint`, qui valide aussi l'orientation) : < 1e-3, seuil moins strict parce qu'ITK construit sa
+géométrie avec `pixdim` (écart de 2,6e-4 mm mesuré à l'étape 1b).
+
+**Vérifié** (5 nouveaux tests) : sur 4 paires de stacks réels (volume = stack axial, points = pixels de coupes du stack
+coronal du même sujet, affines obliques à déterminant négatif), **97 340 points comparés** : écart relatif au contraste
+de **0** avec scipy et de **2,1e-5** avec SimpleITK, et le domaine « dans la grille » de Rust est identique à celui de la
+référence, point par point (0 incohérence). Fonction linéaire exacte à 1e-5 avec une affine tournée, mise à l'échelle et
+à déterminant négatif ; dehors (y compris `NaN`, 1e12, un demi-voxel avant le premier centre) donne `None` ; affine
+singulière refusée ; axe d'un seul voxel. Trois mutations volontaires (poids échangés, voisin le plus proche, affine
+directe à la place de l'inverse) sont détectées.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

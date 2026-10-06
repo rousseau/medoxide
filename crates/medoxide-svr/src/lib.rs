@@ -40,6 +40,8 @@ pub enum SvrError {
     MaskGridMismatch { path: PathBuf, detail: String },
     /// Le masque cérébral ne contient aucun voxel.
     EmptyMask(PathBuf),
+    /// L'affine d'un volume n'est pas inversible (ou contient des valeurs non finies).
+    SingularVolumeAffine,
     /// Le stack n'a pas de masque cérébral attaché (nécessaire pour le placer dans un groupe).
     NoMask(PathBuf),
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
@@ -67,6 +69,7 @@ impl std::fmt::Display for SvrError {
                 write!(f, "{} : masque incompatible avec le stack ({detail})", path.display())
             }
             SvrError::EmptyMask(p) => write!(f, "{} : masque vide", p.display()),
+            SvrError::SingularVolumeAffine => write!(f, "affine de volume non inversible ou non finie"),
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
@@ -150,6 +153,97 @@ impl BrainMask {
     /// Barycentre 3D du masque nettoyé, en **indices de voxel** continus `(i, j, k)`.
     pub fn barycenter_index(&self) -> Vector3<f64> {
         self.barycenter
+    }
+}
+
+/// Tolérance, en voxels, sur la limite de la grille dans [`Volume::sample`] : l'aller-retour monde → indices
+/// par une affine avec rotation introduit des erreurs d'arrondi de l'ordre de 1e-15, qui feraient sortir de la
+/// grille un point situé exactement sur le dernier centre de voxel. 1e-9 voxel n'a aucun sens physique.
+const GRID_BOUNDARY_TOLERANCE: f64 = 1e-9;
+
+/// Un volume : une grille régulière de voxels et son affine voxel → monde. C'est la forme de la
+/// **reconstruction** `V`, dont on simule les coupes.
+///
+/// L'affine est quelconque (rotation, mise à l'échelle, éventuellement déterminant négatif) pourvu qu'elle
+/// soit inversible : la valeur du volume en un point du monde s'obtient par [`Volume::sample`].
+#[derive(Debug, Clone)]
+pub struct Volume {
+    data: Array3<f32>,
+    affine: Matrix4<f64>,
+    inverse: Matrix4<f64>,
+}
+
+impl Volume {
+    /// Construit un volume à partir de ses voxels et de son affine voxel → monde (RAS+, mm).
+    ///
+    /// # Erreurs
+    /// [`SvrError::SingularVolumeAffine`] si l'affine n'est pas inversible ou contient un `NaN` / une valeur infinie.
+    pub fn new(data: Array3<f32>, affine: Matrix4<f64>) -> Result<Volume, SvrError> {
+        // `try_inverse` rend `None` si la matrice est singulière : on en fait une erreur.
+        let inverse = affine.try_inverse().ok_or(SvrError::SingularVolumeAffine)?;
+        if !affine.iter().chain(inverse.iter()).all(|v| v.is_finite()) {
+            return Err(SvrError::SingularVolumeAffine);
+        }
+        Ok(Volume { data, affine, inverse })
+    }
+
+    /// Le volume formé par les voxels d'un stack et son affine (les voxels sont copiés).
+    pub fn from_stack(stack: &Stack) -> Volume {
+        Volume::new(stack.data().clone(), *stack.affine())
+            .expect("l'affine d'un Stack est validée (colonnes orthogonales et non nulles), donc inversible")
+    }
+
+    /// Voxels, axes `[x, y, z]`.
+    pub fn data(&self) -> &Array3<f32> {
+        &self.data
+    }
+
+    /// Affine voxel → monde.
+    pub fn affine(&self) -> &Matrix4<f64> {
+        &self.affine
+    }
+
+    /// Nombre de voxels sur chaque axe.
+    pub fn dim(&self) -> (usize, usize, usize) {
+        self.data.dim()
+    }
+
+    /// Indices de voxel **continus** `(i, j, k)` d'un point du monde (les centres de voxel sont aux entiers).
+    pub fn voxel_coordinates(&self, monde: &Vector3<f64>) -> Vector3<f64> {
+        (self.inverse * monde.push(1.0)).xyz()
+    }
+
+    /// Valeur du volume en un point du monde, par **interpolation trilinéaire** : moyenne pondérée des 8
+    /// voxels voisins, les poids étant les fractions de distance sur chaque axe. Exacte pour une fonction
+    /// linéaire des indices.
+    ///
+    /// `None` si le point est hors de la zone comprise entre les centres du premier et du dernier voxel de chaque
+    /// axe, c'est-à-dire si l'un des 8 voisins n'existe pas (ou si une coordonnée est `NaN`) : on ne fabrique pas
+    /// de valeur en dehors de la grille. Une tolérance de 1e-9 voxel absorbe les erreurs d'arrondi sur le bord.
+    pub fn sample(&self, monde: &Vector3<f64>) -> Option<f32> {
+        let v = self.voxel_coordinates(monde);
+        let (nx, ny, nz) = self.data.dim();
+        let n = [nx, ny, nz];
+        let tol = GRID_BOUNDARY_TOLERANCE;
+        // `!(a && b)` est vrai aussi pour NaN, qui échoue à toute comparaison.
+        if (0..3).any(|a| !(v[a] >= -tol && v[a] <= (n[a] - 1) as f64 + tol)) {
+            return None;
+        }
+        // Dans la tolérance, on ramène exactement sur le bord pour interpoler.
+        let v = Vector3::from_fn(|a, _| v[a].clamp(0.0, (n[a] - 1) as f64));
+        // Indice du voxel de départ, borné pour que le voisin d'après existe (un axe d'un seul voxel : le même).
+        let i0 = [0, 1, 2].map(|a| (v[a].floor() as usize).min(n[a] - 1));
+        let i1 = [0, 1, 2].map(|a| (i0[a] + 1).min(n[a] - 1));
+        let t = [0, 1, 2].map(|a| v[a] - i0[a] as f64); // fraction de distance dans [0, 1]
+        let mut somme = 0.0_f64;
+        for (dx, wx) in [(i0[0], 1.0 - t[0]), (i1[0], t[0])] {
+            for (dy, wy) in [(i0[1], 1.0 - t[1]), (i1[1], t[1])] {
+                for (dz, wz) in [(i0[2], 1.0 - t[2]), (i1[2], t[2])] {
+                    somme += wx * wy * wz * f64::from(self.data[[dx, dy, dz]]);
+                }
+            }
+        }
+        Some(somme as f32)
     }
 }
 
@@ -1199,5 +1293,139 @@ mod tests {
     #[ignore = "long : voir la doc du test"]
     fn stack_groups_match_python_reference_all() {
         verifier_groupes(|_, _, _| true);
+    }
+
+    // ------------------------------------------------------------------ étape 2a : échantillonnage trilinéaire
+
+    /// Volume 4×3×5 dont la valeur est la fonction **linéaire** `1 + 2i − 3j + 0,5k` des indices, avec une affine
+    /// quelconque : rotation de 30° autour de z, mise à l'échelle (1,5 ; 2 ; 3), un axe inversé (déterminant < 0),
+    /// origine (10, −5, 7).
+    fn volume_lineaire() -> Volume {
+        let mut data = Array3::<f32>::zeros((4, 3, 5));
+        for ((i, j, k), v) in data.indexed_iter_mut() {
+            *v = (1.0 + 2.0 * i as f64 - 3.0 * j as f64 + 0.5 * k as f64) as f32;
+        }
+        let (c, s) = (30.0_f64.to_radians().cos(), 30.0_f64.to_radians().sin());
+        let rot = Matrix4::new(c, -s, 0.0, 0.0, s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let echelle = Matrix4::from_diagonal(&nalgebra::Vector4::new(-1.5, 2.0, 3.0, 1.0)); // x inversé
+        let mut a = rot * echelle;
+        a[(0, 3)] = 10.0;
+        a[(1, 3)] = -5.0;
+        a[(2, 3)] = 7.0;
+        Volume::new(data, a).unwrap()
+    }
+
+    fn lineaire(i: f64, j: f64, k: f64) -> f64 {
+        1.0 + 2.0 * i - 3.0 * j + 0.5 * k
+    }
+
+    #[test]
+    fn trilinear_sampling_is_exact_for_a_linear_function() {
+        let v = volume_lineaire();
+        assert!(v.affine().fixed_view::<3, 3>(0, 0).determinant() < 0.0);
+        // points d'indices continus quelconques, convertis en monde par l'affine
+        for &(i, j, k) in &[(0.0, 0.0, 0.0), (3.0, 2.0, 4.0), (1.5, 0.25, 3.75), (2.9, 1.1, 0.3), (0.01, 1.99, 3.99)] {
+            let monde = (v.affine() * Vector4::new(i, j, k, 1.0)).xyz();
+            let valeur = v.sample(&monde).unwrap_or_else(|| panic!("({i}, {j}, {k}) devrait être dans la grille"));
+            assert!((f64::from(valeur) - lineaire(i, j, k)).abs() < 1e-5, "({i}, {j}, {k}) : {valeur}");
+        }
+        // aux centres de voxel, la valeur est celle du voxel
+        let monde = (v.affine() * Vector4::new(2.0, 1.0, 3.0, 1.0)).xyz();
+        assert_eq!(v.sample(&monde), Some(v.data()[[2, 1, 3]]));
+        // les coordonnées continues redonnent les indices
+        let c = v.voxel_coordinates(&monde);
+        assert!((c - Vector3::new(2.0, 1.0, 3.0)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn sampling_outside_the_grid_is_none() {
+        let v = volume_lineaire();
+        let en = |i: f64, j: f64, k: f64| (v.affine() * Vector4::new(i, j, k, 1.0)).xyz();
+        assert!(v.sample(&en(3.0, 2.0, 4.0)).is_some(), "le dernier voxel est dedans (bord inclus)");
+        assert!(v.sample(&en(3.0 + 1e-6, 2.0, 4.0)).is_none(), "juste au-delà du dernier centre de voxel : dehors");
+        assert!(v.sample(&en(-1e-6, 0.0, 0.0)).is_none());
+        assert!(v.sample(&en(0.0, 0.0, -0.5)).is_none(), "un demi-voxel avant le premier centre : dehors");
+        assert!(v.sample(&Vector3::new(f64::NAN, 0.0, 0.0)).is_none(), "NaN : dehors, sans panique");
+        assert!(v.sample(&Vector3::new(1e12, 0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn volume_rejects_a_singular_affine() {
+        let data = Array3::<f32>::zeros((2, 2, 2));
+        let mut a = Matrix4::<f64>::identity();
+        a[(1, 1)] = 0.0; // une colonne nulle : non inversible
+        assert!(matches!(Volume::new(data.clone(), a), Err(SvrError::SingularVolumeAffine)));
+        let mut b = Matrix4::<f64>::identity();
+        b[(0, 3)] = f64::NAN;
+        assert!(matches!(Volume::new(data, b), Err(SvrError::SingularVolumeAffine)));
+    }
+
+    #[test]
+    fn single_voxel_axis_is_handled() {
+        // un volume 1×1×1 : seul son centre est dedans
+        let v = Volume::new(Array3::from_elem((1, 1, 1), 7.0), Matrix4::identity()).unwrap();
+        assert_eq!(v.sample(&Vector3::new(0.0, 0.0, 0.0)), Some(7.0));
+        assert_eq!(v.sample(&Vector3::new(0.1, 0.0, 0.0)), None);
+    }
+
+    /// Critère 1 de l'étape 2a (étude 04), sur 4 paires de stacks réels (volume = stack axial, points = pixels de
+    /// coupes d'un stack coronal du même sujet, affines obliques à déterminant négatif) :
+    /// - contre `scipy.ndimage.map_coordinates` (même correspondance monde → indices, interpolation indépendante) :
+    ///   écart relatif au contraste < 1e-5 ;
+    /// - contre SimpleITK (`EvaluateAtPhysicalPoint`, qui valide aussi l'orientation) : < 1e-3. Seuil moins strict car
+    ///   ITK construit sa géométrie avec `pixdim` et une direction orthonormalisée (écart de 2,6e-4 mm mesuré à
+    ///   l'étape 1b) : avec un fort gradient d'intensité, cela change la valeur échantillonnée.
+    /// Le domaine « dans la grille » de Rust doit aussi être celui de la référence, point par point.
+    #[test]
+    fn trilinear_sampling_matches_scipy_and_simpleitk() {
+        let racine = racine();
+        let index = std::fs::read_to_string(format!("{racine}/data/reference/sampling/index.tsv"))
+            .expect("références absentes : lancer scripts/make_reference_sampling.py");
+        let (mut pire_scipy, mut pire_itk, mut n_dedans, mut n_incoherents) = (0.0_f64, 0.0_f64, 0usize, 0usize);
+        for ligne in index.lines() {
+            let c: Vec<&str> = ligne.split('\t').collect();
+            let volume = Volume::from_stack(&Stack::read(Path::new(&format!("{racine}/{}", c[0]))).unwrap());
+            let coupes = Stack::read(Path::new(&format!("{racine}/{}", c[1]))).unwrap();
+            let ks: Vec<usize> = c[2].split(',').map(|k| k.parse().unwrap()).collect();
+            let pas: usize = c[3].parse().unwrap();
+            let octets = std::fs::read(format!("{racine}/{}", c[4])).unwrap();
+            let ref_vals: Vec<f32> = octets.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            let contraste = {
+                let d = volume.data();
+                f64::from(d.iter().cloned().fold(f32::MIN, f32::max) - d.iter().cloned().fold(f32::MAX, f32::min))
+            };
+            let (nx, ny, _) = coupes.dim();
+            let mut n = 0;
+            for &k in &ks {
+                let coupe = coupes.slice(k).unwrap();
+                for i in (0..nx).step_by(pas) {
+                    for j in (0..ny).step_by(pas) {
+                        let (dedans_ref, v_scipy, v_itk) = (ref_vals[3 * n] > 0.5, ref_vals[3 * n + 1], ref_vals[3 * n + 2]);
+                        n += 1;
+                        let monde = coupe.pixel_to_world(i as f64, j as f64);
+                        match volume.sample(&monde) {
+                            Some(v) => {
+                                if !dedans_ref {
+                                    n_incoherents += 1; // Rust dans la grille, la référence dehors
+                                    continue;
+                                }
+                                n_dedans += 1;
+                                pire_scipy = pire_scipy.max((f64::from(v) - f64::from(v_scipy)).abs() / contraste);
+                                if v_itk > -1e8 {
+                                    pire_itk = pire_itk.max((f64::from(v) - f64::from(v_itk)).abs() / contraste);
+                                }
+                            }
+                            None => n_incoherents += usize::from(dedans_ref), // Rust dehors, la référence dedans
+                        }
+                    }
+                }
+            }
+            assert_eq!(n * 3, ref_vals.len(), "nombre de points différent de la référence");
+        }
+        println!("{n_dedans} points comparés ; incohérences de domaine {n_incoherents} ; écart relatif max : scipy {pire_scipy:.2e}, SimpleITK {pire_itk:.2e}");
+        assert!(n_dedans > 50_000, "trop peu de points comparés : {n_dedans}");
+        assert_eq!(n_incoherents, 0, "le domaine « dans la grille » diffère de la référence");
+        assert!(pire_scipy < 1e-5, "scipy : {pire_scipy:.2e}");
+        assert!(pire_itk < 1e-3, "SimpleITK : {pire_itk:.2e}");
     }
 }
