@@ -39,6 +39,7 @@ mdbook serve book --open
 crates/
   medoxide-core/       briques communes (lecture de volumes NIfTI), sans dépendance vers un module
   medoxide-fetalbet/   bibliothèque : portage de Fetal-BET
+  medoxide-svr/        bibliothèque : reconstruction coupe-vers-volume (en développement)
   medx/                binaire CLI : une sous-commande par module
 book/                  documentation (mdBook)
 docs/LEARNING.md       journal d'apprentissage Rust/Burn

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/medoxide-core", "crates/medoxide-fetalbet", "crates/medx"]
+members = ["crates/medoxide-core", "crates/medoxide-fetalbet", "crates/medoxide-svr", "crates/medx"]
 
 # Dépendances partagées, versionnées une seule fois ici et héritées
 # par les crates membres via `workspace = true` dans leur propre Cargo.toml.
@@ -18,6 +18,8 @@ burn-store = "0.22.0-pre.4"
 # Téléchargement des poids par défaut (client HTTP bloquant) et vérification SHA-256.
 ureq = "3"
 sha2 = "0.11"
+# Matrices de taille fixe (affines 4x4, rotations) pour la géométrie des coupes du SVR.
+nalgebra = "0.35"
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,13 @@
+[package]
+name = "medoxide-svr"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+medoxide-core = { path = "../medoxide-core" }
+nalgebra = { workspace = true }
+ndarray = { workspace = true }
+
+[dev-dependencies]
+# Pour écrire des fichiers NIfTI synthétiques dans les tests (cas d'erreur).
+nifti = { workspace = true }

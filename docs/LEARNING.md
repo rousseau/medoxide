@@ -399,6 +399,43 @@ empreinte fausse est refusée et ne laisse aucun fichier.
 absent) ; masque de fetus_06 inchangé (Dice 0,999987, 3 voxels de différence).
 `write_mask` reste dans `medoxide-fetalbet` (le SVR n'en a pas encore besoin).
 
+## 2026-10-06 — Un stack et sa géométrie (étape 1a du SVR)
+
+- **Quoi** : `nalgebra`, des matrices de **taille fixe** (`Matrix4<f64>`, `Matrix3<f64>`).
+  Les dimensions sont connues à la compilation : pas d'allocation, et le compilateur refuse
+  de multiplier des matrices incompatibles. `Matrix4::from_fn(|r, c| ...)` construit une matrice
+  case par case ; `affine.fixed_view::<3, 3>(0, 0)` en donne un bloc 3×3 sans copie ;
+  `colonne.norm()` et `a.dot(&b)` donnent norme et produit scalaire.
+- **Pourquoi ici** : l'affine voxel → monde est une matrice 4×4, et toutes les transformations
+  rigides du SVR (rotation + translation par coupe) seront des produits de telles matrices.
+- **Où** : `crates/medoxide-svr/src/lib.rs` ; dépendance `nalgebra = "0.35"` (`Cargo.toml`).
+
+- **Quoi** : les **coordonnées homogènes**. On écrit un point `(i, j, k, 1)` : une seule
+  multiplication par la matrice 4×4 applique rotation, mise à l'échelle **et** translation.
+  Les 3 premières colonnes de la partie 3×3 sont les déplacements monde (mm) d'un pas d'indice
+  sur chaque axe ; leurs normes sont les espacements.
+- **Quoi** : `f64::from(x)` convertit un `f32` **sans perte**, contrairement à `as` qui peut
+  tronquer ; l'en-tête NIfTI stocke l'affine en `f32`, on calcule ensuite en `f64`.
+
+- **Quoi** : des **champs privés** pour garantir des **invariants**. `Stack` ne se construit
+  que par `Stack::read`, qui vérifie la géométrie ; tout `Stack` existant est donc valide, et les
+  étapes suivantes n'ont pas à la revérifier. Les accesseurs (`affine()`, `data()`, ...) rendent
+  des références en lecture seule.
+- **Quoi** : `!(n > 0.0)` détecte aussi `NaN` (toute comparaison avec `NaN` est fausse), ce que
+  `n <= 0.0` ne ferait pas.
+
+**Décisions de conception** (étude 01 des dépôts) : monde RAS+ du `sform`, centres de voxel aux
+indices entiers, coupe `k` = plan du 3ᵉ axe. **Un déterminant négatif est accepté** (repère
+d'indices « main gauche ») : les 96 stacks du jeu de développement le sont tous, l'image n'est
+jamais retournée. Refusés : `sform` absent, cisaillement (cosinus entre colonnes > 1e-3), colonne
+nulle ou non finie, `pixdim` incohérent avec les normes de l'affine (> 1e-3 mm). L'espacement
+est la norme des colonnes de l'affine, c'est-à-dire la géométrie réelle.
+
+**Vérifié** : 9 tests. Cas valides et d'erreur sur fichiers synthétiques (sform absent,
+cisaillement, `pixdim` incohérent, affine dégénérée, 4D, fichier absent, affine à déterminant
+négatif acceptée) ; affines lues pour 3 volumes de Fetal-BET égales à celles de nibabel (arrondies
+à 4 décimales) ; **les 96 stacks du jeu de développement se chargent, tous à déterminant négatif**.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*
