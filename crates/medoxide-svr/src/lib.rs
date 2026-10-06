@@ -36,6 +36,10 @@ pub enum SvrError {
     DegenerateAffine(PathBuf),
     /// Deux axes ne sont pas orthogonaux ; contient le plus grand cosinus mesuré.
     ShearedAffine { path: PathBuf, cosine: f64 },
+    /// Le masque cérébral n'a pas la même grille que le stack (dimensions ou affine) ; `detail` explique.
+    MaskGridMismatch { path: PathBuf, detail: String },
+    /// Le masque cérébral ne contient aucun voxel.
+    EmptyMask(PathBuf),
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -57,6 +61,10 @@ impl std::fmt::Display for SvrError {
                 "{} : axes non orthogonaux (cosinus {cosine:.2e} > {COSINE_MAX:.0e})",
                 path.display()
             ),
+            SvrError::MaskGridMismatch { path, detail } => {
+                write!(f, "{} : masque incompatible avec le stack ({detail})", path.display())
+            }
+            SvrError::EmptyMask(p) => write!(f, "{} : masque vide", p.display()),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
                 "{} : pixdim {pixdim:?} incohérent avec les normes de l'affine {columns:?}",
@@ -67,6 +75,130 @@ impl std::fmt::Display for SvrError {
 }
 
 impl std::error::Error for SvrError {}
+
+/// Écart maximal toléré, en mm, entre l'affine d'un masque et celle de son stack.
+const MASK_AFFINE_TOLERANCE_MM: f64 = 1e-3;
+
+/// Masque cérébral d'un stack, **nettoyé** : seule la plus grande composante connexe est gardée.
+///
+/// Les petits îlots parasites (jusqu'à plusieurs % des voxels sur certains stacks) agrandissent les
+/// boîtes englobantes et déplacent les barycentres ; la plus grande composante 3D (26 voisins) les écarte.
+#[derive(Debug)]
+pub struct BrainMask {
+    voxels: Array3<bool>,
+    discarded: usize,
+    barycenter: Vector3<f64>,
+}
+
+impl BrainMask {
+    /// Lit un masque NIfTI (tout voxel non nul est dans le masque), vérifie qu'il a la grille de
+    /// `stack`, ne garde que la plus grande composante connexe et calcule son barycentre.
+    ///
+    /// # Erreurs
+    /// [`SvrError::Read`] (illisible, non 3D) ; [`SvrError::MaskGridMismatch`] (dimensions ou affine
+    /// différentes de celles du stack, ou `sform` absent) ; [`SvrError::EmptyMask`].
+    pub fn read(path: &Path, stack: &Stack) -> Result<BrainMask, SvrError> {
+        let lecture = |source| SvrError::Read { path: path.to_path_buf(), source };
+        let info = volume_info(path).map_err(lecture)?;
+        let incompatible = |detail: String| SvrError::MaskGridMismatch { path: path.to_path_buf(), detail };
+
+        let dim: Vec<usize> = info.dim.iter().map(|&d| usize::from(d)).collect();
+        let (nx, ny, nz) = stack.dim();
+        if dim != [nx, ny, nz] {
+            return Err(incompatible(format!("dimensions {dim:?} au lieu de {:?}", [nx, ny, nz])));
+        }
+        let lignes = info.affine.ok_or_else(|| incompatible("pas de sform".to_string()))?;
+        let ecart = (0..4)
+            .flat_map(|r| (0..4).map(move |c| (r, c)))
+            .map(|(r, c)| (f64::from(lignes[r][c]) - stack.affine()[(r, c)]).abs())
+            .fold(0.0_f64, f64::max);
+        if ecart > MASK_AFFINE_TOLERANCE_MM {
+            return Err(incompatible(format!("affine différente de celle du stack (écart {ecart:.2e})")));
+        }
+
+        let brut = read_volume(path).map_err(lecture)?.mapv(|v| v != 0.0);
+        let total = brut.iter().filter(|&&v| v).count();
+        if total == 0 {
+            return Err(SvrError::EmptyMask(path.to_path_buf()));
+        }
+        let (voxels, gardes) = largest_component(&brut);
+        let somme = voxels
+            .indexed_iter()
+            .filter(|(_, &v)| v)
+            .fold(Vector3::zeros(), |s, ((i, j, k), _)| s + Vector3::new(i as f64, j as f64, k as f64));
+        Ok(BrainMask { voxels, discarded: total - gardes, barycenter: somme / gardes as f64 })
+    }
+
+    /// Voxels du masque nettoyé, axes `[x, y, z]`, même grille que le stack.
+    pub fn voxels(&self) -> &Array3<bool> {
+        &self.voxels
+    }
+
+    /// Nombre de voxels du masque nettoyé.
+    pub fn voxel_count(&self) -> usize {
+        self.voxels.iter().filter(|&&v| v).count()
+    }
+
+    /// Nombre de voxels écartés (hors de la plus grande composante).
+    pub fn discarded_count(&self) -> usize {
+        self.discarded
+    }
+
+    /// Barycentre 3D du masque nettoyé, en **indices de voxel** continus `(i, j, k)`.
+    pub fn barycenter_index(&self) -> Vector3<f64> {
+        self.barycenter
+    }
+}
+
+/// Plus grande composante connexe d'un masque 3D (26 voisins : faces, arêtes et coins). Rend le
+/// masque de cette composante et son nombre de voxels. Parcours en largeur ; à taille égale, la
+/// première rencontrée dans l'ordre `x`, `y`, `z` l'emporte (comme `scipy.ndimage.label`).
+fn largest_component(masque: &Array3<bool>) -> (Array3<bool>, usize) {
+    let (nx, ny, nz) = masque.dim();
+    let dims = [nx as isize, ny as isize, nz as isize];
+    let mut vu = Array3::<bool>::from_elem((nx, ny, nz), false);
+    let mut meilleure: Vec<[usize; 3]> = Vec::new();
+    for ((i, j, k), &dedans) in masque.indexed_iter() {
+        if !dedans || vu[[i, j, k]] {
+            continue;
+        }
+        // Le `Vec` sert de file : on ajoute à la fin, `lu` avance dans ce qui reste à visiter.
+        let mut composante = vec![[i, j, k]];
+        vu[[i, j, k]] = true;
+        let mut lu = 0;
+        while lu < composante.len() {
+            let [a, b, c] = composante[lu];
+            lu += 1;
+            for da in -1_isize..=1 {
+                for db in -1_isize..=1 {
+                    for dc in -1_isize..=1 {
+                        if (da, db, dc) == (0, 0, 0) {
+                            continue;
+                        }
+                        // `isize` : a - 1 peut valoir -1, ce qu'un `usize` ne saurait représenter.
+                        let v = [a as isize + da, b as isize + db, c as isize + dc];
+                        if (0..3).any(|n| v[n] < 0 || v[n] >= dims[n]) {
+                            continue;
+                        }
+                        let p = [v[0] as usize, v[1] as usize, v[2] as usize];
+                        if masque[p] && !vu[p] {
+                            vu[p] = true;
+                            composante.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        if composante.len() > meilleure.len() {
+            meilleure = composante;
+        }
+    }
+    let mut sortie = Array3::<bool>::from_elem((nx, ny, nz), false);
+    for p in &meilleure {
+        sortie[*p] = true;
+    }
+    (sortie, meilleure.len())
+}
 
 /// Boîte alignée sur les axes du monde (RAS+, mm) : le plus petit pavé qui contient un ensemble de points.
 ///
@@ -112,6 +244,7 @@ pub struct Stack {
     data: Array3<f32>,
     affine: Matrix4<f64>,
     spacing: [f64; 3],
+    mask: Option<BrainMask>,
 }
 
 impl Stack {
@@ -166,7 +299,7 @@ impl Stack {
         }
 
         let data = read_volume(path).map_err(lecture)?;
-        Ok(Stack { path: path.to_path_buf(), data, affine, spacing: normes })
+        Ok(Stack { path: path.to_path_buf(), data, affine, spacing: normes, mask: None })
     }
 
     /// Chemin du fichier lu.
@@ -209,6 +342,21 @@ impl Stack {
             }
         }
         BoundingBox { min, max }
+    }
+
+    /// Lit un masque cérébral, le nettoie (plus grande composante connexe) et l'attache à ce stack.
+    /// En cas d'erreur, le stack reste inchangé (il n'est pas consommé : `&mut self`).
+    ///
+    /// # Erreurs
+    /// Celles de [`BrainMask::read`].
+    pub fn set_brain_mask(&mut self, chemin: &Path) -> Result<(), SvrError> {
+        self.mask = Some(BrainMask::read(chemin, self)?);
+        Ok(())
+    }
+
+    /// Masque cérébral attaché, s'il y en a un.
+    pub fn brain_mask(&self) -> Option<&BrainMask> {
+        self.mask.as_ref()
     }
 
     /// La coupe `k` (plan `z = k`), ou `None` si `k` dépasse le nombre de coupes.
@@ -295,6 +443,17 @@ impl<'a> Slice<'a> {
     /// d'épaisseur ; hypothèse vérifiée sans écart sur les 96 stacks du jeu de développement).
     pub fn thickness(&self) -> f64 {
         self.stack.spacing()[2]
+    }
+
+    /// **Pivot P3** de la coupe : le barycentre 3D du masque cérébral, pris dans le plan de la coupe
+    /// (les coordonnées `(i, j)` du barycentre, avec `k` pour la 3ᵉ), en monde (mm). `None` si aucun
+    /// masque n'est attaché au stack : le repli éventuel sur [`Slice::geometric_center`] est une
+    /// décision de l'appelant, jamais silencieuse.
+    ///
+    /// Suppose un mouvement modéré du fœtus *dans* le stack : le barycentre 3D est le même pour toutes les coupes.
+    pub fn brain_pivot(&self) -> Option<Vector3<f64>> {
+        let b = self.stack.mask.as_ref()?.barycenter_index();
+        Some(self.pixel_to_world(b.x, b.y))
     }
 
     /// Centre géométrique de la coupe (monde, mm) : le point `((nx-1)/2, (ny-1)/2)`. Référence
@@ -699,5 +858,144 @@ mod tests {
                 assert!(b.min >= tout.min && b.max <= tout.max, "{sujet}");
             }
         }
+    }
+
+    // ------------------------------------------------------------------ étape 1d : pivot P3
+
+    /// Écrit un stack synthétique 6×5×3 (affine `DIAG`) et un masque `u8` de même grille, dont les voxels
+    /// à 1 sont donnés ; rend les deux chemins.
+    fn stack_et_masque(t: &Temp, voxels: &[[usize; 3]], masque_header: Option<NiftiHeader>) -> (PathBuf, PathBuf) {
+        let h = en_tete(DIAG, [1.0, 2.0, 3.0], 1);
+        let (f, m) = (t.fichier("stack.nii.gz"), t.fichier("masque.nii.gz"));
+        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0)).unwrap();
+        let mut masque = Array3::<u8>::zeros((6, 5, 3));
+        for v in voxels {
+            masque[*v] = 1;
+        }
+        WriterOptions::new(&m).reference_header(&masque_header.unwrap_or(h)).write_nifti(&masque).unwrap();
+        (f, m)
+    }
+
+    #[test]
+    fn mask_keeps_the_largest_component_with_26_neighbours() {
+        let t = Temp::new("masque_composantes");
+        // bloc 2×2×2 en (1..3, 1..3, 0..2), un voxel qui ne le touche que par un COIN (3,3,2), un îlot (5,4,2)
+        let mut voxels = Vec::new();
+        for i in 1..3 { for j in 1..3 { for k in 0..2 { voxels.push([i, j, k]); } } }
+        voxels.push([3, 3, 2]);
+        voxels.push([5, 4, 2]);
+        let (f, m) = stack_et_masque(&t, &voxels, None);
+        let mut s = Stack::read(&f).unwrap();
+        assert!(s.brain_mask().is_none());
+        s.set_brain_mask(&m).unwrap();
+        let masque = s.brain_mask().unwrap();
+        assert_eq!(masque.voxel_count(), 9, "bloc de 8 + voxel en contact par un coin (26 voisins)");
+        assert_eq!(masque.discarded_count(), 1, "l'îlot est écarté");
+        assert!(!masque.voxels()[[5, 4, 2]] && masque.voxels()[[3, 3, 2]]);
+        // barycentre : i = (8 × 1,5 + 3) / 9, j idem, k = (8 × 0,5 + 2) / 9
+        let b = masque.barycenter_index();
+        assert!((b - Vector3::new(15.0 / 9.0, 15.0 / 9.0, 6.0 / 9.0)).norm() < 1e-12, "{b:?}");
+    }
+
+    #[test]
+    fn brain_pivot_lies_in_each_slice_plane_at_the_3d_barycentre() {
+        let t = Temp::new("pivot");
+        let (f, m) = stack_et_masque(&t, &[[1, 1, 0], [2, 1, 0], [1, 2, 1], [2, 2, 1]], None);
+        let mut s = Stack::read(&f).unwrap();
+        assert!(s.slice(0).unwrap().brain_pivot().is_none(), "sans masque : pas de pivot, pas de repli silencieux");
+        s.set_brain_mask(&m).unwrap();
+        // barycentre en indices : (1,5 ; 1,5 ; 0,5). Affine DIAG : pas (1, 2, 3), origine (10, 20, 30).
+        let (p0, p1) = (s.slice(0).unwrap().brain_pivot().unwrap(), s.slice(1).unwrap().brain_pivot().unwrap());
+        assert!((p0 - Vector3::new(11.5, 23.0, 30.0)).norm() < 1e-12, "{p0:?}");
+        assert!((p1 - Vector3::new(11.5, 23.0, 33.0)).norm() < 1e-12, "{p1:?}");
+        // mêmes (x, y) pour toutes les coupes, décalage d'une coupe = 3e colonne de l'affine
+        assert!(((p1 - p0) - Vector3::new(0.0, 0.0, 3.0)).norm() < 1e-12);
+        // le pivot est dans le plan de la coupe : écart au centre de coupe orthogonal à la normale... d'abord le plan
+        let c = s.slice(1).unwrap();
+        assert!((p1 - c.geometric_center()).dot(&c.normal()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mask_errors_leave_the_stack_unchanged() {
+        let t = Temp::new("masque_erreurs");
+        // masque vide
+        let (f, m) = stack_et_masque(&t, &[], None);
+        let mut s = Stack::read(&f).unwrap();
+        assert!(matches!(s.set_brain_mask(&m), Err(SvrError::EmptyMask(_))));
+        assert!(s.brain_mask().is_none(), "échec : le stack n'a pas de masque");
+        // affine décalée de 1 mm
+        let mut h = en_tete(DIAG, [1.0, 2.0, 3.0], 1);
+        h.srow_x[3] += 1.0;
+        let (_, m2) = stack_et_masque(&t, &[[1, 1, 1]], Some(h));
+        assert!(matches!(s.set_brain_mask(&m2), Err(SvrError::MaskGridMismatch { .. })));
+        // dimensions différentes (4×3×2 au lieu de 6×5×3)
+        let m3 = t.fichier("petit.nii.gz");
+        ecrire_3d(&m3, &en_tete(DIAG, [1.0, 2.0, 3.0], 1));
+        let e = s.set_brain_mask(&m3).unwrap_err();
+        assert!(matches!(&e, SvrError::MaskGridMismatch { detail, .. } if detail.contains("dimensions")), "{e}");
+        // sform absent
+        let m4 = t.fichier("sans_sform.nii.gz");
+        ecrire_3d(&m4, &en_tete(DIAG, [1.0, 2.0, 3.0], 0));
+        assert!(s.set_brain_mask(&m4).is_err());
+        // fichier absent
+        assert!(matches!(s.set_brain_mask(&t.fichier("absent.nii.gz")), Err(SvrError::Read { .. })));
+        assert!(s.brain_mask().is_none());
+    }
+
+    /// Lit un TSV de références : lignes de colonnes séparées par des tabulations.
+    fn lire_tsv(chemin: &str) -> Vec<Vec<String>> {
+        std::fs::read_to_string(format!("{}/{chemin}", racine()))
+            .expect("références absentes : lancer scripts/make_reference_mask_pivots.py")
+            .lines()
+            .map(|l| l.split('\t').map(str::to_string).collect())
+            .collect()
+    }
+
+    /// Vérifie, sur un stack de `pas` en `pas` parmi les 96 du jeu, le nettoyage du masque (même nombre de
+    /// voxels que `scipy.ndimage.label`, 26 voisins), le barycentre (égal à celui de numpy, < 1e-9 voxel)
+    /// et le pivot P3 de chaque coupe (égal à `A @ (bi, bj, k, 1)`, < 1e-6 mm).
+    fn verifier_masques_et_pivots(pas: usize) {
+        let racine = racine();
+        let mut pivots: std::collections::HashMap<(String, usize), [f64; 3]> = Default::default();
+        for c in lire_tsv("data/reference/pivots/pivots.tsv") {
+            let xyz = [c[2].parse().unwrap(), c[3].parse().unwrap(), c[4].parse().unwrap()];
+            pivots.insert((c[0].clone(), c[1].parse().unwrap()), xyz);
+        }
+        let (mut pire_b, mut pire_p, mut n_ecartes, mut n_pivots, mut n_stacks) = (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
+        let masques = lire_tsv("data/reference/pivots/masques.tsv");
+        assert_eq!(masques.len(), 96);
+        for c in masques.iter().step_by(pas) {
+            n_stacks += 1;
+            let mut s = Stack::read(Path::new(&format!("{racine}/{}", c[0]))).unwrap();
+            s.set_brain_mask(Path::new(&format!("{racine}/{}", c[1]))).unwrap();
+            let m = s.brain_mask().unwrap();
+            let (total, gardes): (usize, usize) = (c[2].parse().unwrap(), c[3].parse().unwrap());
+            assert_eq!(m.voxel_count(), gardes, "{} : voxels conservés", c[0]);
+            assert_eq!(m.discarded_count(), total - gardes, "{} : voxels écartés", c[0]);
+            n_ecartes += total - gardes;
+            let attendu = Vector3::new(c[4].parse().unwrap(), c[5].parse().unwrap(), c[6].parse().unwrap());
+            pire_b = pire_b.max((m.barycenter_index() - attendu).amax());
+            for coupe in s.slices() {
+                let [x, y, z] = pivots[&(c[0].clone(), coupe.index())];
+                pire_p = pire_p.max((coupe.brain_pivot().unwrap() - Vector3::new(x, y, z)).amax());
+                n_pivots += 1;
+            }
+        }
+        println!("{n_stacks} stacks : barycentre écart max {pire_b:.2e} voxel ; {n_pivots} pivots écart max {pire_p:.2e} mm ; {n_ecartes} voxels écartés");
+        assert!(pire_b < 1e-9 && pire_p < 1e-6);
+    }
+
+    /// Version rapide (un stack sur 8) de l'étape 1d.
+    #[test]
+    fn mask_cleaning_and_pivots_match_scipy_and_numpy_sampled() {
+        verifier_masques_et_pivots(8);
+    }
+
+    /// Version complète : les 96 stacks (plus d'une minute en debug). Lancer avec :
+    /// `cargo test -p medoxide-svr -- --ignored --nocapture mask_cleaning_and_pivots_match_scipy_and_numpy_all`
+    #[test]
+    #[ignore = "long : voir la doc du test"]
+    fn mask_cleaning_and_pivots_match_scipy_and_numpy_all() {
+        verifier_masques_et_pivots(1);
     }
 }

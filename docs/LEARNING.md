@@ -507,6 +507,47 @@ avec minimum et maximum échangés) sont chacune détectées. **`medx svr info`*
 boîtes comprises, à un recalcul indépendant avec nibabel sur trois stacks d'un même sujet ; erreurs avec le nom
 du fichier ; code de sortie 1 en cas d'échec, 2 pour des arguments invalides.
 
+## 2026-10-06 — Le pivot de chaque coupe : masque nettoyé et barycentre (étape 1d du SVR)
+
+- **Quoi** : les **composantes connexes** par **parcours en largeur** (*breadth-first search*). À partir d'un
+  voxel du masque, on visite tous ses voisins, puis les voisins de ceux-ci, jusqu'à épuisement : c'est une
+  composante. On recommence à partir d'un voxel pas encore vu, et on garde la plus grande. Le voisinage est de
+  **26** voxels (faces, arêtes et coins), comme `scipy.ndimage.label` avec `np.ones((3,3,3))`.
+- **Quoi** : une **file** faite d'un `Vec` et d'un indice de lecture : on ajoute à la fin les voxels à visiter,
+  l'indice `lu` avance dans ce qui reste. Pas de structure spéciale. `masque.indexed_iter()` donne les
+  indices avec les valeurs.
+- **Quoi** : des **entiers signés pour les voisins**. `a - 1` avec `a = 0` n'existe pas en `usize` (panique) ; on
+  passe par `isize`, on teste les bornes, puis on revient en `usize` pour indexer.
+- **Pourquoi ici** : de petits îlots parasites (jusqu'à plusieurs % des voxels) déplacent les boîtes
+  englobantes ; le barycentre y est peu sensible, mais on le calcule sur le masque propre.
+- **Où** : `largest_component`, `BrainMask`, `Stack::set_brain_mask`, `Slice::brain_pivot` dans
+  `crates/medoxide-svr/src/lib.rs`.
+
+- **Quoi** : `&mut self` pour **attacher** un masque à un stack existant : `set_brain_mask(&mut self, chemin)`.
+  En cas d'échec, le stack reste intact (une méthode qui consommerait `self` le perdrait). Le champ
+  `mask: Option<BrainMask>` est `None` tant qu'aucun masque n'est attaché.
+- **Quoi** : `Option` comme **réponse honnête**. `Slice::brain_pivot()` rend `None` sans masque : le repli éventuel
+  sur le centre géométrique est une décision de l'appelant, jamais silencieuse (un pivot qui changerait de nature
+  sans prévenir fausserait les paramètres de translation).
+- **Quoi** : `Option::as_ref()` pour lire dans un `Option<BrainMask>` sans le déplacer, et `?` appliqué à un
+  `Option` (`self.stack.mask.as_ref()?`) qui fait rendre `None` à la fonction.
+
+**Le pivot P3** (étude 02) : le barycentre 3D du masque nettoyé, pris dans le plan de la coupe `k` (les `(i, j)` du
+barycentre, `k` pour la 3ᵉ coordonnée), converti en monde. Garde-fous : le masque doit avoir la **même grille** que
+le stack (dimensions, et affine à 1e-3 près, `sform` obligatoire) et ne pas être vide.
+
+**Vérifié** (21 tests, 22 avec le test long) :
+- jeu synthétique avec résultat calculé à la main : bloc de 8 voxels, un voxel qui ne le touche que par un
+  **coin** (conservé : 26 voisins), un îlot (écarté), barycentre exact à 1e-12 ;
+- masque vide, mauvaise affine, mauvaises dimensions, `sform` absent, fichier absent : erreurs claires, stack
+  inchangé ;
+- **les 96 stacks et leurs masques `medx fetalbet`** : même nombre de voxels conservés que `scipy.ndimage.label`
+  (202 276 voxels écartés en tout), barycentre identique (écart 0), **3033 pivots de coupe égaux à numpy à
+  2,8e-14 mm** ; le test complet est `#[ignore]` (130 s en debug), une version à un stack sur 8 tourne dans la suite ;
+- trois mutations volontaires (voisinage à 6, pivot sans décalage par coupe, plus petite composante) sont
+  détectées. La première ne l'est que par les tests synthétiques : sur la version rapide, les masques réels
+  ne distinguent pas 6 et 26 voisins (non mesuré sur les 96).
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*
