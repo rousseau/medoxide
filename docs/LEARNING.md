@@ -548,6 +548,42 @@ le stack (dimensions, et affine à 1e-3 près, `sform` obligatoire) et ne pas ê
   détectées. La première ne l'est que par les tests synthétiques : sur la version rapide, les masques réels
   ne distinguent pas 6 et 26 voisins (non mesuré sur les 96).
 
+## 2026-10-06 — Repérer les stacks qui ne partagent pas un repère (étape 1e du SVR)
+
+- **Quoi** : les **composantes connexes d'un graphe**, par le même parcours en largeur qu'en 1d. Ici les
+  « nœuds » sont les stacks et il y a un lien entre deux stacks si l'écart de leurs barycentres de masque est
+  ≤ `d`. On suit les liens de proche en proche : c'est le **chaînage** (A proche de B et B proche de C mettent
+  A, B et C ensemble, même si A et C sont plus éloignés).
+- **Pourquoi ici** : le repère monde ne reste cohérent qu'au sein d'une série de stacks consécutifs (étude 02 :
+  deux sujets sur 15 ont des groupes décalés de 24 et 154 mm). Le **groupe dominant** servira à construire le
+  volume initial, sans recalage stack-à-stack au départ (principe validé).
+- **Où** : `group_stacks`, `StackGroups`, `DEFAULT_GROUP_GAP_MM`, `Stack::brain_barycenter_world` dans
+  `crates/medoxide-svr/src/lib.rs` ; `medx svr info --input ... --mask ...`.
+
+- **Quoi** : **aucune information du JSON** n'intervient : géométrie et masques seulement. Le seuil
+  (18 mm) est **provisoire** : plus grand écart au sein d'un groupe 13 mm, plus petit entre groupes 23 mm, soit
+  10 mm de marge seulement ; fixé après avoir vu les données.
+- **Quoi** : `Fn` contre `FnMut` (le compilateur l'a expliqué) : une fermeture qui **modifie** une variable de son
+  environnement (un compteur) doit être `FnMut` ; `Fn` ne fait que lire. `impl FnMut(...) -> bool` en paramètre.
+- **Quoi** : `sort_by_key(|g| (std::cmp::Reverse(g.len()), g[0]))` trie par taille décroissante puis plus petit
+  indice ; `Vector3::push(1.0)` ajoute la coordonnée homogène (rend un `Vector4`) ; `values_mut()` donne un accès
+  modifiable aux valeurs d'une table de hachage ordonnée (`BTreeMap`).
+- **Quoi** : un stack sans masque donne `SvrError::NoMask`, jamais un repli silencieux.
+
+**Vérifié** (24 tests réussis dans `medoxide-svr`, plus 2 tests longs `#[ignore]`) :
+- jeu synthétique : chaînage (0–10, 10–20 liés alors que 0 et 20 sont à 20 mm pour un seuil de 15), seuil inclusif
+  (à exactement 10 mm avec un seuil de 10 : liés ; avec 9,9 : séparés), ordre (plus grand groupe d'abord, puis plus
+  petit indice), liste vide, symétrie de la matrice de distances ;
+- **15 sujets** : groupes identiques à ceux de la référence Python (13 sujets à un seul groupe, deux sujets à deux
+  groupes de tailles 4+2 et 5+4) et distances identiques à 4,4e-14 mm ;
+- `medx svr info --mask` : sortie identique à la référence Python sur trois sujets ;
+- trois mutations volontaires (pas de chaînage, seuil strict, plus petit groupe d'abord) sont détectées. Les deux
+  premières ne le sont que par les tests synthétiques : sur les données réelles, chaînage et comparaison au point
+  de départ donnent les mêmes groupes.
+
+**Erreur de ma part, corrigée** : mon premier test comparait mal les groupes parce que le fichier de référence
+liste les stacks groupe par groupe et non par indice ; je l'ai pris pour un défaut du code Rust avant de lire le test.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

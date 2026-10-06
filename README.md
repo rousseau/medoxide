@@ -6,7 +6,7 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 | Sous-commande | Méthode |
 |---|---|
 | `medx fetalbet` | Masque cérébral en IRM fœtale (portage de [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction)) |
-| `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) ; première brique de la reconstruction coupe-vers-volume, en développement |
+| `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère ; première brique de la reconstruction coupe-vers-volume, en développement |
 
 ## Démarrage rapide
 

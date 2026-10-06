@@ -40,6 +40,8 @@ pub enum SvrError {
     MaskGridMismatch { path: PathBuf, detail: String },
     /// Le masque cérébral ne contient aucun voxel.
     EmptyMask(PathBuf),
+    /// Le stack n'a pas de masque cérébral attaché (nécessaire pour le placer dans un groupe).
+    NoMask(PathBuf),
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -65,6 +67,7 @@ impl std::fmt::Display for SvrError {
                 write!(f, "{} : masque incompatible avec le stack ({detail})", path.display())
             }
             SvrError::EmptyMask(p) => write!(f, "{} : masque vide", p.display()),
+            SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
                 "{} : pixdim {pixdim:?} incohérent avec les normes de l'affine {columns:?}",
@@ -198,6 +201,69 @@ fn largest_component(masque: &Array3<bool>) -> (Array3<bool>, usize) {
         sortie[*p] = true;
     }
     (sortie, meilleure.len())
+}
+
+/// Écart maximal, en mm, entre les barycentres de masque de deux stacks voisins d'un même groupe.
+///
+/// **Provisoire** : choisi après avoir vu les données (dans le jeu de développement, plus grand écart au
+/// sein d'un groupe : 13 mm ; plus petit écart entre groupes : 23 mm, soit 10 mm de marge seulement).
+pub const DEFAULT_GROUP_GAP_MM: f64 = 18.0;
+
+/// Résultat de [`group_stacks`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackGroups {
+    /// Groupes d'indices de stacks (indices dans la liste donnée), du plus grand au plus petit (à taille
+    /// égale, celui dont le plus petit indice est le plus petit d'abord) ; indices croissants dans un groupe.
+    pub groups: Vec<Vec<usize>>,
+    /// Distance (mm) entre les barycentres 3D des masques de chaque paire de stacks ; matrice symétrique.
+    pub distances: Vec<Vec<f64>>,
+}
+
+/// Regroupe des stacks qui partagent un repère, d'après les barycentres 3D de leurs masques cérébraux.
+///
+/// Deux stacks dont les barycentres sont à `max_gap_mm` ou moins sont dans le même groupe, **de proche en
+/// proche** (chaînage : A proche de B et B proche de C met A, B et C ensemble, même si A et C sont plus
+/// éloignés). Seules la géométrie et les masques interviennent : aucune information du JSON d'acquisition.
+/// Un groupe d'un seul stack est possible.
+///
+/// # Erreurs
+/// [`SvrError::NoMask`] si un stack n'a pas de masque attaché.
+pub fn group_stacks(stacks: &[Stack], max_gap_mm: f64) -> Result<StackGroups, SvrError> {
+    let barycentres: Vec<Vector3<f64>> = stacks
+        .iter()
+        .map(|s| s.brain_barycenter_world().ok_or_else(|| SvrError::NoMask(s.path().to_path_buf())))
+        .collect::<Result<_, _>>()?;
+    let n = barycentres.len();
+    let distances: Vec<Vec<f64>> = (0..n)
+        .map(|i| (0..n).map(|j| (barycentres[i] - barycentres[j]).norm()).collect())
+        .collect();
+
+    // Composantes connexes du graphe « distance <= max_gap_mm », par parcours en largeur (comme en 1d).
+    let mut vu = vec![false; n];
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for depart in 0..n {
+        if vu[depart] {
+            continue;
+        }
+        vu[depart] = true;
+        let mut groupe = vec![depart];
+        let mut lu = 0;
+        while lu < groupe.len() {
+            let x = groupe[lu];
+            lu += 1;
+            for y in 0..n {
+                if !vu[y] && distances[x][y] <= max_gap_mm {
+                    vu[y] = true;
+                    groupe.push(y);
+                }
+            }
+        }
+        groupe.sort_unstable();
+        groups.push(groupe);
+    }
+    // Tri stable : plus grand groupe d'abord, puis plus petit indice.
+    groups.sort_by_key(|g| (std::cmp::Reverse(g.len()), g[0]));
+    Ok(StackGroups { groups, distances })
 }
 
 /// Boîte alignée sur les axes du monde (RAS+, mm) : le plus petit pavé qui contient un ensemble de points.
@@ -352,6 +418,12 @@ impl Stack {
     pub fn set_brain_mask(&mut self, chemin: &Path) -> Result<(), SvrError> {
         self.mask = Some(BrainMask::read(chemin, self)?);
         Ok(())
+    }
+
+    /// Barycentre 3D du masque cérébral, en monde (RAS+, mm), s'il y a un masque attaché.
+    pub fn brain_barycenter_world(&self) -> Option<Vector3<f64>> {
+        let b = self.mask.as_ref()?.barycenter_index();
+        Some((self.affine * b.push(1.0)).xyz())
     }
 
     /// Masque cérébral attaché, s'il y en a un.
@@ -997,5 +1069,135 @@ mod tests {
     #[ignore = "long : voir la doc du test"]
     fn mask_cleaning_and_pivots_match_scipy_and_numpy_all() {
         verifier_masques_et_pivots(1);
+    }
+
+    // ------------------------------------------------------------------ étape 1e : groupes de stacks
+
+    /// Stack synthétique 6×5×3 d'origine x donnée, avec un masque d'un seul voxel : son barycentre monde est
+    /// `origine_x + 1` selon x (indice 1, pas de 1 mm).
+    fn stack_masque_en(t: &Temp, nom: &str, origine_x: f32) -> Stack {
+        let mut h = en_tete(DIAG, [1.0, 2.0, 3.0], 1);
+        h.srow_x[3] = origine_x;
+        let (f, m) = (t.fichier(&format!("{nom}.nii.gz")), t.fichier(&format!("{nom}_masque.nii.gz")));
+        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0)).unwrap();
+        let mut masque = Array3::<u8>::zeros((6, 5, 3));
+        masque[[1, 1, 1]] = 1;
+        WriterOptions::new(&m).reference_header(&h).write_nifti(&masque).unwrap();
+        let mut s = Stack::read(&f).unwrap();
+        s.set_brain_mask(&m).unwrap();
+        s
+    }
+
+    #[test]
+    fn groups_chain_neighbours_and_order_by_size() {
+        let t = Temp::new("groupes");
+        // x = 100, 0, 105, 10, 20 : {0, 10, 20} se chaînent (0-10, 10-20) bien que 0 et 20 soient à 20 mm ;
+        // {100, 105} forment un autre groupe ; 0 et 20 > 15 mm, donc sans chaînage ils seraient séparés.
+        let xs = [100.0_f32, 0.0, 105.0, 10.0, 20.0];
+        let stacks: Vec<Stack> = xs.iter().enumerate().map(|(i, &x)| stack_masque_en(&t, &format!("s{i}"), x)).collect();
+        let g = group_stacks(&stacks, 15.0).unwrap();
+        assert_eq!(g.groups, vec![vec![1, 3, 4], vec![0, 2]], "plus grand groupe d'abord, indices croissants");
+        // matrice de distances : symétrique, diagonale nulle, valeurs attendues
+        assert_eq!(g.distances.len(), 5);
+        for i in 0..5 {
+            assert_eq!(g.distances[i][i], 0.0);
+            for j in 0..5 {
+                assert_eq!(g.distances[i][j], g.distances[j][i]);
+            }
+        }
+        assert!((g.distances[1][3] - 10.0).abs() < 1e-9 && (g.distances[1][4] - 20.0).abs() < 1e-9);
+        // seuil inclusif : à exactement 10 mm, les stacks 1 et 3 sont liés ; à 9,9 mm ils ne le sont plus
+        assert_eq!(group_stacks(&stacks[1..2], 0.0).unwrap().groups, vec![vec![0]]);
+        let a = group_stacks(&[stack_masque_en(&t, "a", 0.0), stack_masque_en(&t, "b", 10.0)], 10.0).unwrap();
+        assert_eq!(a.groups, vec![vec![0, 1]]);
+        let b = group_stacks(&[stack_masque_en(&t, "a", 0.0), stack_masque_en(&t, "b", 10.0)], 9.9).unwrap();
+        assert_eq!(b.groups, vec![vec![0], vec![1]]);
+        // à taille égale, le groupe de plus petit indice d'abord ; liste vide : aucun groupe
+        let c = group_stacks(&[stack_masque_en(&t, "a", 50.0), stack_masque_en(&t, "b", 0.0)], 5.0).unwrap();
+        assert_eq!(c.groups, vec![vec![0], vec![1]]);
+        assert!(group_stacks(&[], 18.0).unwrap().groups.is_empty());
+    }
+
+    #[test]
+    fn grouping_requires_a_brain_mask() {
+        let t = Temp::new("groupes_sans_masque");
+        let (f, _) = stack_et_masque(&t, &[[1, 1, 1]], None);
+        let sans = Stack::read(&f).unwrap();
+        let e = group_stacks(&[sans], 18.0).unwrap_err();
+        assert!(matches!(e, SvrError::NoMask(_)), "{e}");
+    }
+
+    /// Compare, pour des sujets du jeu de développement, groupes et distances à la référence Python
+    /// (`scripts/make_reference_groups.py`), sans nommer aucun sujet : `selection` choisit lesquels.
+    fn verifier_groupes(mut selection: impl FnMut(usize, &str, usize) -> bool) {
+        let racine = racine();
+        let masques: std::collections::HashMap<String, String> =
+            lire_tsv("data/reference/pivots/masques.tsv").into_iter().map(|c| (c[0].clone(), c[1].clone())).collect();
+        let mut attendu: std::collections::BTreeMap<String, Vec<(usize, String, usize)>> = Default::default();
+        for c in lire_tsv("data/reference/groups/groups.tsv") {
+            attendu.entry(c[0].clone()).or_default().push((c[1].parse().unwrap(), c[2].clone(), c[3].parse().unwrap()));
+        }
+        let mut dist: std::collections::HashMap<(String, usize, usize), f64> = Default::default();
+        for c in lire_tsv("data/reference/groups/distances.tsv") {
+            dist.insert((c[0].clone(), c[1].parse().unwrap(), c[2].parse().unwrap()), c[3].parse().unwrap());
+        }
+        // Le fichier liste les stacks groupe par groupe : on les remet dans l'ordre des indices avant de les charger.
+        for items in attendu.values_mut() {
+            items.sort_by_key(|x| x.0);
+        }
+        let (mut n_sujets, mut multi, mut pire) = (0, 0, 0.0_f64);
+        for (rang_sujet, (sujet, items)) in attendu.iter().enumerate() {
+            let n_groupes_ref = items.iter().map(|x| x.2).max().unwrap() + 1;
+            if !selection(rang_sujet, sujet, n_groupes_ref) {
+                continue;
+            }
+            n_sujets += 1;
+            let mut stacks = Vec::new();
+            for (_, chemin, _) in items {
+                let mut s = Stack::read(Path::new(&format!("{racine}/{chemin}"))).unwrap();
+                s.set_brain_mask(Path::new(&format!("{racine}/{}", masques[chemin]))).unwrap();
+                stacks.push(s);
+            }
+            let g = group_stacks(&stacks, DEFAULT_GROUP_GAP_MM).unwrap();
+            // groupes de Rust = ceux de la référence (rang de groupe par indice de stack)
+            let mut rang = vec![usize::MAX; stacks.len()];
+            for (r, groupe) in g.groups.iter().enumerate() {
+                for &i in groupe {
+                    rang[i] = r;
+                }
+            }
+            for (i, _, r) in items {
+                assert_eq!(rang[*i], *r, "{sujet} : stack {i}");
+            }
+            multi += usize::from(g.groups.len() > 1);
+            for i in 0..stacks.len() {
+                for j in (i + 1)..stacks.len() {
+                    pire = pire.max((g.distances[i][j] - dist[&(sujet.clone(), i, j)]).abs());
+                }
+            }
+        }
+        println!("{n_sujets} sujets, dont {multi} à plusieurs groupes ; écart max des distances à la référence {pire:.2e} mm");
+        assert!(pire < 1e-6, "{pire:.2e} mm");
+    }
+
+    /// Version rapide : les sujets à plusieurs groupes et les deux premiers autres.
+    #[test]
+    fn stack_groups_match_python_reference_sampled() {
+        let mut autres = 0;
+        verifier_groupes(|_, _, n_groupes| {
+            if n_groupes > 1 {
+                return true;
+            }
+            autres += 1;
+            autres <= 2
+        });
+    }
+
+    /// Version complète : les 15 sujets (plus d'une minute en debug). Lancer avec :
+    /// `cargo test -p medoxide-svr -- --ignored --nocapture stack_groups_match_python_reference_all`
+    #[test]
+    #[ignore = "long : voir la doc du test"]
+    fn stack_groups_match_python_reference_all() {
+        verifier_groupes(|_, _, _| true);
     }
 }

@@ -24,6 +24,13 @@ enum SvrAction {
         /// Un ou plusieurs stacks NIfTI (`.nii` ou `.nii.gz`)
         #[arg(long, num_args = 1.., required = true)]
         input: Vec<PathBuf>,
+        /// Masques cérébraux, un par stack et dans le même ordre : permettent de repérer les stacks qui
+        /// ne partagent pas un repère (groupes) d'après les barycentres des masques
+        #[arg(long, num_args = 1..)]
+        mask: Vec<PathBuf>,
+        /// Écart maximal entre barycentres de masques, en mm, pour que deux stacks soient dans le même groupe
+        #[arg(long, default_value_t = medoxide_svr::DEFAULT_GROUP_GAP_MM)]
+        group_gap_mm: f64,
     },
 }
 
@@ -52,14 +59,25 @@ enum Command {
 }
 
 /// Affiche la géométrie de chaque stack, puis la boîte de l'ensemble (repère monde RAS+, mm).
-fn svr_info(chemins: &[PathBuf]) -> ExitCode {
-    let stacks = match medoxide_svr::read_stacks(chemins) {
+/// Avec des masques cérébraux, repère aussi les groupes de stacks qui partagent un repère.
+fn svr_info(chemins: &[PathBuf], masques: &[PathBuf], ecart_mm: f64) -> ExitCode {
+    if !masques.is_empty() && masques.len() != chemins.len() {
+        eprintln!("medx svr info : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), chemins.len());
+        return ExitCode::FAILURE;
+    }
+    let mut stacks = match medoxide_svr::read_stacks(chemins) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("medx svr info : {e}");
             return ExitCode::FAILURE;
         }
     };
+    for (s, m) in stacks.iter_mut().zip(masques) {
+        if let Err(e) = s.set_brain_mask(m) {
+            eprintln!("medx svr info : {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     let mut ensemble: Option<medoxide_svr::BoundingBox> = None;
     for (n, s) in stacks.iter().enumerate() {
         let (nx, ny, nz) = s.dim();
@@ -81,6 +99,25 @@ fn svr_info(chemins: &[PathBuf]) -> ExitCode {
     if let Some(e) = ensemble {
         println!("ensemble de {} stack(s) : {}", stacks.len(), format_boite(&e));
     }
+    if !masques.is_empty() {
+        match medoxide_svr::group_stacks(&stacks, ecart_mm) {
+            Ok(g) => {
+                println!("\ngroupes de stacks (écart entre barycentres de masques <= {ecart_mm} mm, de proche en proche) :");
+                for (n, groupe) in g.groups.iter().enumerate() {
+                    let noms: Vec<String> = groupe.iter().map(|i| (i + 1).to_string()).collect();
+                    println!("  groupe {} : stacks {}", n + 1, noms.join(", "));
+                }
+                println!("distances entre barycentres (mm), stacks numérotés comme ci-dessus :");
+                for ligne in &g.distances {
+                    println!("  {}", ligne.iter().map(|d| format!("{d:7.1}")).collect::<Vec<_>>().join(" "));
+                }
+            }
+            Err(e) => {
+                eprintln!("medx svr info : {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     ExitCode::SUCCESS
 }
 
@@ -96,7 +133,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Svr { action: SvrAction::Info { input } } => svr_info(&input),
+        Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
         Command::Fetalbet { input, output, model } => {
             // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;
             // `None` : `segment` télécharge les poids par défaut au besoin.
