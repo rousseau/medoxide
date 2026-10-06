@@ -475,6 +475,38 @@ géométrique = point `((nx−1)/2, (ny−1)/2)`.
   vectoriel, centre en `nx/2`) sont chacune détectée par au moins un test. Le centre géométrique n'est
   contrôlé que par un stack synthétique, pas par les références Python.
 
+## 2026-10-06 — Lire un ensemble de stacks et les décrire (étape 1c du SVR)
+
+- **Quoi** : **collecter des `Result`**. `chemins.iter().map(|c| Stack::read(c)).collect()` avec un type de
+  retour `Result<Vec<Stack>, SvrError>` rassemble tous les succès en un `Vec`, ou s'arrête à la première erreur
+  et la renvoie. Le type de retour de la fonction suffit à dire à `collect` quoi construire.
+- **Pourquoi ici** : lire les 6 à 9 stacks d'un sujet d'un coup, en s'arrêtant proprement au premier fichier
+  fautif.
+- **Où** : `read_stacks` dans `crates/medoxide-svr/src/lib.rs`.
+
+- **Quoi** : le **contexte d'erreur**. `SvrError::Core(...)` devient `SvrError::Read { path, source }` : sur un
+  ensemble, le message doit nommer le fichier fautif. `map_err` avec une fermeture
+  (`|source| SvrError::Read { path: ..., source }`) rattache le chemin à l'erreur du core. Les variantes
+  d'`SvrError` connaissent donc toutes leur fichier.
+- **Quoi** : une **boîte englobante** alignée sur les axes du monde (`BoundingBox`). Elle se calcule en prenant,
+  pour les 8 coins du stack, le minimum et le maximum composante par composante (`Vector3::inf` / `sup`). La
+  boucle `for i in [0, nx - 1]` parcourt directement un tableau de deux éléments. `union` combine deux boîtes.
+- **Quoi** : une **sous-commande imbriquée** avec `clap` : `medx svr info --input a b c` (`#[command(subcommand)]`
+  dans `Svr`, puis un `enum SvrAction`) et `#[arg(long, num_args = 1.., required = true)]` pour accepter
+  plusieurs valeurs d'une option.
+
+**Rappel important (étude 02)** : une boîte englobante est un indicateur **faible** de cohérence entre stacks :
+deux têtes à 154 mm l'une de l'autre s'y recouvrent encore. La vraie détection viendra des barycentres de masque
+(étape 1e). Ici, la boîte décrit la géométrie, elle ne décide de rien.
+
+**Vérifié** (17 tests) : boîtes de stacks synthétiques, y compris à axe x inversé ; ordre conservé et fichier
+fautif nommé par `read_stacks` ; **boîtes des 104 stacks identiques à celles que donnent les coins calculés par
+nibabel** (écart 0 mm) ; lecture en un seul appel des 15 sujets du jeu de développement, la boîte de l'ensemble
+contenant celle de chaque stack. Deux mutations volontaires du code (coins en `nx` au lieu de `nx − 1`, `union`
+avec minimum et maximum échangés) sont chacune détectées. **`medx svr info`** : sortie identique, normales et
+boîtes comprises, à un recalcul indépendant avec nibabel sur trois stacks d'un même sujet ; erreurs avec le nom
+du fichier ; code de sortie 1 en cas d'échec, 2 pour des arguments invalides.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

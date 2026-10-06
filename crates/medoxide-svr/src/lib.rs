@@ -27,8 +27,9 @@ const SPACING_TOLERANCE_MM: f64 = 1e-3;
 /// Erreurs de lecture d'un stack.
 #[derive(Debug)]
 pub enum SvrError {
-    /// Lecture NIfTI impossible, ou fichier qui n'est pas un volume 3D.
-    Core(CoreError),
+    /// Lecture NIfTI impossible, ou fichier qui n'est pas un volume 3D ; contient le fichier fautif
+    /// et l'erreur d'origine.
+    Read { path: PathBuf, source: CoreError },
     /// L'en-tête n'a pas de `sform` (`sform_code == 0`) : pas d'affine exploitable.
     NoSform(PathBuf),
     /// Une colonne de l'affine est nulle ou non finie : géométrie dégénérée.
@@ -43,16 +44,10 @@ pub enum SvrError {
     },
 }
 
-impl From<CoreError> for SvrError {
-    fn from(e: CoreError) -> Self {
-        SvrError::Core(e)
-    }
-}
-
 impl std::fmt::Display for SvrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SvrError::Core(e) => write!(f, "{e}"),
+            SvrError::Read { path, source } => write!(f, "{} : {source}", path.display()),
             SvrError::NoSform(p) => write!(f, "{} : pas de sform (affine absente)", p.display()),
             SvrError::DegenerateAffine(p) => {
                 write!(f, "{} : affine dégénérée (colonne nulle ou non finie)", p.display())
@@ -72,6 +67,39 @@ impl std::fmt::Display for SvrError {
 }
 
 impl std::error::Error for SvrError {}
+
+/// Boîte alignée sur les axes du monde (RAS+, mm) : le plus petit pavé qui contient un ensemble de points.
+///
+/// Pour un stack, c'est la boîte des 8 coins, en **centres de voxel** (pas de demi-voxel de marge).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoundingBox {
+    /// Coin de coordonnées minimales.
+    pub min: Vector3<f64>,
+    /// Coin de coordonnées maximales.
+    pub max: Vector3<f64>,
+}
+
+impl BoundingBox {
+    /// Plus petite boîte contenant `self` et `autre`.
+    pub fn union(&self, autre: &BoundingBox) -> BoundingBox {
+        // `inf` / `sup` : minimum / maximum composante par composante.
+        BoundingBox { min: self.min.inf(&autre.min), max: self.max.sup(&autre.max) }
+    }
+
+    /// Dimensions de la boîte (mm), selon x, y, z.
+    pub fn size(&self) -> Vector3<f64> {
+        self.max - self.min
+    }
+}
+
+/// Lit plusieurs stacks, dans l'ordre donné. S'arrête à la première erreur, qui nomme le fichier fautif.
+///
+/// # Erreurs
+/// La première erreur de [`Stack::read`].
+pub fn read_stacks(chemins: &[PathBuf]) -> Result<Vec<Stack>, SvrError> {
+    // `collect` sait rassembler des `Result<Stack, _>` en un `Result<Vec<Stack>, _>`.
+    chemins.iter().map(|c| Stack::read(c)).collect()
+}
 
 /// Un stack : un volume 3D de coupes 2D, avec sa géométrie voxel → monde.
 ///
@@ -95,11 +123,13 @@ impl Stack {
     /// à 1e-3 mm près. Un déterminant négatif est accepté.
     ///
     /// # Erreurs
-    /// [`SvrError::Core`] (fichier illisible, non 3D) ; [`SvrError::NoSform`] ;
+    /// [`SvrError::Read`] (fichier illisible, non 3D) ; [`SvrError::NoSform`] ;
     /// [`SvrError::DegenerateAffine`] ; [`SvrError::ShearedAffine`] ;
     /// [`SvrError::InconsistentSpacing`].
     pub fn read(path: &Path) -> Result<Stack, SvrError> {
-        let info = volume_info(path)?;
+        // `map_err` rattache le chemin à l'erreur du core : sur un ensemble de stacks, on sait lequel échoue.
+        let lecture = |source| SvrError::Read { path: path.to_path_buf(), source };
+        let info = volume_info(path).map_err(lecture)?;
         let lignes = info.affine.ok_or_else(|| SvrError::NoSform(path.to_path_buf()))?;
         // `f64::from` : conversion exacte du `f32` de l'en-tête.
         let affine = Matrix4::from_fn(|r, c| f64::from(lignes[r][c]));
@@ -135,7 +165,7 @@ impl Stack {
             });
         }
 
-        let data = read_volume(path)?;
+        let data = read_volume(path).map_err(lecture)?;
         Ok(Stack { path: path.to_path_buf(), data, affine, spacing: normes })
     }
 
@@ -162,6 +192,23 @@ impl Stack {
     /// Nombre de voxels sur chaque axe `(x, y, z)` ; `z` est le nombre de coupes.
     pub fn dim(&self) -> (usize, usize, usize) {
         self.data.dim()
+    }
+
+    /// Boîte englobante dans le monde (RAS+, mm) : minimum et maximum, axe par axe, des 8 coins du
+    /// stack (centres des voxels `(0|nx-1, 0|ny-1, 0|nz-1)`).
+    pub fn world_bounding_box(&self) -> BoundingBox {
+        let (nx, ny, nz) = self.dim();
+        let (mut min, mut max) = (Vector3::repeat(f64::INFINITY), Vector3::repeat(f64::NEG_INFINITY));
+        for i in [0, nx - 1] {
+            for j in [0, ny - 1] {
+                for k in [0, nz - 1] {
+                    let p = (self.affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+                    min = min.inf(&p);
+                    max = max.sup(&p);
+                }
+            }
+        }
+        BoundingBox { min, max }
     }
 
     /// La coupe `k` (plan `z = k`), ou `None` si `k` dépasse le nombre de coupes.
@@ -378,11 +425,11 @@ mod tests {
             .unwrap();
         assert!(matches!(
             Stack::read(&f),
-            Err(SvrError::Core(CoreError::NotVolume3D(_)))
+            Err(SvrError::Read { source: CoreError::NotVolume3D(_), .. })
         ));
         assert!(matches!(
             Stack::read(&t.fichier("absent.nii.gz")),
-            Err(SvrError::Core(CoreError::Nifti(_)))
+            Err(SvrError::Read { source: CoreError::Nifti(_), .. })
         ));
     }
 
@@ -564,5 +611,93 @@ mod tests {
         }
         println!("invariants vérifiés sur {n_coupes} coupes de {} stacks", refs.len());
         assert!(n_coupes > 3000);
+    }
+
+    // ------------------------------------------------------------------ étape 1c : ensembles de stacks
+
+    #[test]
+    fn bounding_box_of_synthetic_stacks() {
+        let t = Temp::new("boite");
+        // DIAG : pas (1, 2, 3), origine (10, 20, 30), 4×3×2 voxels -> x 10..13, y 20..24, z 30..33.
+        let s = stack_synthetique(&t, DIAG, [1.0, 2.0, 3.0]);
+        let b = s.world_bounding_box();
+        assert_eq!(b.min, Vector3::new(10.0, 20.0, 30.0));
+        assert_eq!(b.max, Vector3::new(13.0, 24.0, 33.0));
+        assert_eq!(b.size(), Vector3::new(3.0, 4.0, 3.0));
+        // Axe x inversé (déterminant négatif) : la boîte reste ordonnée, x de -3 à 0.
+        let t2 = Temp::new("boite_gauche");
+        let lignes = [[-1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 20.0], [0.0, 0.0, 3.0, 30.0]];
+        let g = stack_synthetique(&t2, lignes, [1.0, 2.0, 3.0]).world_bounding_box();
+        assert_eq!((g.min.x, g.max.x), (-3.0, 0.0));
+        assert!(g.min.x < g.max.x && g.min.y < g.max.y && g.min.z < g.max.z);
+        let u = b.union(&g);
+        assert_eq!(u.min, Vector3::new(-3.0, 20.0, 30.0));
+        assert_eq!(u.max, Vector3::new(13.0, 24.0, 33.0));
+        assert_eq!(u.union(&b), u);
+    }
+
+    #[test]
+    fn read_stacks_keeps_order_and_names_the_failing_file() {
+        let t = Temp::new("ensemble");
+        let (a, b) = (t.fichier("a.nii.gz"), t.fichier("b.nii.gz"));
+        ecrire_3d(&a, &en_tete(DIAG, [1.0, 2.0, 3.0], 1));
+        ecrire_3d(&b, &en_tete(DIAG, [1.0, 2.0, 3.0], 1));
+        let v = read_stacks(&[b.clone(), a.clone()]).unwrap();
+        assert_eq!((v[0].path(), v[1].path()), (b.as_path(), a.as_path()));
+        // un fichier manquant au milieu : l'erreur nomme ce fichier, quel que soit son rang
+        let absent = t.fichier("absent.nii.gz");
+        let e = read_stacks(&[a.clone(), absent.clone(), b]).unwrap_err();
+        assert!(matches!(&e, SvrError::Read { path, .. } if *path == absent), "{e}");
+        assert!(e.to_string().contains("absent.nii.gz"), "{e}");
+        assert!(read_stacks(&[]).unwrap().is_empty());
+    }
+
+    /// Boîtes de l'étape 1c contre nibabel : les coins de la première et de la dernière coupe, déjà
+    /// dans la table de références (calcul indépendant), donnent la boîte attendue (< 1e-6 mm).
+    #[test]
+    fn bounding_boxes_match_nibabel_corners() {
+        let mut pire = 0.0_f64;
+        for (chemin, lignes) in references() {
+            let stack = Stack::read(&chemin).unwrap();
+            let nz = stack.dim().2;
+            // 5 points par coupe : les 4 premiers sont les coins (le 5e est le centre).
+            let coins: Vec<Vector3<f64>> = lignes[..5 * nz]
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| n % 5 != 4)
+                .map(|(_, r)| Vector3::new(r[3], r[4], r[5]))
+                .collect();
+            let min = coins.iter().fold(Vector3::repeat(f64::INFINITY), |m, p| m.inf(p));
+            let max = coins.iter().fold(Vector3::repeat(f64::NEG_INFINITY), |m, p| m.sup(p));
+            let b = stack.world_bounding_box();
+            pire = pire.max((b.min - min).amax()).max((b.max - max).amax());
+        }
+        println!("écart max des boîtes englobantes : {pire:.2e} mm");
+        assert!(pire < 1e-6, "{pire:.2e} mm");
+    }
+
+    /// Les 15 sujets du jeu de développement : leurs stacks se lisent d'un coup, et la boîte de
+    /// l'ensemble contient celle de chaque stack. (Une boîte englobante est un indicateur faible de
+    /// cohérence entre stacks : voir l'étude 02.)
+    #[test]
+    fn reads_each_development_subject_as_a_set() {
+        let mut fichiers = Vec::new();
+        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
+        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        let mut par_sujet: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
+        for f in fichiers {
+            let sujet = f.strip_prefix(Path::new(&racine()).join("data/svr/jeu_reel_tru_haste")).unwrap().components().next().unwrap().as_os_str().to_string_lossy().into_owned();
+            par_sujet.entry(sujet).or_default().push(f);
+        }
+        assert_eq!(par_sujet.len(), 15);
+        for (sujet, chemins) in &par_sujet {
+            let stacks = read_stacks(chemins).unwrap_or_else(|e| panic!("{sujet} : {e}"));
+            assert_eq!(stacks.len(), chemins.len());
+            let tout = stacks.iter().map(|s| s.world_bounding_box()).reduce(|a, b| a.union(&b)).unwrap();
+            for s in &stacks {
+                let b = s.world_bounding_box();
+                assert!(b.min >= tout.min && b.max <= tout.max, "{sujet}");
+            }
+        }
     }
 }
