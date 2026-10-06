@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use medoxide_core::{read_volume, volume_info, CoreError};
 use nalgebra::{Matrix3, Matrix4, Vector3, Vector4};
-use ndarray::{Array3, ArrayView2, Axis};
+use ndarray::{Array2, Array3, ArrayView2, Axis};
 
 /// Cosinus maximal toléré entre deux colonnes de l'affine : au-delà, les axes ne sont pas
 /// orthogonaux (cisaillement) et la coupe n'a plus de repère rigide.
@@ -224,7 +224,15 @@ impl Volume {
     /// axe, c'est-à-dire si l'un des 8 voisins n'existe pas (ou si une coordonnée est `NaN`) : on ne fabrique pas
     /// de valeur en dehors de la grille. Une tolérance de 1e-9 voxel absorbe les erreurs d'arrondi sur le bord.
     pub fn sample(&self, monde: &Vector3<f64>) -> Option<f32> {
-        let v = self.voxel_coordinates(monde);
+        let voisins = self.trilinear(&self.voxel_coordinates(monde))?;
+        let somme: f64 = voisins.iter().map(|(idx, w)| w * f64::from(self.data[*idx])).sum();
+        Some(somme as f32)
+    }
+
+    /// Les 8 voxels voisins d'un point donné en **indices continus** et leurs poids trilinéaires (somme 1).
+    /// `None` dans les mêmes cas que [`Volume::sample`]. C'est l'unique générateur de coefficients : la lecture
+    /// d'une valeur, la simulation d'une coupe et son adjoint s'y appuient, d'où leur cohérence exacte.
+    fn trilinear(&self, v: &Vector3<f64>) -> Option<[([usize; 3], f64); 8]> {
         let (nx, ny, nz) = self.data.dim();
         let n = [nx, ny, nz];
         let tol = GRID_BOUNDARY_TOLERANCE;
@@ -238,16 +246,92 @@ impl Volume {
         let i0 = [0, 1, 2].map(|a| (v[a].floor() as usize).min(n[a] - 1));
         let i1 = [0, 1, 2].map(|a| (i0[a] + 1).min(n[a] - 1));
         let t = [0, 1, 2].map(|a| v[a] - i0[a] as f64); // fraction de distance dans [0, 1]
-        let mut somme = 0.0_f64;
+        let mut sortie = [([0usize; 3], 0.0_f64); 8];
+        let mut m = 0;
         for (dx, wx) in [(i0[0], 1.0 - t[0]), (i1[0], t[0])] {
             for (dy, wy) in [(i0[1], 1.0 - t[1]), (i1[1], t[1])] {
                 for (dz, wz) in [(i0[2], 1.0 - t[2]), (i1[2], t[2])] {
-                    somme += wx * wy * wz * f64::from(self.data[[dx, dy, dz]]);
+                    sortie[m] = ([dx, dy, dz], wx * wy * wz);
+                    m += 1;
                 }
             }
         }
-        Some(somme as f32)
+        Some(sortie)
     }
+
+    /// Parcourt les pixels de `coupe` et, pour chacun, rend à `f` la liste de ses coefficients `(voxel, coefficient)`
+    /// (poids de l'échantillon de PSF × poids trilinéaire) et leur somme `W`, qui vaut la part de la PSF située
+    /// dans le volume (`W = 0` : aucun échantillon dans la grille). C'est la matrice creuse `C` de l'opérateur,
+    /// produite ligne par ligne sans jamais être stockée.
+    ///
+    /// Les décalages de la PSF sont convertis une fois en indices de voxel (partie linéaire de l'inverse).
+    fn for_each_pixel(&self, coupe: &Slice, psf: &Psf, mut f: impl FnMut(usize, usize, &[([usize; 3], f64)], f64)) {
+        let (nx, ny) = coupe.dim();
+        let lineaire = self.inverse.fixed_view::<3, 3>(0, 0).into_owned();
+        let decalages: Vec<Vector3<f64>> = psf.samples().iter().map(|e| lineaire * e.offset).collect();
+        let mut coefs: Vec<([usize; 3], f64)> = Vec::with_capacity(8 * decalages.len());
+        for j in 0..ny {
+            for i in 0..nx {
+                coefs.clear();
+                let centre = self.voxel_coordinates(&coupe.pixel_to_world(i as f64, j as f64));
+                for (e, d) in psf.samples().iter().zip(&decalages) {
+                    if let Some(voisins) = self.trilinear(&(centre + d)) {
+                        coefs.extend(voisins.iter().map(|(idx, w)| (*idx, e.weight * w)));
+                    }
+                }
+                let w: f64 = coefs.iter().map(|(_, c)| c).sum();
+                f(i, j, &coefs, w);
+            }
+        }
+    }
+
+    /// **Simule la coupe** `coupe` vue à travers `psf` : `y = A · x`, où `x` est ce volume. Chaque pixel est la
+    /// moyenne des voxels pondérée par les coefficients de l'opérateur, divisée par leur somme `W` (normalisation :
+    /// une coupe d'un volume constant est constante). Aucun mouvement n'est appliqué : la coupe est à sa pose
+    /// d'acquisition ([`Slice::affine`]).
+    pub fn simulate_slice(&self, coupe: &Slice, psf: &Psf) -> SimulatedSlice {
+        let mut values = Array2::<f32>::zeros(coupe.dim());
+        let mut coverage = Array2::<f32>::zeros(coupe.dim());
+        self.for_each_pixel(coupe, psf, |i, j, coefs, w| {
+            if w > 0.0 {
+                let somme: f64 = coefs.iter().map(|(idx, c)| c * f64::from(self.data[*idx])).sum();
+                values[[i, j]] = (somme / w) as f32;
+                coverage[[i, j]] = w as f32;
+            }
+        });
+        SimulatedSlice { values, coverage }
+    }
+
+    /// **Adjoint** de [`Volume::simulate_slice`] : `x += Aᵀ · y`, accumulé dans `accumulateur` (de la grille de ce
+    /// volume ; les voxels de ce volume ne servent pas, seule sa géométrie). Chaque pixel de `y` répartit sa valeur
+    /// divisée par `W` sur les voxels, avec **les mêmes coefficients** que l'avant : c'est la transposée exacte.
+    /// Les pixels de couverture nulle ne contribuent pas. L'accumulateur est en `f64` : les contributions de
+    /// nombreuses coupes s'additionnent.
+    ///
+    /// # Panics
+    /// Si `y` n'a pas la forme de la coupe ou si `accumulateur` n'a pas la forme de la grille (erreur de programmation).
+    pub fn back_project(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, accumulateur: &mut Array3<f64>) {
+        assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
+        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        self.for_each_pixel(coupe, psf, |i, j, coefs, w| {
+            if w > 0.0 {
+                let part = f64::from(y[[i, j]]) / w;
+                for (idx, c) in coefs {
+                    accumulateur[*idx] += c * part;
+                }
+            }
+        });
+    }
+}
+
+/// Coupe simulée par [`Volume::simulate_slice`].
+#[derive(Debug, Clone)]
+pub struct SimulatedSlice {
+    /// Valeur de chaque pixel `[i, j]` ; `0` là où la couverture est nulle.
+    pub values: Array2<f32>,
+    /// Part de la PSF qui tombe dans le volume, de 0 à 1, pour chaque pixel. Une valeur < 1 signale un bord de
+    /// champ de vue : la valeur est alors une moyenne sur une PSF tronquée.
+    pub coverage: Array2<f32>,
 }
 
 /// Rapport FWHM / écart type d'une gaussienne : `2·√(2·ln 2) ≈ 2,3548` (valeur testée contre la formule).
@@ -1744,5 +1828,230 @@ mod tests {
             s_hors = (s_hors.0.min(psf.sigma()[2]), s_hors.1.max(psf.sigma()[2]));
         }
         println!("96 stacks : σ dans le plan {:.3} à {:.3} mm ; σ hors plan {:.3} à {:.3} mm", s_plan.0, s_plan.1, s_hors.0, s_hors.1);
+    }
+    // ------------------------------------------------------------------ étape 2c : opérateur d'acquisition
+
+    /// Générateur pseudo-aléatoire (xorshift64) déterministe, valeurs dans [−1, 1] : pas de dépendance `rand`.
+    struct Alea(u64);
+    impl Alea {
+        fn suivant(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+        }
+    }
+
+    /// Stack synthétique de dimensions données (valeurs 1), pour des coupes assez grandes.
+    fn stack_de_dim(t: &Temp, dim: (usize, usize, usize), lignes: [[f32; 4]; 3], pixdim: [f32; 3]) -> Stack {
+        let f = t.fichier("grand.nii.gz");
+        let h = en_tete(lignes, pixdim, 1);
+        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem(dim, 1.0)).unwrap();
+        Stack::read(&f).unwrap()
+    }
+
+    /// Affine 4×4 `R · diag(échelle)` + origine (échelle négative : déterminant négatif).
+    fn affine_pivotee(r: &Rotation3<f64>, echelle: [f64; 3], origine: [f64; 3]) -> Matrix4<f64> {
+        let m = r.matrix() * Matrix3::from_diagonal(&Vector3::from(echelle));
+        let mut a = Matrix4::identity();
+        a.fixed_view_mut::<3, 3>(0, 0).copy_from(&m);
+        for i in 0..3 {
+            a[(i, 3)] = origine[i];
+        }
+        a
+    }
+
+    /// Origine telle que le point d'indices `centre` de l'affine `R · diag(échelle)` tombe en `cible` (monde, mm).
+    fn origine_centree(r: &Rotation3<f64>, echelle: [f64; 3], centre: [f64; 3], cible: [f64; 3]) -> [f64; 3] {
+        let m = r.matrix() * Matrix3::from_diagonal(&Vector3::from(echelle));
+        let o = Vector3::from(cible) - m * Vector3::from(centre);
+        [o.x, o.y, o.z]
+    }
+
+    fn produit_scalaire(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
+    /// Volume `22×20×18` oblique à déterminant négatif et stack `14×12×3` oblique qui le chevauche en partie
+    /// (certains pixels sortent du volume : couverture < 1 ou nulle).
+    fn volume_et_stack_chevauchants(t: &Temp, valeurs: impl FnMut(usize, usize, usize) -> f32) -> (Volume, Stack) {
+        let mut valeurs = valeurs;
+        let mut data = Array3::<f32>::zeros((22, 20, 18));
+        for ((i, j, k), v) in data.indexed_iter_mut() {
+            *v = valeurs(i, j, k);
+        }
+        // volume centré en 0 ; stack décalé de ≈ 15 mm de son centre : ses bords sortent du volume
+        let (rv, ev) = (Rotation3::from_euler_angles(0.3, -0.2, 0.5), [-1.2, 1.0, 1.5]);
+        let av = affine_pivotee(&rv, ev, origine_centree(&rv, ev, [10.5, 9.5, 8.5], [0.0; 3]));
+        let volume = Volume::new(data, av).unwrap();
+        let rs = Rotation3::from_euler_angles(-0.4, 0.5, 0.1);
+        let lignes = lignes_pivotees(&rs, [1.0, 1.0, 3.0], origine_centree(&rs, [1.0, 1.0, 3.0], [6.5, 5.5, 1.0], [13.0, 7.0, -3.0]));
+        (volume, stack_de_dim(t, (14, 12, 3), lignes, [1.0, 1.0, 3.0]))
+    }
+
+    /// Nombre de pixels de couverture nulle, partielle (0 < c < 1) et complète.
+    fn repartition(couverture: &Array2<f32>) -> (usize, usize, usize) {
+        let nul = couverture.iter().filter(|&&c| c == 0.0).count();
+        let plein = couverture.iter().filter(|&&c| c >= 1.0 - 1e-6).count();
+        (nul, couverture.len() - nul - plein, plein)
+    }
+
+    /// Critère 2 : `⟨A x, y⟩ = ⟨x, Aᵀ y⟩` avec `x` et `y` aléatoires, sur les 3 coupes du stack (qui contiennent,
+    /// au total, des pixels de couverture nulle, partielle et complète).
+    #[test]
+    fn adjoint_passes_the_dot_product_test() {
+        let t = Temp::new("op_adjoint");
+        let mut alea = Alea(0x9E37_79B9_7F4A_7C15);
+        let (volume, stack) = volume_et_stack_chevauchants(&t, |_, _, _| 0.0);
+        let x = Array3::from_shape_fn(volume.dim(), |_| alea.suivant());
+        let volume = Volume::new(x.clone(), *volume.affine()).unwrap();
+        let mut total = (0, 0, 0);
+        for k in 0..3 {
+            let coupe = stack.slice(k).unwrap();
+            let psf = coupe.psf();
+            let ax = volume.simulate_slice(&coupe, &psf);
+            let (nul, partiel, plein) = repartition(&ax.coverage);
+            total = (total.0 + nul, total.1 + partiel, total.2 + plein);
+            let y = Array2::from_shape_fn(coupe.dim(), |_| alea.suivant());
+            let mut aty = Array3::<f64>::zeros(volume.dim());
+            volume.back_project(&coupe, &psf, y.view(), &mut aty);
+            let gauche = produit_scalaire(&ax.values.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(), &y.iter().map(|&v| f64::from(v)).collect::<Vec<_>>());
+            let droite = produit_scalaire(&x.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(), aty.as_slice().unwrap());
+            let relatif = (gauche - droite).abs() / gauche.abs().max(droite.abs());
+            println!("coupe {k} (pixels nul/partiel/plein {nul}/{partiel}/{plein}) : <Ax,y> = {gauche:.6}, <x,Aty> = {droite:.6}, écart relatif {relatif:.1e}");
+            assert!(relatif < 1e-5, "coupe {k} : {relatif:.2e}");
+        }
+        assert!(total.0 > 0 && total.1 > 0 && total.2 > 0, "les 3 coupes doivent couvrir les trois situations : {total:?}");
+    }
+
+    /// Critère 3 : partition de l'unité. Un volume constant donne une coupe constante partout où la couverture est
+    /// non nulle, y compris sur les bords partiellement couverts ; ailleurs, `0`.
+    #[test]
+    fn constant_volume_gives_constant_slice_where_covered() {
+        let t = Temp::new("op_unite");
+        let (volume, stack) = volume_et_stack_chevauchants(&t, |_, _, _| 7.5);
+        let coupe = stack.slice(1).unwrap();
+        let sim = volume.simulate_slice(&coupe, &coupe.psf());
+        let (nul, partiel, plein) = repartition(&sim.coverage);
+        let mut pire = 0.0_f32;
+        for (v, c) in sim.values.iter().zip(sim.coverage.iter()) {
+            if *c > 0.0 {
+                pire = pire.max((v - 7.5).abs());
+            } else {
+                assert_eq!(*v, 0.0);
+            }
+            assert!((0.0..=1.0 + 1e-6).contains(c), "couverture {c}");
+        }
+        println!("pixels nul/partiel/plein {nul}/{partiel}/{plein} ; écart max à 7,5 : {pire:.1e}");
+        assert!(nul > 0 && partiel > 0 && plein > 0);
+        assert!(pire < 1e-5 * 7.5, "{pire:.2e}");
+    }
+
+    /// Une fonction **linéaire du monde** traverse l'opérateur sans changement au centre des pixels (PSF symétrique,
+    /// trilinéaire exact pour du linéaire) : valide la position, l'orientation et la géométrie de bout en bout,
+    /// pixels pleinement couverts.
+    #[test]
+    fn linear_world_function_is_reproduced_at_pixel_centres() {
+        let t = Temp::new("op_lineaire");
+        let (vide, stack) = volume_et_stack_chevauchants(&t, |_, _, _| 0.0);
+        let f = |p: &Vector3<f64>| 3.0 + 0.7 * p.x - 0.4 * p.y + 1.1 * p.z;
+        let mut data = Array3::<f32>::zeros(vide.dim());
+        for ((i, j, k), v) in data.indexed_iter_mut() {
+            *v = f(&(vide.affine() * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz()) as f32;
+        }
+        let volume = Volume::new(data, *vide.affine()).unwrap();
+        let mut compte = 0;
+        let mut pire = 0.0_f64;
+        for k in 0..3 {
+            let coupe = stack.slice(k).unwrap();
+            let sim = volume.simulate_slice(&coupe, &coupe.psf());
+            for ((i, j), v) in sim.values.indexed_iter() {
+                if sim.coverage[[i, j]] >= 1.0 - 1e-9 {
+                    compte += 1;
+                    pire = pire.max((f64::from(*v) - f(&coupe.pixel_to_world(i as f64, j as f64))).abs());
+                }
+            }
+        }
+        println!("{compte} pixels pleinement couverts ; écart max {pire:.1e}");
+        assert!(compte > 20);
+        assert!(pire < 1e-4, "{pire:.2e}");
+    }
+
+    /// Critère 4 sur une vraie grille : un volume gaussien (voxels de 0,5 mm, covariance anisotrope tournée) vu par une
+    /// coupe oblique donne la convolution analytique, à 2 % du maximum près (interpolation de la grille incluse).
+    #[test]
+    fn simulated_slice_of_a_gaussian_volume_matches_the_analytic_value() {
+        let t = Temp::new("op_gauss");
+        let (rv, ev) = (Rotation3::from_euler_angles(0.2, 0.1, -0.3), [-0.5, 0.5, 0.5]);
+        let av = affine_pivotee(&rv, ev, origine_centree(&rv, ev, [29.5; 3], [0.0; 3]));
+        let rb = Rotation3::from_euler_angles(0.9, 0.2, -0.5);
+        let sigma_b = rb.matrix() * Matrix3::from_diagonal(&Vector3::new(2.0_f64.powi(2), 3.0_f64.powi(2), 2.5_f64.powi(2))) * rb.matrix().transpose();
+        let b_inverse = sigma_b.try_inverse().unwrap();
+        let c = Vector3::new(0.5, -0.3, 0.8);
+        let mut data = Array3::<f32>::zeros((60, 60, 60));
+        for ((i, j, k), v) in data.indexed_iter_mut() {
+            let p = (av * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+            *v = gaussienne(&p, &c, &b_inverse) as f32;
+        }
+        let volume = Volume::new(data, av).unwrap();
+        let rs = Rotation3::from_euler_angles(0.6, -0.4, 0.8);
+        let lignes = lignes_pivotees(&rs, [1.0, 1.0, 3.0], origine_centree(&rs, [1.0, 1.0, 3.0], [5.5, 5.5, 1.0], [0.5, 0.0, 0.0]));
+        let stack = stack_de_dim(&t, (12, 12, 2), lignes, [1.0, 1.0, 3.0]);
+        let coupe = stack.slice(1).unwrap();
+        let psf = coupe.psf();
+        let sim = volume.simulate_slice(&coupe, &psf);
+        let somme = sigma_b + psf.covariance();
+        let somme_inverse = somme.try_inverse().unwrap();
+        let echelle = (sigma_b.determinant() / somme.determinant()).sqrt();
+        let (mut maxi, mut pire) = (0.0_f64, 0.0_f64);
+        for ((i, j), v) in sim.values.indexed_iter() {
+            assert!(sim.coverage[[i, j]] >= 1.0 - 1e-9, "la coupe doit être entièrement dans le volume");
+            let attendu = echelle * gaussienne(&coupe.pixel_to_world(i as f64, j as f64), &c, &somme_inverse);
+            maxi = maxi.max(attendu);
+            pire = pire.max((f64::from(*v) - attendu).abs());
+        }
+        println!("écart max / maximum : {:.2e}", pire / maxi);
+        assert!(pire / maxi < 2e-2, "{:.2e}", pire / maxi);
+    }
+
+    #[test]
+    fn slice_outside_the_volume_has_zero_coverage() {
+        let t = Temp::new("op_dehors");
+        let (volume, _) = volume_et_stack_chevauchants(&t, |_, _, _| 1.0);
+        let loin = stack_de_dim(&t, (6, 6, 2), [[1.0, 0.0, 0.0, 1000.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]], [1.0, 1.0, 3.0]);
+        let coupe = loin.slice(0).unwrap();
+        let sim = volume.simulate_slice(&coupe, &coupe.psf());
+        assert!(sim.coverage.iter().all(|&c| c == 0.0) && sim.values.iter().all(|&v| v == 0.0));
+        let mut acc = Array3::<f64>::zeros(volume.dim());
+        volume.back_project(&coupe, &coupe.psf(), Array2::from_elem(coupe.dim(), 5.0).view(), &mut acc);
+        assert!(acc.iter().all(|&v| v == 0.0), "une coupe hors du volume ne projette rien");
+    }
+
+    /// Coût et couverture sur des stacks réels (données locales) : un stack sert de volume, une coupe d'un autre
+    /// stack du jeu est simulée. À lancer avec `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure de temps sur données locales"]
+    fn operator_cost_on_real_stacks() {
+        let mut fichiers = Vec::new();
+        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
+        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        fichiers.sort();
+        let volume = Volume::from_stack(&Stack::read(&fichiers[0]).unwrap());
+        let stack = Stack::read(&fichiers[1]).unwrap();
+        let coupe = stack.slice(stack.dim().2 / 2).unwrap();
+        let psf = coupe.psf();
+        let debut = std::time::Instant::now();
+        let sim = volume.simulate_slice(&coupe, &psf);
+        let t_avant = debut.elapsed();
+        let mut acc = Array3::<f64>::zeros(volume.dim());
+        let debut = std::time::Instant::now();
+        volume.back_project(&coupe, &psf, sim.values.view(), &mut acc);
+        let t_arriere = debut.elapsed();
+        let (nul, partiel, plein) = repartition(&sim.coverage);
+        println!(
+            "coupe {:?} pixels, {} échantillons de PSF : avant {t_avant:.2?}, arrière {t_arriere:.2?} ; couverture nul/partiel/plein {nul}/{partiel}/{plein}",
+            coupe.dim(),
+            psf.samples().len()
+        );
     }
 }

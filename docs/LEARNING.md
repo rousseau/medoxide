@@ -659,4 +659,40 @@ sont détectées, et un test vérifie qu'une covariance fausse (axes permutés) 
 
 ---
 
-*(à compléter à la prochaine étape : opérateur d'acquisition et son adjoint, étape 2c)*
+## 2026-10-07 — Simuler une coupe et son adjoint (étape 2c du SVR)
+
+- **Quoi** : un **opérateur linéaire jamais construit**. Simuler une coupe, c'est `y = A · x` (`x` : le volume ; `y` : les
+  pixels). Pour un pixel, chacun des 619 échantillons de PSF tombe en un point du monde ; le trilinéaire le répartit sur 8
+  voxels ; on obtient des couples (voxel, coefficient), les lignes de la matrice creuse `C`. Normalisation `A = D⁻¹ C` :
+  on divise chaque ligne par sa somme `W`, ce qui donne la **partition de l'unité** (volume constant → coupe constante, y
+  compris aux bords) et une **couverture** (part de la PSF qui tombe dans le volume) rendue avec la coupe.
+- **Quoi** : l'**adjoint est la transposée**. `Aᵀ y` (pour la reconstruction) répartit `y_p / W_p` sur les voxels avec les
+  **mêmes coefficients**. Pour que ce soit exact par construction, une seule fonction (`for_each_pixel`) génère les
+  coefficients, et l'avant et l'arrière ne font que les consommer ; `Volume::sample` s'appuie lui aussi sur le même
+  générateur trilinéaire (`trilinear`).
+- **Quoi** : une fermeture passée en argument, `impl FnMut(usize, usize, &[([usize; 3], f64)], f64)`, appelée pour chaque
+  pixel ; `FnMut` parce qu'elle modifie ce qu'elle capture (le tableau de sortie). Un `Vec` réutilisé d'un pixel à l'autre
+  (`clear()` garde la capacité) évite des milliers d'allocations.
+- **Où** : `Volume::simulate_slice`, `Volume::back_project`, `SimulatedSlice` dans `crates/medoxide-svr/src/lib.rs`.
+
+**Critères** (fixés avant le code) et résultats :
+- **Test de l'adjoint** `⟨Ax, y⟩ = ⟨x, Aᵀy⟩`, `x` et `y` aléatoires, 3 coupes obliques d'un stack à déterminant négatif,
+  avec pixels de couverture nulle, partielle et complète : écart relatif **≤ 3,2e-7** (critère 1e-5).
+- **Partition de l'unité** : volume constant 7,5 → coupe égale à 7,5 sur tous les pixels couverts (écart 0), `0` ailleurs.
+- **Fonction linéaire du monde** : traverse l'opérateur au centre des pixels pleinement couverts avec un écart de **3,2e-7**
+  (critère 1e-4) ; valide position, orientation et géométrie de bout en bout.
+- **Gaussienne sur une vraie grille** (voxels de 0,5 mm, covariance tournée, coupe oblique) : **8,7e-3** du maximum
+  (critère 2e-2, fixé pour inclure l'interpolation de la grille).
+- Coupe hors du volume : couverture et valeurs nulles, l'adjoint ne projette rien.
+
+**Vérifié par mutation** : 4 mutations sur 5 sont détectées (adjoint sans division par `W` ; avant sans normalisation ;
+décalages de PSF non convertis en indices de voxel ; coefficients sans le poids de l'échantillon). La 5ᵉ (signe des
+décalages inversé) n'est pas détectable : la PSF est symétrique, l'opérateur est identique (mutant équivalent).
+
+**Coût mesuré** (release, un cœur, stack réel, coupe de 384×384) : **0,88 s** à l'aller, **0,85 s** au retour, 619
+échantillons par pixel. À cette vitesse, une itération sur ~150 coupes coûterait plus de 2 min par sens : parallélisation
+(`rayon`) et/ou réduction de l'échantillonnage à envisager avant l'étape 4, pas ajoutés maintenant.
+
+---
+
+*(à compléter à la prochaine étape : comparaison à NeSVoR, étape 2d)*
