@@ -44,6 +44,8 @@ pub enum SvrError {
     SingularVolumeAffine,
     /// Le stack n'a pas de masque cérébral attaché (nécessaire pour le placer dans un groupe).
     NoMask(PathBuf),
+    /// Un écart type de PSF n'est pas strictement positif et fini, ou un axe n'est pas fini.
+    InvalidPsf,
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -71,6 +73,7 @@ impl std::fmt::Display for SvrError {
             SvrError::EmptyMask(p) => write!(f, "{} : masque vide", p.display()),
             SvrError::SingularVolumeAffine => write!(f, "affine de volume non inversible ou non finie"),
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
+            SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
                 "{} : pixdim {pixdim:?} incohérent avec les normes de l'affine {columns:?}",
@@ -244,6 +247,99 @@ impl Volume {
             }
         }
         Some(somme as f32)
+    }
+}
+
+/// Rapport FWHM / écart type d'une gaussienne : `2·√(2·ln 2) ≈ 2,3548` (valeur testée contre la formule).
+const FWHM_PER_SIGMA: f64 = 2.354_820_045_030_949_3;
+
+/// Largeur à mi-hauteur (FWHM) de la PSF **dans le plan**, en multiple de la taille du pixel : 1,2 dans
+/// NiftyMIC, SVRTK et GSVR (étude 04). Un sinc exact donnerait 1,2067 ; BTK prend 1,0.
+pub const PSF_INPLANE_FWHM_FACTOR: f64 = 1.2;
+
+/// Pas des échantillons de PSF, en écarts types. Un pas de 1 σ est trop grossier hors plan (σ ≈ 1,5 mm, plus
+/// grand qu'un voxel) : mesuré sur des volumes gaussiens, 0,75 σ ramène l'écart à ≈ 1e-3 du maximum pour des
+/// structures d'au moins 1 mm de large (4e-2 pour 0,4 mm, plus étroit qu'un voxel : hors du cas visé).
+const PSF_STEP_SIGMA: f64 = 0.75;
+
+/// Rayon de troncature de la PSF, en écarts types. À 3 σ (valeur de NiftyMIC), la boule 3D coupée emporte 7 % de
+/// la variance et fait ≈ 1,5 % d'erreur sur l'analytique : 4 σ la ramène à ≈ 1e-3 (619 échantillons).
+const PSF_CUTOFF_SIGMA: f64 = 4.0;
+
+/// Un échantillon de PSF : un décalage par rapport au centre du pixel (monde, mm) et son poids.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PsfSample {
+    /// Décalage en mm, dans le repère **monde**, à ajouter au centre du pixel.
+    pub offset: Vector3<f64>,
+    /// Poids relatif ; la somme des poids d'une [`Psf`] vaut 1.
+    pub weight: f64,
+}
+
+/// Réponse impulsionnelle (PSF) d'une coupe : une gaussienne 3D orientée dans le repère de la coupe,
+/// représentée par une liste d'échantillons pondérés.
+///
+/// Sa covariance dans le monde est `L · diag(σ²) · Lᵀ`, où les colonnes de `L` sont les axes de la coupe
+/// (u, v, normale) et `σ` les écarts types le long de ces axes. Aucun mouvement n'est appliqué : les
+/// décalages sont dans le repère de la coupe *au repos*, et le mouvement les fera tourner à l'étape 3.
+#[derive(Debug, Clone)]
+pub struct Psf {
+    sigma: [f64; 3],
+    axes: [Vector3<f64>; 3],
+    samples: Vec<PsfSample>,
+}
+
+impl Psf {
+    /// Construit la PSF d'écarts types `sigma` (mm) le long des 3 axes `axes` (unitaires, dans le monde),
+    /// échantillonnée avec le pas et la troncature par défaut.
+    ///
+    /// # Erreurs
+    /// [`SvrError::InvalidPsf`] si un écart type n'est pas `> 0` et fini, ou si un axe contient une valeur non finie.
+    pub fn new(sigma: [f64; 3], axes: [Vector3<f64>; 3]) -> Result<Psf, SvrError> {
+        Psf::sampled(sigma, axes, PSF_STEP_SIGMA, PSF_CUTOFF_SIGMA)
+    }
+
+    /// Construction avec pas et rayon de troncature (en écarts types) explicites ; sert aux tests de sensibilité.
+    fn sampled(sigma: [f64; 3], axes: [Vector3<f64>; 3], step: f64, cutoff: f64) -> Result<Psf, SvrError> {
+        // `!(s > 0.0)` est vrai aussi pour NaN.
+        if sigma.iter().any(|s| !(*s > 0.0) || !s.is_finite()) || axes.iter().any(|a| !a.iter().all(|c| c.is_finite())) {
+            return Err(SvrError::InvalidPsf);
+        }
+        // Indices entiers -n..=n sur chaque axe de la coupe ; décalage = indice · pas · σ le long de l'axe.
+        let n = (cutoff / step).floor() as i32;
+        let mut samples = Vec::new();
+        for a in -n..=n {
+            for b in -n..=n {
+                for c in -n..=n {
+                    let z = Vector3::new(f64::from(a), f64::from(b), f64::from(c)) * step; // en écarts types
+                    if z.norm() > cutoff {
+                        continue; // troncature sphérique
+                    }
+                    let offset = axes[0] * (z.x * sigma[0]) + axes[1] * (z.y * sigma[1]) + axes[2] * (z.z * sigma[2]);
+                    samples.push(PsfSample { offset, weight: (-0.5 * z.norm_squared()).exp() });
+                }
+            }
+        }
+        let total: f64 = samples.iter().map(|s| s.weight).sum();
+        for s in &mut samples {
+            s.weight /= total;
+        }
+        Ok(Psf { sigma, axes, samples })
+    }
+
+    /// Écarts types (mm) le long des axes de la coupe : `[u, v, normale]`.
+    pub fn sigma(&self) -> [f64; 3] {
+        self.sigma
+    }
+
+    /// Covariance de la gaussienne **continue** dans le monde : `L · diag(σ²) · Lᵀ` (mm²).
+    pub fn covariance(&self) -> Matrix3<f64> {
+        let l = Matrix3::from_columns(&self.axes);
+        l * Matrix3::from_diagonal(&Vector3::new(self.sigma[0].powi(2), self.sigma[1].powi(2), self.sigma[2].powi(2))) * l.transpose()
+    }
+
+    /// Échantillons (décalage monde, poids), de poids total 1.
+    pub fn samples(&self) -> &[PsfSample] {
+        &self.samples
     }
 }
 
@@ -611,6 +707,21 @@ impl<'a> Slice<'a> {
         self.stack.spacing()[2]
     }
 
+    /// PSF de la coupe : gaussienne orientée selon (u, v, normale), de FWHM `1,2 ×` la taille du pixel dans le
+    /// plan ([`PSF_INPLANE_FWHM_FACTOR`], par axe) et égale à l'[épaisseur](Slice::thickness) hors plan ;
+    /// `σ = FWHM / 2,3548`. L'épaisseur est `pixdim[3]` : le JSON n'est jamais consulté.
+    pub fn psf(&self) -> Psf {
+        let s = self.stack.spacing();
+        let [u, v] = self.in_plane_axes();
+        let sigma = [
+            PSF_INPLANE_FWHM_FACTOR * s[0] / FWHM_PER_SIGMA,
+            PSF_INPLANE_FWHM_FACTOR * s[1] / FWHM_PER_SIGMA,
+            self.thickness() / FWHM_PER_SIGMA,
+        ];
+        Psf::new(sigma, [u, v, self.normal()])
+            .expect("l'espacement d'un Stack est strictement positif et fini, et son affine est finie")
+    }
+
     /// **Pivot P3** de la coupe : le barycentre 3D du masque cérébral, pris dans le plan de la coupe
     /// (les coordonnées `(i, j)` du barycentre, avec `k` pour la 3ᵉ), en monde (mm). `None` si aucun
     /// masque n'est attaché au stack : le repli éventuel sur [`Slice::geometric_center`] est une
@@ -634,6 +745,7 @@ impl<'a> Slice<'a> {
 mod tests {
     use super::*;
     use ndarray::{Array3, Array4};
+    use nalgebra::Rotation3;
     use nifti::{writer::WriterOptions, NiftiHeader};
 
     fn racine() -> String {
@@ -1427,5 +1539,210 @@ mod tests {
         assert_eq!(n_incoherents, 0, "le domaine « dans la grille » diffère de la référence");
         assert!(pire_scipy < 1e-5, "scipy : {pire_scipy:.2e}");
         assert!(pire_itk < 1e-3, "SimpleITK : {pire_itk:.2e}");
+    }
+    // ------------------------------------------------------------------ étape 2b : PSF
+
+    #[test]
+    fn fwhm_constant_matches_the_formula() {
+        assert!((FWHM_PER_SIGMA - (8.0 * 2.0_f64.ln()).sqrt()).abs() < 1e-14);
+    }
+
+    #[test]
+    fn psf_of_a_diagonal_stack_is_diagonal() {
+        let t = Temp::new("psf_diag");
+        let s = stack_synthetique(&t, DIAG, [1.0, 2.0, 3.0]); // pixels 1 × 2 mm, épaisseur 3 mm
+        let psf = s.slice(0).unwrap().psf();
+        let attendu = [1.2 / FWHM_PER_SIGMA, 2.4 / FWHM_PER_SIGMA, 3.0 / FWHM_PER_SIGMA];
+        for a in 0..3 {
+            assert!((psf.sigma()[a] - attendu[a]).abs() < 1e-12, "σ[{a}] = {}", psf.sigma()[a]);
+        }
+        let cov = psf.covariance();
+        assert!((cov - Matrix3::from_diagonal(&Vector3::new(attendu[0].powi(2), attendu[1].powi(2), attendu[2].powi(2)))).norm() < 1e-12);
+    }
+
+    #[test]
+    fn psf_samples_have_unit_weight_and_zero_mean_and_the_right_covariance() {
+        let t = Temp::new("psf_moments");
+        let s = stack_synthetique(&t, DIAG, [1.0, 2.0, 3.0]);
+        let psf = s.slice(0).unwrap().psf();
+        let somme: f64 = psf.samples().iter().map(|e| e.weight).sum();
+        let moyenne: Vector3<f64> = psf.samples().iter().map(|e| e.offset * e.weight).sum();
+        let cov: Matrix3<f64> = psf.samples().iter().map(|e| e.offset * e.offset.transpose() * e.weight).sum();
+        println!("{} échantillons ; somme {somme:.15} ; |moyenne| {:.1e} ; covariance échantillons / continue (diagonale) : {:.4?}",
+            psf.samples().len(), moyenne.norm(), [0, 1, 2].map(|a| cov[(a, a)] / psf.covariance()[(a, a)]));
+        assert!((somme - 1.0).abs() < 1e-12);
+        assert!(moyenne.norm() < 1e-12, "la grille est symétrique : moyenne nulle");
+        for a in 0..3 {
+            let rapport = cov[(a, a)] / psf.covariance()[(a, a)];
+            assert!((rapport - 1.0).abs() < 0.02, "variance de l'axe {a} : rapport {rapport}");
+        }
+    }
+
+    #[test]
+    fn psf_rejects_invalid_parameters() {
+        let axes = [Vector3::x(), Vector3::y(), Vector3::z()];
+        for mauvais in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(Psf::new([1.0, mauvais, 1.0], axes), Err(SvrError::InvalidPsf)), "σ = {mauvais}");
+        }
+        let axe_nan = [Vector3::x(), Vector3::new(f64::NAN, 0.0, 0.0), Vector3::z()];
+        assert!(matches!(Psf::new([1.0, 1.0, 1.0], axe_nan), Err(SvrError::InvalidPsf)));
+        assert!(Psf::new([1.0, 1.0, 1.0], axes).is_ok());
+    }
+
+    /// Affine (3 premières lignes) `R · diag(échelle)` + origine ; une échelle négative donne un déterminant négatif.
+    fn lignes_pivotees(r: &Rotation3<f64>, echelle: [f64; 3], origine: [f64; 3]) -> [[f32; 4]; 3] {
+        let m = r.matrix() * Matrix3::from_diagonal(&Vector3::from(echelle));
+        std::array::from_fn(|i| [m[(i, 0)] as f32, m[(i, 1)] as f32, m[(i, 2)] as f32, origine[i] as f32])
+    }
+
+    /// Covariance de la PSF attendue, construite **sans** le code testé : axes `R e_a`, σ tirés des tailles de pixel.
+    fn covariance_attendue(r: &Rotation3<f64>, taille: [f64; 3]) -> Matrix3<f64> {
+        let sigma = Vector3::new(1.2 * taille[0], 1.2 * taille[1], taille[2]) / FWHM_PER_SIGMA;
+        r.matrix() * Matrix3::from_diagonal(&sigma.component_mul(&sigma)) * r.matrix().transpose()
+    }
+
+    /// Gaussienne `exp(−½ (x−c)ᵀ Σ⁻¹ (x−c))` (non normalisée).
+    fn gaussienne(x: &Vector3<f64>, c: &Vector3<f64>, cov_inverse: &Matrix3<f64>) -> f64 {
+        let d = x - c;
+        (-0.5 * (d.transpose() * cov_inverse * d)[(0, 0)]).exp()
+    }
+
+    /// Cas de la référence analytique : une coupe d'orientation donnée, un volume gaussien anisotrope et tourné.
+    /// Rend l'écart maximal entre la somme pondérée des échantillons et la valeur exacte de la convolution
+    /// `√(|Σ_b| / |Σ_b + Σ_psf|) · exp(−½ (p−c)ᵀ (Σ_b + Σ_psf)⁻¹ (p−c))`, rapporté au maximum de cette valeur.
+    fn ecart_analytique(nom: &str, rot: Rotation3<f64>, taille: [f64; 3], psf_de_reference: Option<Matrix3<f64>>) -> f64 {
+        let t = Temp::new(nom);
+        let echelle = taille;
+        let s = stack_synthetique(&t, lignes_pivotees(&rot, echelle, [5.0, -7.0, 3.0]), [
+            taille[0].abs() as f32,
+            taille[1] as f32,
+            taille[2] as f32,
+        ]);
+        let coupe = s.slice(1).unwrap();
+        let psf = coupe.psf();
+        let rb = Rotation3::from_euler_angles(0.9, 0.2, -0.5);
+        let sigma_b = rb.matrix() * Matrix3::from_diagonal(&Vector3::new(1.5_f64.powi(2), 2.5_f64.powi(2), 1.0)) * rb.matrix().transpose();
+        let sigma_psf = psf_de_reference.unwrap_or_else(|| covariance_attendue(&rot, [taille[0].abs(), taille[1], taille[2]]));
+        let somme = sigma_b + sigma_psf;
+        let somme_inverse = somme.try_inverse().unwrap();
+        let b_inverse = sigma_b.try_inverse().unwrap();
+        let echelle_conv = (sigma_b.determinant() / somme.determinant()).sqrt();
+        // centre du volume : à 1 mm environ hors du plan, près du milieu de la coupe
+        let c = coupe.pixel_to_world(1.4, 1.1) + coupe.normal() * 1.1 + Vector3::new(0.3, -0.2, 0.1);
+        let mut max_attendu = 0.0_f64;
+        let mut pire = 0.0_f64;
+        for i in [-2.0, -0.5, 1.0, 2.5, 4.0] {
+            for j in [-2.0, 0.0, 1.5, 3.0] {
+                let p = coupe.pixel_to_world(i, j);
+                let attendu = echelle_conv * gaussienne(&p, &c, &somme_inverse);
+                let obtenu: f64 = psf.samples().iter().map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse)).sum();
+                max_attendu = max_attendu.max(attendu);
+                pire = pire.max((obtenu - attendu).abs());
+            }
+        }
+        pire / max_attendu
+    }
+
+    fn cas_orientations() -> Vec<(&'static str, Rotation3<f64>, [f64; 3])> {
+        let pi2 = std::f64::consts::FRAC_PI_2;
+        vec![
+            ("axiale", Rotation3::identity(), [0.8, 1.2, 3.5]),
+            ("coronale", Rotation3::from_euler_angles(pi2, 0.0, 0.0), [0.8, 1.2, 3.5]),
+            ("sagittale", Rotation3::from_euler_angles(0.0, pi2, 0.0), [0.8, 1.2, 3.5]),
+            ("oblique", Rotation3::from_euler_angles(0.4, -0.3, 0.7), [0.8, 1.2, 3.5]),
+            ("oblique_gauche", Rotation3::from_euler_angles(0.4, -0.3, 0.7), [-0.8, 1.2, 3.5]),
+        ]
+    }
+
+    #[test]
+    fn psf_matches_the_analytic_gaussian_convolution_for_every_orientation() {
+        for (nom, rot, taille) in cas_orientations() {
+            let e = ecart_analytique(&format!("psf_{nom}"), rot, taille, None);
+            println!("{nom:15} écart max / maximum : {e:.2e}");
+            assert!(e < 1e-2, "{nom} : {e:.2e}");
+        }
+        // le cas « gauche » l'est bien
+        let t = Temp::new("psf_gauche_det");
+        let lignes = lignes_pivotees(&Rotation3::from_euler_angles(0.4, -0.3, 0.7), [-0.8, 1.2, 3.5], [0.0; 3]);
+        let s = stack_synthetique(&t, lignes, [0.8, 1.2, 3.5]);
+        assert!(s.affine().fixed_view::<3, 3>(0, 0).determinant() < 0.0);
+    }
+
+    /// Le test a des dents : avec une covariance **fausse** (axes de la coupe permutés), il échoue nettement.
+    #[test]
+    fn analytic_test_detects_a_wrong_orientation() {
+        let rot = Rotation3::from_euler_angles(0.4, -0.3, 0.7);
+        let taille = [0.8, 1.2, 3.5];
+        let sigma = Vector3::new(1.2 * taille[0], 1.2 * taille[1], taille[2]) / FWHM_PER_SIGMA;
+        // σ le long de la mauvaise colonne : u ↔ normale
+        let faux_sigma = Vector3::new(sigma.z, sigma.y, sigma.x);
+        let faux = rot.matrix() * Matrix3::from_diagonal(&faux_sigma.component_mul(&faux_sigma)) * rot.matrix().transpose();
+        let e = ecart_analytique("psf_faux", rot, taille, Some(faux));
+        println!("covariance fausse : écart {e:.2e}");
+        assert!(e > 5e-2, "le test ne distingue pas une orientation fausse : {e:.2e}");
+    }
+
+    /// Sensibilité au pas et à la troncature : on compare la PSF par défaut à une PSF très fine et très large.
+    #[test]
+    fn psf_sampling_is_converged() {
+        let t = Temp::new("psf_converge");
+        let rot = Rotation3::from_euler_angles(0.4, -0.3, 0.7);
+        let s = stack_synthetique(&t, lignes_pivotees(&rot, [0.8, 1.2, 3.5], [0.0; 3]), [0.8, 1.2, 3.5]);
+        let coupe = s.slice(0).unwrap();
+        let defaut = coupe.psf();
+        let [u, v] = coupe.in_plane_axes();
+        let axes = [u, v, coupe.normal()];
+        let rb = Rotation3::from_euler_angles(0.9, 0.2, -0.5);
+        let sigma_b = rb.matrix() * Matrix3::from_diagonal(&Vector3::new(1.0, 2.0, 0.5)) * rb.matrix().transpose();
+        let b_inverse = sigma_b.try_inverse().unwrap();
+        let c = coupe.pixel_to_world(1.0, 1.0);
+        let mesure = |psf: &Psf| -> Vec<f64> {
+            [[0.0, 0.0], [1.0, 0.5], [-1.5, 2.0], [3.0, -1.0]]
+                .iter()
+                .map(|[i, j]| {
+                    let p = coupe.pixel_to_world(*i, *j);
+                    psf.samples().iter().map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse)).sum()
+                })
+                .collect()
+        };
+        let reference = mesure(&Psf::sampled(defaut.sigma(), axes, 0.25, 5.0).unwrap());
+        let maximum = reference.iter().cloned().fold(0.0, f64::max);
+        for (pas, coupure) in [(1.0, 3.0), (0.5, 3.0), (1.0, 4.0), (1.0, 2.0), (1.5, 3.0)] {
+            let psf = Psf::sampled(defaut.sigma(), axes, pas, coupure).unwrap();
+            let ecart = mesure(&psf).iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / maximum;
+            println!("pas {pas} σ, coupure {coupure} σ : {} échantillons, écart à la PSF fine {ecart:.2e}", psf.samples().len());
+        }
+        let ecart_defaut = mesure(&defaut).iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / maximum;
+        assert!(ecart_defaut < 5e-3, "pas et troncature par défaut : écart {ecart_defaut:.2e}");
+    }
+
+    /// Sur les 96 stacks réels (affines obliques, déterminant négatif) : σ attendus, et variance le long de la
+    /// normale égale à σ_normale² (la normale est un axe propre de la PSF). Données locales.
+    #[test]
+    fn psf_of_all_development_stacks_follows_slice_axes() {
+        let mut fichiers = Vec::new();
+        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
+        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        assert_eq!(fichiers.len(), 96, "jeu de développement incomplet");
+        let (mut s_plan, mut s_hors) = ((f64::MAX, 0.0_f64), (f64::MAX, 0.0_f64));
+        for f in &fichiers {
+            let stack = Stack::read(f).unwrap();
+            let coupe = stack.slice(0).unwrap();
+            let psf = coupe.psf();
+            let sp = stack.spacing();
+            assert!((psf.sigma()[0] - 1.2 * sp[0] / FWHM_PER_SIGMA).abs() < 1e-12);
+            assert!((psf.sigma()[2] - sp[2] / FWHM_PER_SIGMA).abs() < 1e-12);
+            let n = coupe.normal();
+            let [u, v] = coupe.in_plane_axes();
+            let cov = psf.covariance();
+            for (axe, sigma) in [(n, psf.sigma()[2]), (u, psf.sigma()[0]), (v, psf.sigma()[1])] {
+                let variance = (axe.transpose() * cov * axe)[(0, 0)];
+                assert!((variance / sigma.powi(2) - 1.0).abs() < 1e-5, "{} : variance {variance} contre σ² {}", f.display(), sigma.powi(2));
+            }
+            assert!(cov.determinant() > 0.0);
+            s_plan = (s_plan.0.min(psf.sigma()[0]), s_plan.1.max(psf.sigma()[0]));
+            s_hors = (s_hors.0.min(psf.sigma()[2]), s_hors.1.max(psf.sigma()[2]));
+        }
+        println!("96 stacks : σ dans le plan {:.3} à {:.3} mm ; σ hors plan {:.3} à {:.3} mm", s_plan.0, s_plan.1, s_hors.0, s_hors.1);
     }
 }

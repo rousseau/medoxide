@@ -623,4 +623,40 @@ directe à la place de l'inverse) sont détectées.
 
 ---
 
-*(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*
+## 2026-10-07 — La réponse impulsionnelle d'une coupe (étape 2b du SVR)
+
+- **Quoi** : la **PSF** (réponse impulsionnelle). Un pixel de coupe n'est pas la valeur du volume en un point : c'est une
+  moyenne pondérée du volume autour du centre du pixel. On prend une **gaussienne** `σ = FWHM / 2,3548`, de FWHM
+  `1,2 ×` la taille du pixel dans le plan et égale à l'épaisseur hors plan. Sur le jeu de développement : σ de 0,32 à
+  0,43 mm dans le plan, 1,27 à 1,49 mm hors plan, une PSF très allongée selon la normale.
+- **Quoi** : une **covariance tournée**. La gaussienne est diagonale dans le repère de la coupe (u, v, normale) ; dans
+  le monde, `Σ = L · diag(σ²) · Lᵀ`, `L` ayant pour colonnes les axes de la coupe. Une erreur d'orientation ne fait pas
+  planter : elle donne des coupes fausses, d'où une référence analytique indépendante du code.
+- **Quoi** : une gaussienne **discrète**, c'est-à-dire des échantillons (décalage, poids) sur une grille régulière du repère
+  de la coupe, tronquée par une boule, poids normalisés à une somme de 1. `Vec<PsfSample>` construit par trois boucles
+  imbriquées ; `Psf::new` rend un `Result` (σ non fini ou ≤ 0 refusé, `!(s > 0.0)` attrape aussi `NaN`).
+- **Où** : `Psf`, `PsfSample`, `Slice::psf` dans `crates/medoxide-svr/src/lib.rs`.
+
+**Défaut trouvé par la mesure, avant tout réglage « à l'œil »** : mes réglages a priori (pas 1 σ, coupure 3 σ, comme
+NiftyMIC) donnaient **1,5 % d'erreur** sur l'analytique (critère : 1 %), et la covariance des échantillons ne valait que
+**0,93** de la continue. Deux causes distinctes, mesurées sur une grille de réglages et des volumes gaussiens de largeur
+0,6 à 2,5 mm : (1) la boule 3D coupée à 3 σ emporte 7 % de la variance ; (2) un pas de 1 σ est trop grossier hors plan
+(σ ≈ 1,5 mm est plus grand qu'un voxel). Réglage retenu, **choisi après avoir vu ces mesures** : pas **0,75 σ**, coupure
+**4 σ**, soit 619 échantillons par pixel et une covariance à 0,9935 de la continue. Limite connue : pour des structures
+plus étroites qu'un voxel (0,4 mm), l'erreur reste de 4e-2. Le coût (619 échantillons par pixel) sera à réexaminer à
+l'étape 2c.
+
+**Critère 4 de l'étude 04** : pour un volume gaussien (covariance `Σ_b` anisotrope et tournée), la convolution par la
+PSF vaut exactement `√(|Σ_b| / |Σ_b+Σ_psf|) · exp(−½ (p−c)ᵀ (Σ_b+Σ_psf)⁻¹ (p−c))`. Erreur maximale rapportée au maximum :
+**1,0e-3** pour les coupes axiale, coronale, sagittale, oblique et oblique à déterminant négatif (critère 1e-2). La
+covariance attendue est reconstruite **dans le test** à partir de l'affine qu'il fabrique, donc une erreur d'axe dans
+`Slice::psf` ne passe pas inaperçue.
+
+**Vérifié** (7 nouveaux tests) : sur les 96 stacks réels (affines obliques, déterminant négatif), la variance de la PSF
+le long de la normale et des axes du plan égale σ² à 1e-5 près ; somme des poids 1, moyenne nulle. Quatre mutations
+volontaires (normale remplacée par un axe du plan, σ permutés, mauvais σ dans les échantillons, facteur 1,0 au lieu de 1,2)
+sont détectées, et un test vérifie qu'une covariance fausse (axes permutés) est rejetée (écart > 5e-2).
+
+---
+
+*(à compléter à la prochaine étape : opérateur d'acquisition et son adjoint, étape 2c)*
