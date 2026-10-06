@@ -1,0 +1,8 @@
+[book]
+title = "medoxide"
+description = "Boîte à outils en Rust et Burn pour l'imagerie médicale"
+language = "fr"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/rousseau/medoxide"
