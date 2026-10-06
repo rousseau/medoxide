@@ -1,6 +1,33 @@
-//! Attention U-Net 2D de Fetal-BET, généré par `onnx2burn` (burn-onnx 0.22.0-pre.4)
-//! à partir de `models/attunet.onnx`. Ne pas modifier à la main : régénérer avec
-//! `onnx2burn models/attunet.onnx <dossier>` puis recopier `attunet.rs` ici.
+//! Attention U-Net 2D de **Fetal-BET**, généré par `onnx2burn` (burn-onnx 0.22.0-pre.4)
+//! à partir de `models/attunet.onnx`.
+//!
+//! # Attribution
+//!
+//! Ce modèle (architecture et poids) est celui de Fetal-BET :
+//!
+//! > Faghihpirayesh R., Karimi D., Erdoğmuş D., Gholipour A.,
+//! > « Fetal-BET: Brain Extraction Tool for Fetal MRI »,
+//! > *IEEE Open Journal of Engineering in Medicine and Biology*, 2024.
+//! > <https://github.com/IntelligentImaging/fetal-brain-extraction>
+//!
+//! Licence : Creative Commons Attribution 4.0 International (CC BY 4.0),
+//! <https://creativecommons.org/licenses/by/4.0/>.
+//!
+//! **Modifications** : l'architecture (`AttentionUnet` de MONAI) et les poids
+//! d'origine (PyTorch, `AttUNet.pth`) ont été exportés en ONNX, puis convertis en
+//! code Rust pour Burn et en poids au format `burnpack`. Ce fichier est le
+//! résultat de cette conversion ; les calculs sont équivalents à l'original (écart
+//! relatif des logits mesuré sous 1e-5 sur des volumes de test, voir les tests
+//! de `medoxide-fetalbet`).
+//!
+//! Les auteurs précisent que ce logiciel est destiné à la recherche, qu'il n'est
+//! pas prévu pour un usage médical ou diagnostique et qu'il est fourni sans
+//! garantie. Cette mention s'applique à son utilisation ici.
+//!
+//! # Régénérer ce fichier
+//!
+//! `onnx2burn models/attunet.onnx <dossier>`, puis recopier `attunet.rs` ici
+//! **en conservant cet en-tête** (il n'est pas généré).
 //!
 //! Les poids (`attunet.bpk`, 121 Mo) ne sont pas dans Git : voir Garage,
 //! `medoxide-dev/models/`.

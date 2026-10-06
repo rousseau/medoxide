@@ -2,7 +2,8 @@
 //!
 //! Chaque module (mask, recon, register, ...) devient une sous-commande,
 //! sur le modèle `git <sous-commande>` / `cargo <sous-commande>`.
-//! Aujourd'hui une seule sous-commande existe : `mask`.
+//! Aujourd'hui une seule sous-commande existe : `fetalbet`, nommée d'après
+//! l'algorithme (Fetal-BET, extraction cérébrale en IRM fœtale).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,8 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Extraction du masque cérébral fœtal (portage de Fetal-BET)
-    Mask {
+    /// Extraction du masque cérébral en IRM fœtale (portage de Fetal-BET)
+    Fetalbet {
         /// Volume NIfTI d'entrée
         #[arg(long)]
         input: PathBuf,
@@ -37,14 +38,14 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Mask { input, output, model } => {
+        Command::Fetalbet { input, output, model } => {
             match medoxide_fetalbet::segment(&input, &output, &model) {
                 Ok(()) => {
                     println!("Masque écrit dans {output:?}");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("medx mask : {e}");
+                    eprintln!("medx fetalbet : {e}");
                     ExitCode::FAILURE
                 }
             }

@@ -3,6 +3,9 @@
 //! Portage du modèle de segmentation Fetal-BET (PyTorch) vers Burn,
 //! via un export ONNX intermédiaire. Voir `docs/LEARNING.md` à la racine
 //! du workspace pour le détail de la démarche.
+//!
+//! Le modèle est celui de Fetal-BET (Faghihpirayesh et al., 2024, CC BY 4.0) :
+//! voir l'attribution complète dans `model.rs` et dans le `README.md` racine.
 
 use std::path::{Path, PathBuf};
 

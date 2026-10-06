@@ -317,6 +317,22 @@ et 300). Pas d'optimisation faite (décision : mesurer seulement) : le passage e
 release ne change presque rien par rapport au debug (~100 s), ce qui suggère
 que le temps est dominé par le GPU ou la lecture synchrone des résultats.
 
+## 2026-10-05 — Nommer un crate d'après la méthode, et citer ses sources
+
+- **Quoi** : `medoxide-mask` est renommé `medoxide-fetalbet` (dossier, nom du
+  paquet, dépendance de `medx`, appels `medoxide_fetalbet::`) et la sous-commande
+  `medx mask` devient `medx fetalbet`. On nomme le crate et la commande d'après
+  l'*algorithme* utilisé et son domaine (Fetal-BET, IRM fœtale) plutôt que d'après
+  la fonction générique (« mask ») : l'utilisateur sait précisément ce qui
+  s'exécute, et une autre méthode de masque aurait sa propre sous-commande.
+  `git mv` conserve l'historique du dossier. (Les entrées de l'étape 8 ci-dessus
+  parlent de `medx mask` : c'était le nom à ce moment-là.)
+- **Quoi** : l'attribution d'un travail dérivé. Fetal-BET est sous CC BY 4.0 :
+  il faut citer les auteurs, donner la licence, **indiquer les modifications**
+  (conversion PyTorch vers ONNX vers Burn) et ne pas laisser croire à leur
+  approbation. Fait dans l'en-tête de `model.rs` et dans le `README.md`.
+- **Où** : `crates/medoxide-fetalbet/src/model.rs`, `README.md`.
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*

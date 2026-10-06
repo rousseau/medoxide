@@ -19,9 +19,9 @@ cargo build --release
 ## Lancer
 
 ```bash
-./target/release/medx mask --input volume.nii.gz --output mask.nii.gz
+./target/release/medx fetalbet --input volume.nii.gz --output mask.nii.gz
 # poids ailleurs que dans ./models/attunet.bpk :
-./target/release/medx mask --input volume.nii.gz --output mask.nii.gz --model chemin/attunet.bpk
+./target/release/medx fetalbet --input volume.nii.gz --output mask.nii.gz --model chemin/attunet.bpk
 ```
 
 Le masque est un NIfTI `uint8` (0 fond, 1 cerveau) qui garde l'affine du
@@ -34,7 +34,7 @@ sur les 8 volumes de test, il diffère du masque de référence de 0 à 14 voxel
 
 ```
 crates/
-  medoxide-fetalbet/   bibliothèque : logique de segmentation (masque cérébral fœtal)
+  medoxide-fetalbet/   bibliothèque : portage de Fetal-BET (masque cérébral fœtal)
   medx/            binaire CLI : point d'entrée unique, une sous-commande par module
 ```
 
@@ -43,3 +43,27 @@ Un nouveau module (reconstruction, recalage, ...) = un nouveau crate dans
 crate `medoxide-core` partagé seulement quand un deuxième module en a
 réellement besoin — pas avant.
 
+## Référence et licence
+
+Le code de medoxide est sous licence MIT (voir `LICENSE`).
+
+Le module de masque cérébral fœtal est un portage de **Fetal-BET**. Le modèle
+(architecture et poids) vient de leurs travaux, publiés sous licence
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) : si vous utilisez
+`medx fetalbet`, merci de citer :
+
+```bibtex
+@article{faghihpirayesh2024fetal,
+  title={Fetal-bet: Brain extraction tool for fetal mri},
+  author={Faghihpirayesh, Razieh and Karimi, Davood and Erdo{\u{g}}mu{\c{s}}, Deniz and Gholipour, Ali},
+  journal={IEEE Open Journal of Engineering in Medicine and Biology},
+  year={2024},
+  publisher={IEEE}
+}
+```
+
+Dépôt d'origine : <https://github.com/IntelligentImaging/fetal-brain-extraction>.
+Modifications : export ONNX, puis conversion en code Rust pour Burn et poids
+`burnpack`. Comme les auteurs, nous précisons que cet outil est destiné à la
+recherche et non à un usage médical ou diagnostique, et qu'il est fourni sans
+garantie.
