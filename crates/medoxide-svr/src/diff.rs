@@ -152,6 +152,34 @@ pub fn rotation_scale_mm(points: &[Vector3<f64>], pivot: &Vector3<f64>) -> Optio
     (echelle > 0.0).then_some(echelle)
 }
 
+/// Constante ajoutée sous la racine de [`ncc`] : une coupe constante ou sans pixel valide a une variance nulle, donc
+/// `0/0` et un gradient `NaN` ; avec elle, la corrélation vaut 0 et le gradient reste fini. Négligeable devant des
+/// variances d'intensité normales (≥ 1e-4).
+const NCC_EPS: f64 = 1e-8;
+
+/// **Corrélation normalisée** (NCC) pondérée, une par coupe : corrélation de Pearson entre `a` et `b` où chaque pixel
+/// compte avec son poids `w`. Les moyennes sont pondérées elles aussi.
+///
+/// - `a` : intensités des coupes, forme `[S, P]` (S coupes, P pixels).
+/// - `b` : intensités du volume échantillonné aux mêmes pixels, même forme.
+/// - `w` : poids des pixels (par exemple masque cérébral × `inside` de [`trilinear_sample`]), même forme ; un poids nul
+///   retire le pixel du calcul.
+///
+/// Rend un tenseur de forme `[S]`, de −1 à 1 : 1 si `b = α a + β` avec `α > 0` sur les pixels pesés (invariance aux changements
+/// d'échelle et de décalage d'intensité de chaque image). Chaque coupe est indépendante : le gradient d'une coupe ne dépend
+/// pas des autres. Valeur 0 (et gradient fini) pour une coupe constante ou sans pixel de poids non nul.
+pub fn ncc(a: Tensor<2>, b: Tensor<2>, w: Tensor<2>) -> Tensor<1> {
+    let [s, _] = a.dims();
+    let somme_w = w.clone().sum_dim(1).clamp_min(1e-12); // [S, 1] ; jamais nul, pour la division
+    let moyenne = |x: &Tensor<2>| (w.clone() * x.clone()).sum_dim(1) / somme_w.clone();
+    let da = a.clone() - moyenne(&a);
+    let db = b.clone() - moyenne(&b);
+    let covariance = (w.clone() * da.clone() * db.clone()).sum_dim(1);
+    let variance_a = (w.clone() * da.clone() * da).sum_dim(1);
+    let variance_b = (w * db.clone() * db).sum_dim(1);
+    (covariance / (variance_a * variance_b + NCC_EPS).sqrt()).reshape([s])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +447,123 @@ mod tests {
             println!("p0 = {p0:?} : |g| = {norme:.1}, écart relatif autodiff / différences finies {erreur:.2e}");
             assert!(erreur < 1e-3, "{erreur:.2e} en {p0:?}");
         }
+    }
+    // ------------------------------------------------------------------ sous-étape 3 : NCC
+
+    fn tenseur_2d(lignes: &[&[f64]], device: &Device) -> Tensor<2> {
+        let v: Vec<f32> = lignes.iter().flat_map(|l| l.iter().map(|&x| x as f32)).collect();
+        Tensor::<2>::from_floats(TensorData::new(v, [lignes.len(), lignes[0].len()]), device)
+    }
+
+    fn ncc_de(a: &[&[f64]], b: &[&[f64]], w: &[&[f64]]) -> Vec<f64> {
+        let d = device();
+        ncc(tenseur_2d(a, &d), tenseur_2d(b, &d), tenseur_2d(w, &d)).into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect()
+    }
+
+    const A8: [f64; 8] = [0.3, 1.2, -0.5, 2.0, 0.9, 1.7, -1.1, 0.4];
+    const B8: [f64; 8] = [0.5, 1.0, -0.2, 1.6, 1.4, 1.2, -0.9, 0.1];
+    const W8: [f64; 8] = [1.0, 0.5, 0.0, 2.0, 1.0, 0.25, 1.0, 0.0];
+
+    /// Critère 1 : valeur contre numpy (`np.cov(a, b, aweights=w)`) et cas calculable à la main.
+    #[test]
+    fn ncc_matches_numpy_and_a_hand_computed_case() {
+        let n = ncc_de(&[&A8], &[&B8], &[&W8])[0];
+        println!("NCC pondérée : {n:.10} (numpy 0.9567003371)");
+        assert!((n - 0.9567003370886679).abs() < 1e-6, "{n}");
+        let main = ncc_de(&[&[1.0, 2.0, 3.0, 4.0]], &[&[1.0, 3.0, 2.0, 4.0]], &[&[1.0; 4]])[0];
+        assert!((main - 0.8).abs() < 1e-6, "{main}");
+    }
+
+    /// Critère 2 : propriétés de la NCC.
+    #[test]
+    fn ncc_has_the_expected_invariances() {
+        let w = [&W8[..]];
+        let affine = |alpha: f64, beta: f64| B8.map(|v| alpha * v + beta);
+        // +1 / -1 pour une relation affine croissante / décroissante
+        let a_affine = A8.map(|v| 3.0 * v + 7.0);
+        assert!((ncc_de(&[&A8], &[&a_affine], &w)[0] - 1.0).abs() < 1e-5);
+        let a_oppose = A8.map(|v| -2.0 * v + 1.0);
+        assert!((ncc_de(&[&A8], &[&a_oppose], &w)[0] + 1.0).abs() < 1e-5);
+        // invariance aux changements d'échelle et de décalage de chaque image
+        let base = ncc_de(&[&A8], &[&B8], &w)[0];
+        for (alpha, beta) in [(2.5, 0.0), (0.4, 3.0), (10.0, -5.0)] {
+            assert!((ncc_de(&[&A8], &[&affine(alpha, beta)], &w)[0] - base).abs() < 1e-5, "b -> {alpha} b + {beta}");
+            assert!((ncc_de(&[&A8.map(|v| alpha * v + beta)], &[&B8], &w)[0] - base).abs() < 1e-5, "a -> {alpha} a + {beta}");
+        }
+        // un pixel de poids nul n'a aucun effet, quelle que soit sa valeur
+        let (mut a_bis, mut b_bis) = (A8, B8);
+        a_bis[2] = 1000.0;
+        b_bis[7] = -500.0;
+        assert!((ncc_de(&[&a_bis], &[&b_bis], &w)[0] - base).abs() < 1e-6);
+        // un poids 2 équivaut à un pixel dupliqué
+        let a_dup = [0.3, 1.2, 2.0, 2.0, 0.9];
+        let b_dup = [0.5, 1.0, 1.6, 1.6, 1.4];
+        let a_poids = [0.3, 1.2, 2.0, 0.9];
+        let b_poids = [0.5, 1.0, 1.6, 1.4];
+        let duplique = ncc_de(&[&a_dup], &[&b_dup], &[&[1.0; 5]])[0];
+        let pese = ncc_de(&[&a_poids], &[&b_poids], &[&[1.0, 1.0, 2.0, 1.0]])[0];
+        assert!((duplique - pese).abs() < 1e-6, "{duplique} contre {pese}");
+    }
+
+    /// Critère 3 : chaque ligne d'un lot égale la même coupe calculée seule.
+    #[test]
+    fn ncc_rows_are_independent() {
+        let a2 = A8.map(|v| v * v - 0.3);
+        let b2 = B8.map(|v| 1.0 - v);
+        let lot = ncc_de(&[&A8, &a2], &[&B8, &b2], &[&W8, &[1.0; 8]]);
+        let seul1 = ncc_de(&[&A8], &[&B8], &[&W8])[0];
+        let seul2 = ncc_de(&[&a2], &[&b2], &[&[1.0; 8]])[0];
+        assert!((lot[0] - seul1).abs() < 1e-7 && (lot[1] - seul2).abs() < 1e-7, "{lot:?} contre {seul1}, {seul2}");
+        assert!((lot[0] - lot[1]).abs() > 0.1, "les deux coupes de test doivent différer");
+    }
+
+    /// Critère 4 : coupe constante, masque vide : NCC nulle, valeur et gradient finis.
+    #[test]
+    fn ncc_is_finite_for_degenerate_slices() {
+        let device = device().autodiff();
+        let a = tenseur_2d(&[&[5.0; 6], &A8[..6]], &device).require_grad();
+        let b = tenseur_2d(&[&B8[..6], &B8[..6]], &device).require_grad();
+        let w = tenseur_2d(&[&[1.0; 6], &[0.0; 6]], &device); // ligne 0 : `a` constant ; ligne 1 : masque vide
+        let n = ncc(a.clone(), b.clone(), w);
+        let valeurs = n.clone().into_data().try_to_vec::<f32>().unwrap();
+        assert!(valeurs.iter().all(|&v| v == 0.0), "{valeurs:?}");
+        let grads = n.sum().backward();
+        for (nom, t) in [("a", &a), ("b", &b)] {
+            let g = t.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap();
+            assert!(g.iter().all(|v| v.is_finite()), "gradient non fini pour {nom} : {g:?}");
+        }
+    }
+
+    /// Critère 5 : gradient automatique contre différences finies (f64) par rapport à `b`.
+    #[test]
+    fn ncc_gradient_matches_finite_differences() {
+        let ncc_f64 = |a: &[f64], b: &[f64], w: &[f64]| -> f64 {
+            let sw: f64 = w.iter().sum();
+            let m = |x: &[f64]| x.iter().zip(w).map(|(x, w)| x * w).sum::<f64>() / sw;
+            let (ma, mb) = (m(a), m(b));
+            let cov: f64 = (0..a.len()).map(|i| w[i] * (a[i] - ma) * (b[i] - mb)).sum();
+            let va: f64 = (0..a.len()).map(|i| w[i] * (a[i] - ma).powi(2)).sum();
+            let vb: f64 = (0..a.len()).map(|i| w[i] * (b[i] - mb).powi(2)).sum();
+            cov / (va * vb + NCC_EPS).sqrt()
+        };
+        let device = device().autodiff();
+        let (a, b, w) = (tenseur_2d(&[&A8], &device), tenseur_2d(&[&B8], &device).require_grad(), tenseur_2d(&[&W8], &device));
+        let grads = ncc(a, b.clone(), w).sum().backward();
+        let g_auto: Vec<f64> = b.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+        let h = 1e-6;
+        let g_diff: Vec<f64> = (0..8)
+            .map(|i| {
+                let (mut plus, mut moins) = (B8, B8);
+                plus[i] += h;
+                moins[i] -= h;
+                (ncc_f64(&A8, &plus, &W8) - ncc_f64(&A8, &moins, &W8)) / (2.0 * h)
+            })
+            .collect();
+        let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let erreur = g_auto.iter().zip(&g_diff).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / norme;
+        println!("|g| = {norme:.3}, écart relatif autodiff / différences finies {erreur:.2e}");
+        assert!(erreur < 1e-3, "{erreur:.2e}");
+        // un pixel de poids nul a un gradient nul
+        assert!(g_auto[2].abs() < 1e-7 && g_auto[7].abs() < 1e-7, "{g_auto:?}");
     }
 }

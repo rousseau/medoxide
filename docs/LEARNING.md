@@ -794,4 +794,35 @@ d'un seul voxel) ; masque sans borne supérieure.
 
 ---
 
-*(à compléter à la prochaine étape : étape 3a, coût NCC en tenseurs)*
+## 2026-10-07 — La corrélation normalisée par coupe (étape 3a, sous-étape 3 du SVR)
+
+- **Quoi** : la **NCC** (corrélation de Pearson) entre les intensités d'une coupe et celles du volume échantillonné aux mêmes
+  pixels : `Σ w (a − ā)(b − b̄) / √(Σ w (a − ā)² · Σ w (b − b̄)²)`, moyennes pondérées. Elle vaut 1 pour `b = α a + β` avec `α > 0`
+  et −1 si `α < 0` : **invariante à l'échelle et au décalage d'intensité de chaque image**, ce qui compte tant que le facteur
+  d'intensité propre de chaque coupe est inconnu (étape 4c). La perte sera `−NCC`.
+- **Quoi** : un **poids par pixel** (masque cérébral × `inside` de la sous-étape 1) : un poids nul retire le pixel (son gradient est nul), un
+  poids 2 équivaut à un pixel dupliqué.
+- **Quoi** : la **dimension de lot**. Les tenseurs ont la forme `[S, P]` (S coupes, P pixels) et les sommes portent sur les pixels
+  (`sum_dim(1)`) : chaque coupe a sa NCC et son gradient indépendants, ce qui permet de recaler toutes les coupes en même temps
+  sans `rayon`.
+- **Quoi** : un second **piège de l'autodiff**, celui du `0/0` : une coupe constante ou un masque vide a une variance nulle. Une constante
+  `1e-8` sous la racine donne alors une NCC de 0 et un gradient fini ; sans elle, `NaN`.
+- **Choix à rouvrir** : NeSVoR utilise la NCC **au carré** (vérifié dans son code), insensible au signe ; je garde la NCC signée pour
+  qu'un contraste inversé ne passe pas pour un bon alignement. À comparer à l'étape 3c, non tranché par une mesure.
+- **Où** : `ncc` dans `crates/medoxide-svr/src/diff.rs`.
+
+**Critères** (fixés avant le code) et résultats :
+- **Valeur contre numpy** (`np.cov(a, b, aweights=w)`, 8 points) : 0,95670027 contre 0,95670034 (écart 7e-8, `f32`) ; cas calculable
+  à la main (1,2,3,4 contre 1,3,2,4) : 0,8.
+- **Propriétés** : ±1 pour une relation affine croissante ou décroissante ; invariance à `α a + β` sur l'une ou l'autre image
+  (1e-5) ; un pixel de poids nul sans effet ; poids 2 = pixel dupliqué.
+- **Lot** : chaque ligne égale la même coupe calculée seule.
+- **Dégénéré** : coupe constante et masque vide donnent NCC = 0, valeur et gradient finis.
+- **Gradient automatique contre différences finies** (f64), par rapport à `b` : écart relatif **5,2e-7** (critère 1e-3).
+
+**Vérifié par mutation** (5 sur 5 détectées) : moyenne non pondérée ; covariance non pondérée ; sans constante de stabilité ; NCC au
+carré ; variance de `b` non pondérée.
+
+---
+
+*(à compléter à la prochaine étape : étape 3a, coût complet pose + échantillonnage + NCC)*
