@@ -24,15 +24,14 @@ Les poids sont cherchés avec `--model`, puis la variable d'environnement
 
 ## Documentation
 
-La documentation (installation, utilisation, algorithmes et références,
-validation) est dans [`book/`](book/src/). Pour la lire en local :
+Documentation (installation, utilisation, algorithmes et références, validation) :
+<https://rousseau.github.io/medoxide/>. Les sources sont dans [`book/`](book/src/) ;
+pour la lire en local :
 
 ```bash
 cargo install mdbook
 mdbook serve book --open
 ```
-
-Elle n'est pas encore publiée en ligne.
 
 ## Structure
 

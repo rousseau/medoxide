@@ -48,7 +48,7 @@ curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/
 ./target/release/medx fetalbet --input mon_image.nii.gz --output mon_masque.nii.gz
 ```
 
-Voir la documentation de medoxide pour l'installation et les options.
+Documentation de medoxide (installation, options) : <https://rousseau.github.io/medoxide/>.
 
 ## Provenance et modifications
 
