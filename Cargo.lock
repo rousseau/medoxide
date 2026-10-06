@@ -3845,11 +3845,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "medoxide-core"
+version = "0.1.0"
+dependencies = [
+ "ndarray 0.17.2",
+ "nifti",
+]
+
+[[package]]
 name = "medoxide-fetalbet"
 version = "0.1.0"
 dependencies = [
  "burn",
  "burn-store",
+ "medoxide-core",
  "ndarray 0.17.2",
  "nifti",
  "sha2 0.11.0",

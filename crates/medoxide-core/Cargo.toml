@@ -1,0 +1,8 @@
+[package]
+name = "medoxide-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nifti = { workspace = true }
+ndarray = { workspace = true }

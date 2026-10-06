@@ -37,6 +37,7 @@ mdbook serve book --open
 
 ```
 crates/
+  medoxide-core/       briques communes (lecture de volumes NIfTI), sans dépendance vers un module
   medoxide-fetalbet/   bibliothèque : portage de Fetal-BET
   medx/                binaire CLI : une sous-commande par module
 book/                  documentation (mdBook)
@@ -44,8 +45,8 @@ docs/LEARNING.md       journal d'apprentissage Rust/Burn
 ```
 
 Un nouveau module = un nouveau crate dans `crates/`, exposé comme nouvelle
-sous-commande de `medx`. On ajoute un crate `medoxide-core` partagé seulement
-quand un deuxième module en a réellement besoin — pas avant.
+sous-commande de `medx`. `medoxide-core` ne reçoit que ce que deux modules au moins
+utilisent réellement.
 
 ## Référence et licence
 

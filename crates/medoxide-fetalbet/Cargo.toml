@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+medoxide-core = { path = "../medoxide-core" }
 nifti = { workspace = true }
 ndarray = { workspace = true }
 burn = { workspace = true }

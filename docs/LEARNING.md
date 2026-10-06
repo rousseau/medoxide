@@ -373,6 +373,32 @@ lancement : téléchargement, SHA-256 correct, masque identique (Dice 0,999987 s
 fetus_06) ; second lancement : sans réseau. Test réseau `#[ignore]` : une
 empreinte fausse est refusée et ne laisse aucun fichier.
 
+## 2026-10-06 — Extraire un crate commun : `medoxide-core`
+
+- **Quoi** : un crate de plus dans le workspace, et le **sens des dépendances**.
+  `medoxide-fetalbet` dépend de `medoxide-core` (`medoxide-core = { path =
+  "../medoxide-core" }`) ; le core ne dépend d'aucun module. Un futur module (SVR)
+  pourra lire des NIfTI sans tirer Burn, le modèle ni le téléchargement des poids.
+- **Pourquoi ici** : c'est le premier besoin réel d'un second module (lire des NIfTI
+  avec leur affine), le déclencheur prévu pour créer ce crate, pas avant.
+- **Où** : `crates/medoxide-core/src/lib.rs` (`volume_info`, `read_volume`,
+  `VolumeInfo`, `CoreError`) ; `Cargo.toml` racine (membres du workspace).
+
+- **Quoi** : déplacer du code sans changer l'interface visible. `medx` n'appelle que
+  `segment` et `default_model_path`, restés dans `medoxide-fetalbet` : ses utilisateurs
+  ne voient rien. Les quatre tests de lecture NIfTI ont migré avec leur code (mêmes noms,
+  mêmes données) ; la suite complète donne les mêmes 18 tests (15 réussis, 3 ignorés).
+- **Quoi** : envelopper l'erreur d'un autre crate. `MaskError::Core(CoreError)` +
+  `impl From<CoreError> for MaskError` : `?` convertit seule. Le message est repris tel
+  quel (`write!(f, "{e}")`), donc les textes documentés dans le livre n'ont pas changé.
+  L'écriture (`write_mask`) passe par `.map_err(CoreError::from)?` : une erreur de `nifti`
+  devient d'abord une `CoreError`, puis une `MaskError`. Un seul chemin d'erreur NIfTI.
+
+**Vérifié** : mêmes noms et statuts de tests avant et après ; messages d'erreur de
+`medx fetalbet` inchangés (entrée absente, 4D, fichier invalide, dossier de sortie
+absent) ; masque de fetus_06 inchangé (Dice 0,999987, 3 voxels de différence).
+`write_mask` reste dans `medoxide-fetalbet` (le SVR n'en a pas encore besoin).
+
 ---
 
 *(à compléter à la prochaine étape : (à définir : optimisation du temps d'inférence, autres modules))*
