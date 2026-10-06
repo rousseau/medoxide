@@ -5,6 +5,7 @@
 //! même `Device`.
 
 use burn::prelude::*;
+use nalgebra::Vector3;
 
 /// Résultat de [`trilinear_sample`] : une valeur et un indicateur « dans la grille » par point.
 #[derive(Debug, Clone)]
@@ -74,6 +75,81 @@ pub fn trilinear_sample(volume: &Tensor<1>, dims: [usize; 3], coords: Tensor<2>)
         valeurs = valeurs + poids * volume.clone().select(0, indice);
     }
     TrilinearSample { values: valeurs, inside }
+}
+
+/// Au-dessous de ce `θ²` (rad²), [`rotation_matrix`] utilise la série de Taylor : en `f32`, `1 − cos θ` y perd presque toute
+/// sa précision (20 % d'erreur relative à θ = 1e-3), alors que la série à 3 termes y est exacte à ≈ 1e-10.
+const ROTATION_SERIES_THETA2: f64 = 1e-2;
+
+/// Matrice de rotation 3×3 d'un **vecteur de rotation** `omega` (axe = direction, angle = norme, en radians), par la
+/// formule de Rodrigues : `R = I + a K + b K²`, `K` matrice antisymétrique de `omega`, `a = sin θ / θ`, `b = (1 − cos θ) / θ²`.
+///
+/// Les deux fractions valent `0/0` en `omega = 0`, point de départ de tout recalage (pose = delta nul) : elles sont
+/// remplacées par leur série de Taylor pour les petits angles. Dans une opération `mask_where`, la branche non retenue
+/// est quand même dérivée par l'autodiff, et un `NaN` y contaminerait le gradient : la branche exacte reçoit donc un
+/// argument « sûr » (1) là où la série est retenue.
+///
+/// `omega` : forme `[3]`. Rend une matrice de forme `[3, 3]` : `R · x` s'écrit `x.matmul(R.transpose())` pour des lignes `x`.
+pub fn rotation_matrix(omega: Tensor<1>) -> Tensor<2> {
+    let device = omega.device();
+    // K = somme des omega_i · E_i, avec les trois générateurs E_i constants (forme [3, 3, 3]).
+    let generateurs = Tensor::<3>::from_floats(
+        TensorData::new(
+            vec![
+                0.0_f32, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, // E_x
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, // E_y
+                0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, // E_z
+            ],
+            [3, 3, 3],
+        ),
+        &device,
+    );
+    let k: Tensor<2> = (generateurs * omega.clone().reshape([3, 1, 1])).sum_dim(0).reshape([3, 3]);
+
+    let th2 = (omega.clone() * omega).sum(); // forme [1]
+    let petit = th2.clone().lower_elem(ROTATION_SERIES_THETA2);
+    let th2_sur = th2.clone().mask_where(petit.clone(), Tensor::<1>::ones([1], &device)); // argument sûr de la branche exacte
+    let th = th2_sur.clone().sqrt();
+    let a_exacte = th.clone().sin() / th.clone();
+    let b_exacte = (th.cos().neg() + 1.0) / th2_sur;
+    let th4 = th2.clone() * th2.clone();
+    let a_serie = th2.clone().neg() / 6.0 + th4.clone() / 120.0 + 1.0;
+    let b_serie = th2.neg() / 24.0 + th4 / 720.0 + 0.5;
+    let a = a_exacte.mask_where(petit.clone(), a_serie).reshape([1, 1]);
+    let b = b_exacte.mask_where(petit, b_serie).reshape([1, 1]);
+
+    let identite = Tensor::<2>::from_floats(TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [3, 3]), &device);
+    identite + a * k.clone() + b * k.clone().matmul(k)
+}
+
+/// Applique la **pose** `params` à des points du monde : `x' = c + R(ω) (x − c) + t`, rotation autour du pivot `c`.
+///
+/// - `points` : forme `[P, 3]`, mm ; `pivot` : forme `[3]`, mm (par exemple le pivot P3 de la coupe).
+/// - `params` : forme `[6]` = `(φx, φy, φz, tx, ty, tz)`. `t` est en mm ; la rotation est exprimée en **mm équivalents** :
+///   `ω = φ / rotation_scale_mm` (voir [`rotation_scale_mm`]), pour que les 6 paramètres aient le même ordre de grandeur de
+///   sensibilité (un pas de 1 déplace un point typique d'environ 1 mm, quel que soit le paramètre).
+///
+/// Pose nulle = identité. Le mouvement est un **delta** autour de la pose d'en-tête de la coupe, composé à chaque pas.
+pub fn apply_pose(points: Tensor<2>, pivot: Tensor<1>, params: Tensor<1>, rotation_scale_mm: f64) -> Tensor<2> {
+    let phi = params.clone().narrow(0, 0, 3);
+    let t = params.narrow(0, 3, 3).reshape([1, 3]);
+    let r = rotation_matrix(phi / rotation_scale_mm);
+    let pivot = pivot.reshape([1, 3]);
+    (points - pivot.clone()).matmul(r.transpose()) + pivot + t
+}
+
+/// Échelle de la rotation, en mm : `√(2/3) · r_rms`, où `r_rms` est la distance quadratique moyenne des `points` au `pivot`.
+///
+/// Pour un axe unité `e`, un point à `d` du pivot se déplace de `‖e × d‖` ; en moyenne sur les trois axes, le carré vaut
+/// `(2/3)‖d‖²`. Avec cette échelle, une unité de rotation `φ` déplace donc les points de **1 mm en moyenne quadratique**,
+/// comme une unité de translation. `None` si la liste est vide ou si tous les points sont au pivot.
+pub fn rotation_scale_mm(points: &[Vector3<f64>], pivot: &Vector3<f64>) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let moyenne = points.iter().map(|p| (p - pivot).norm_squared()).sum::<f64>() / points.len() as f64;
+    let echelle = (2.0 / 3.0 * moyenne).sqrt();
+    (echelle > 0.0).then_some(echelle)
 }
 
 #[cfg(test)]
@@ -191,5 +267,157 @@ mod tests {
             assert!((f64::from(*v) - attendu).abs() < 1e-4, "{c:?} : {v} contre {attendu}");
         }
         assert!(vers_vec(sortie.inside).iter().all(|&m| m == 1.0));
+    }
+    // ------------------------------------------------------------------ sous-étape 2 : pose
+
+    use nalgebra::{Matrix3, Rotation3};
+
+    fn tenseur_1d(v: &[f64], device: &Device) -> Tensor<1> {
+        Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), device)
+    }
+
+    fn matrice_depuis(t: Tensor<2>) -> Matrix3<f64> {
+        let v = t.into_data().try_to_vec::<f32>().unwrap();
+        Matrix3::from_row_slice(&v.iter().map(|&x| f64::from(x)).collect::<Vec<_>>())
+    }
+
+    /// Critère 1 : Rodrigues contre nalgebra (f64) ; orthonormée de déterminant +1.
+    #[test]
+    fn rodrigues_matches_nalgebra_and_is_a_rotation() {
+        let mut alea = Alea(0xABCD_EF01_2345_6789);
+        let mut vecteurs: Vec<Vector3<f64>> = vec![
+            Vector3::zeros(),
+            Vector3::new(1e-9, 0.0, 0.0),
+            Vector3::new(0.0, 0.05, 0.0),
+            Vector3::new(0.0, 0.0999, 0.0), // juste sous le seuil de la série
+            Vector3::new(0.0, 0.1001, 0.0), // juste au-dessus
+            Vector3::new(std::f64::consts::PI - 1e-3, 0.0, 0.0),
+        ];
+        while vecteurs.len() < 300 {
+            let axe = Vector3::new(alea.suivant() - 0.5, alea.suivant() - 0.5, alea.suivant() - 0.5).normalize();
+            vecteurs.push(axe * (alea.suivant() * 3.1));
+        }
+        let (mut pire, mut pire_ortho) = (0.0_f64, 0.0_f64);
+        for w in &vecteurs {
+            let r = matrice_depuis(rotation_matrix(tenseur_1d(&[w.x, w.y, w.z], &device())));
+            let attendue = Rotation3::from_scaled_axis(*w).into_inner();
+            pire = pire.max((r - attendue).abs().max());
+            pire_ortho = pire_ortho.max((r.transpose() * r - Matrix3::identity()).abs().max()).max((r.determinant() - 1.0).abs());
+        }
+        println!("{} rotations : écart max à nalgebra {pire:.2e} ; orthonormalité/déterminant {pire_ortho:.2e}", vecteurs.len());
+        assert!(pire < 1e-5, "{pire:.2e}");
+        assert!(pire_ortho < 1e-5, "{pire_ortho:.2e}");
+    }
+
+    fn nuage_isotrope(n: usize, alea: &mut Alea) -> Vec<Vector3<f64>> {
+        // gaussienne 3D par Box-Muller : isotrope, de rayon quadratique moyen ≈ 30 mm
+        let mut gauss = || {
+            let (u1, u2) = (alea.suivant().max(1e-12), alea.suivant());
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        };
+        (0..n).map(|_| Vector3::new(gauss(), gauss(), gauss()) * 17.3 + Vector3::new(10.0, -20.0, 5.0)).collect()
+    }
+
+    fn tenseur_points(points: &[Vector3<f64>], device: &Device) -> Tensor<2> {
+        let v: Vec<f32> = points.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+        Tensor::<2>::from_floats(TensorData::new(v, [points.len(), 3]), device)
+    }
+
+    fn deplacement_rms(avant: &[Vector3<f64>], apres: Tensor<2>) -> f64 {
+        let v = apres.into_data().try_to_vec::<f32>().unwrap();
+        let somme: f64 = avant
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (Vector3::new(f64::from(v[3 * i]), f64::from(v[3 * i + 1]), f64::from(v[3 * i + 2])) - p).norm_squared())
+            .sum();
+        (somme / avant.len() as f64).sqrt()
+    }
+
+    /// Critères 2 et 3 : pivot fixe, translation, et équivalence en mm de la rotation.
+    #[test]
+    fn pose_keeps_the_pivot_and_has_unit_mm_sensitivity() {
+        let device = device();
+        let mut alea = Alea(99);
+        let points = nuage_isotrope(4000, &mut alea);
+        let pivot = points.iter().sum::<Vector3<f64>>() / points.len() as f64;
+        let echelle = rotation_scale_mm(&points, &pivot).unwrap();
+        let (tp, tc) = (tenseur_points(&points, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device));
+        // pivot : invariant sans translation, déplacé de t avec
+        let seul = tenseur_points(&[pivot], &device);
+        let tourne = apply_pose(seul.clone(), tc.clone(), tenseur_1d(&[3.0, -2.0, 5.0, 0.0, 0.0, 0.0], &device), echelle);
+        assert!(deplacement_rms(&[pivot], tourne) < 1e-4, "le pivot doit rester fixe");
+        let decale = apply_pose(seul, tc.clone(), tenseur_1d(&[3.0, -2.0, 5.0, 1.0, 2.0, -3.0], &device), echelle);
+        assert!((deplacement_rms(&[pivot], decale) - (1.0f64 + 4.0 + 9.0).sqrt()).abs() < 1e-4);
+        // sensibilité : 1 unité de chaque paramètre déplace de ≈ 1 mm (rms) ; rotation moyennée sur les 3 axes
+        let mut rotations = Vec::new();
+        for a in 0..6 {
+            let mut p = [0.0; 6];
+            p[a] = 1.0;
+            let d = deplacement_rms(&points, apply_pose(tp.clone(), tc.clone(), tenseur_1d(&p, &device), echelle));
+            println!("paramètre {a} = 1 : déplacement quadratique moyen {d:.4} mm");
+            if a >= 3 {
+                assert!((d - 1.0).abs() < 1e-4, "translation : {d}");
+            } else {
+                rotations.push(d * d);
+            }
+        }
+        let moyenne = (rotations.iter().sum::<f64>() / 3.0).sqrt();
+        println!("rotation, moyenne sur les 3 axes : {moyenne:.4} mm (échelle {echelle:.2} mm)");
+        assert!((moyenne - 1.0).abs() < 0.02, "{moyenne}");
+    }
+
+    #[test]
+    fn rotation_scale_handles_degenerate_clouds() {
+        assert!(rotation_scale_mm(&[], &Vector3::zeros()).is_none());
+        let p = Vector3::new(1.0, 2.0, 3.0);
+        assert!(rotation_scale_mm(&[p, p], &p).is_none(), "tous les points au pivot");
+        // deux points à 3 mm du pivot : r_rms = 3, échelle = 3 √(2/3)
+        let e = rotation_scale_mm(&[Vector3::new(3.0, 0.0, 0.0), Vector3::new(0.0, -3.0, 0.0)], &Vector3::zeros()).unwrap();
+        assert!((e - 3.0 * (2.0f64 / 3.0).sqrt()).abs() < 1e-12);
+    }
+
+    /// Coût de test : somme des carrés des écarts entre la pose appliquée à `x` et les cibles `y`, en f64 pour la référence.
+    fn cout_f64(p: &[f64; 6], x: &[Vector3<f64>], y: &[Vector3<f64>], pivot: &Vector3<f64>, echelle: f64) -> f64 {
+        let r = Rotation3::from_scaled_axis(Vector3::new(p[0], p[1], p[2]) / echelle);
+        let t = Vector3::new(p[3], p[4], p[5]);
+        x.iter().zip(y).map(|(x, y)| (pivot + r * (x - pivot) + t - y).norm_squared()).sum()
+    }
+
+    /// Critère 4 : le gradient automatique de Burn (f32) égale les différences finies centrées (f64), en ω = 0 comme ailleurs.
+    #[test]
+    fn autodiff_gradient_matches_finite_differences_including_at_zero() {
+        let device = device().autodiff();
+        let mut alea = Alea(2024);
+        let x = nuage_isotrope(200, &mut alea);
+        let pivot = x.iter().sum::<Vector3<f64>>() / x.len() as f64;
+        let echelle = rotation_scale_mm(&x, &pivot).unwrap();
+        // cibles : x déplacé par une pose connue (3 mm, 2°) puis bruité
+        let vraie = Rotation3::from_scaled_axis(Vector3::new(0.02, -0.03, 0.01));
+        let y: Vec<Vector3<f64>> = x
+            .iter()
+            .map(|p| pivot + vraie * (p - pivot) + Vector3::new(1.0, -2.0, 1.5) + Vector3::new(alea.suivant() - 0.5, alea.suivant() - 0.5, alea.suivant() - 0.5) * 0.4)
+            .collect();
+        let (tx, ty, tc) = (tenseur_points(&x, &device), tenseur_points(&y, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device));
+        for p0 in [[0.0; 6], [1.5, -2.0, 0.7, 0.4, -0.3, 0.9], [20.0, -10.0, 15.0, 0.0, 0.0, 0.0]] {
+            let params = tenseur_1d(&p0, &device).require_grad();
+            let ecart = apply_pose(tx.clone(), tc.clone(), params.clone(), echelle) - ty.clone();
+            let perte = (ecart.clone() * ecart).sum();
+            let grads = perte.backward();
+            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+            assert!(g_auto.iter().all(|v| v.is_finite()), "gradient non fini en {p0:?} : {g_auto:?}");
+            let h = 1e-4;
+            let g_diff: Vec<f64> = (0..6)
+                .map(|a| {
+                    let (mut plus, mut moins) = (p0, p0);
+                    plus[a] += h;
+                    moins[a] -= h;
+                    (cout_f64(&plus, &x, &y, &pivot, echelle) - cout_f64(&moins, &x, &y, &pivot, echelle)) / (2.0 * h)
+                })
+                .collect();
+            let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let erreur = g_auto.iter().zip(&g_diff).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+            println!("p0 = {p0:?} : |g| = {norme:.1}, écart relatif autodiff / différences finies {erreur:.2e}");
+            assert!(erreur < 1e-3, "{erreur:.2e} en {p0:?}");
+        }
     }
 }

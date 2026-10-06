@@ -13,5 +13,5 @@ burn = { workspace = true }
 [dev-dependencies]
 # Pour écrire des fichiers NIfTI synthétiques dans les tests (cas d'erreur).
 nifti = { workspace = true }
-# Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU.
-burn = { workspace = true, features = ["flex"] }
+# Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU ; autodiff pour vérifier les gradients.
+burn = { workspace = true, features = ["flex", "autodiff"] }

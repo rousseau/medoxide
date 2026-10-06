@@ -762,4 +762,36 @@ d'un seul voxel) ; masque sans borne supérieure.
 
 ---
 
-*(à compléter à la prochaine étape : étape 3a, pose de la coupe et coût NCC en tenseurs)*
+## 2026-10-07 — La pose d'une coupe et le premier gradient automatique (étape 3a, sous-étape 2 du SVR)
+
+- **Quoi** : un **vecteur de rotation** `ω` (axe = direction, angle `θ = ‖ω‖`) et sa matrice par la **formule de Rodrigues** :
+  `R = I + (sin θ / θ) K + ((1 − cos θ) / θ²) K²`, `K` étant la matrice antisymétrique de `ω` (construite comme `Σ ωᵢ Eᵢ`
+  avec trois générateurs constants). Pas d'angles d'Euler : pas d'ordre d'axes à choisir, pas de blocage de cardan.
+- **Quoi** : un **piège de l'autodiff**. En `ω = 0`, point de départ de tout recalage (delta nul), les deux fractions valent `0/0`.
+  Avec `mask_where` (le `if` des tenseurs), la branche non retenue est quand même dérivée : un `NaN` y contamine le gradient. Deux
+  parades : la **série de Taylor** pour `θ² < 1e-2` (en `f32`, `1 − cos θ` perd presque toute sa précision aux petits angles),
+  et un **argument « sûr »** (1) pour la branche exacte là où la série est retenue. **Prouvé** : sans l'argument sûr, les trois
+  gradients de rotation valent `NaN` en pose nulle, et les trois de translation restent corrects.
+- **Quoi** : la **pose en delta** `x' = c + R(ω)(x − c) + t` autour du pivot `c`. Paramètres `(φ, t)` : `ω = φ / s`. **Échelle
+  `s = √(2/3) · r_rms`** (et non `r_rms` comme je l'avais écrit à l'étude 05) : pour un axe unité `e`, un point à `d` du pivot se
+  déplace de `‖e × d‖`, de carré moyen `(2/3)‖d‖²` sur les trois axes ; une unité de `φ` déplace donc les points de 1 mm en moyenne
+  quadratique, comme une unité de `t`.
+- **Quoi** : l'**autodiff de Burn**, première utilisation : `Device::flex().autodiff()`, `require_grad()` sur le vecteur des 6
+  paramètres, `backward()` sur la perte, `grad(&gradients)` pour lire. Le `Tensor<D>` sans paramètre de backend de cette version.
+- **Où** : `rotation_matrix`, `apply_pose`, `rotation_scale_mm` dans `crates/medoxide-svr/src/diff.rs`.
+
+**Critères** (fixés avant le code) et résultats :
+- **Rodrigues contre `Rotation3::from_scaled_axis` de nalgebra** (f64), 300 vecteurs dont 0, 1e-9, de part et d'autre du seuil de la
+  série (0,0999 et 0,1001 rad) et presque π : écart max **2,6e-7** ; orthonormalité et déterminant +1 à **5,7e-7** (critère 1e-5).
+- **Pivot** invariant sans translation (écart < 1e-4 mm), déplacé de `t` sinon.
+- **Équivalence mm** sur un nuage isotrope de 4 000 points : translation exactement 1,0000 mm par unité ; rotation **0,9999 mm** en
+  moyenne sur les trois axes (0,9944 / 1,0061 / 0,9992 axe par axe, fluctuation d'échantillonnage), critère 2 %.
+- **Gradient automatique contre différences finies centrées** (f64), en `p = 0`, en un point quelconque et pour une grande
+  rotation : écart relatif **1,3e-7, 2,4e-7 et 1,8e-7** (critère 1e-3) ; fini en `p = 0`.
+
+**Vérifié par mutation** (5 sur 5 détectées) : branche exacte sans argument sûr (`NaN`) ; rotation inverse (`R` au lieu de `Rᵀ`) ;
+échelle inversée ; échelle `r_rms` au lieu de `√(2/3) r_rms` ; translation oubliée.
+
+---
+
+*(à compléter à la prochaine étape : étape 3a, coût NCC en tenseurs)*
