@@ -22,13 +22,16 @@ mod model;
 /// l'implémentation derrière.
 #[derive(Debug)]
 pub enum MaskError {
-    /// Échec de lecture d'un fichier NIfTI (fichier absent, format invalide...).
-    /// La variante *contient* l'erreur d'origine de la crate `nifti`.
+    /// Échec de lecture ou d'écriture d'un fichier NIfTI (fichier absent, format
+    /// invalide, écriture impossible...). La variante *contient* l'erreur d'origine
+    /// de la crate `nifti`.
     Nifti(nifti::NiftiError),
     /// Le fichier n'est pas un volume à 3 axes ; contient ses dimensions.
     NotVolume3D(Vec<usize>),
     /// Le fichier de poids du modèle (`.bpk`) n'existe pas.
     ModelNotFound(PathBuf),
+    /// Le dossier où écrire le masque n'existe pas ; contient ce dossier.
+    OutputDirNotFound(PathBuf),
 }
 
 /// Permet à l'opérateur `?` de convertir automatiquement une erreur de la
@@ -43,10 +46,13 @@ impl From<nifti::NiftiError> for MaskError {
 impl std::fmt::Display for MaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MaskError::Nifti(e) => write!(f, "lecture NIfTI : {e}"),
+            MaskError::Nifti(e) => write!(f, "NIfTI : {e}"),
             MaskError::NotVolume3D(dim) => write!(f, "volume 3D attendu, dimensions : {dim:?}"),
             MaskError::ModelNotFound(chemin) => {
                 write!(f, "poids du modèle introuvables : {}", chemin.display())
+            }
+            MaskError::OutputDirNotFound(dossier) => {
+                write!(f, "dossier de sortie introuvable : {}", dossier.display())
             }
         }
     }
@@ -369,12 +375,20 @@ fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
 /// 5. écriture du masque (`uint8`, même affine que l'entrée) dans `output_path`.
 ///
 /// # Erreurs
-/// `MaskError::ModelNotFound` si `model_path` n'existe pas ; `MaskError::Nifti`
-/// ou `MaskError::NotVolume3D` si l'entrée est invalide. Un fichier de poids
+/// `MaskError::ModelNotFound` si `model_path` n'existe pas ;
+/// `MaskError::OutputDirNotFound` si le dossier de `output_path` n'existe pas
+/// (vérifié avant tout calcul) ; `MaskError::Nifti` ou `MaskError::NotVolume3D`
+/// si l'entrée est invalide. Un fichier de poids
 /// présent mais invalide fait paniquer le chargement du modèle (code généré).
 pub fn segment(input_path: &Path, output_path: &Path, model_path: &Path) -> Result<(), MaskError> {
     if !model_path.exists() {
         return Err(MaskError::ModelNotFound(model_path.to_path_buf()));
+    }
+    // `parent()` vaut `Some("")` pour un nom de fichier seul : le dossier courant.
+    if let Some(dossier) = output_path.parent() {
+        if !dossier.as_os_str().is_empty() && !dossier.is_dir() {
+            return Err(MaskError::OutputDirNotFound(dossier.to_path_buf()));
+        }
     }
     let info = volume_info(input_path)?;
     let volume = read_volume(input_path)?;
@@ -779,6 +793,19 @@ mod tests {
             Path::new("n_existe_pas.bpk"),
         );
         assert!(matches!(r, Err(MaskError::ModelNotFound(_))));
+    }
+
+    /// Un dossier de sortie absent est détecté avant tout calcul : l'entrée
+    /// n'existe pas non plus ici, et pourtant c'est bien ce dossier qui est signalé.
+    #[test]
+    fn segment_fails_early_when_output_dir_is_missing() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        let r = segment(
+            Path::new("n_existe_pas.nii.gz"),
+            Path::new("/dossier_inexistant_medoxide/masque.nii.gz"),
+            Path::new(&format!("{racine}/models/attunet.bpk")),
+        );
+        assert!(matches!(r, Err(MaskError::OutputDirNotFound(_))), "{r:?}");
     }
 
     /// Étape 8 : `segment` de bout en bout (fichier NIfTI → fichier NIfTI) contre
