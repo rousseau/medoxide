@@ -10,10 +10,12 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 ## Démarrage rapide
 
 Prérequis : [Rust](https://rustup.rs), un GPU compatible `wgpu` (testé sur Mac
-Apple Silicon), et les poids du modèle `attunet.bpk` (121 Mo, hors de Git).
+Apple Silicon), et les poids du modèle `attunet.bpk` (121 Mo, hors de Git, sur
+[Hugging Face](https://huggingface.co/rousseau/medoxide-fetalbet)).
 
 ```bash
 cargo build --release
+mkdir -p models && curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
 ./target/release/medx fetalbet --input /chemin/vers/mon_image.nii.gz --output /chemin/vers/mon_masque.nii.gz
 ```
 

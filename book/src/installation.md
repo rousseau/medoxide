@@ -37,13 +37,20 @@ dans cet ordre :
 3. le fichier `models/attunet.bpk`, **relatif au dossier depuis lequel vous
    lancez la commande**.
 
-> **À compléter.** L'emplacement public de téléchargement des poids n'est pas
-> encore défini. En attendant, il faut les produire soi-même (section suivante)
-> ou les obtenir auprès des mainteneurs.
+Ils sont téléchargeables sur Hugging Face :
+[rousseau/medoxide-fetalbet](https://huggingface.co/rousseau/medoxide-fetalbet).
 
-Ces poids sont ceux de Fetal-BET, convertis au format `burnpack` de Burn. Ils
-restent soumis à la licence CC BY 4.0 de Fetal-BET : voir
-[Algorithmes et références](algorithmes.md) pour la référence à citer.
+```bash
+mkdir -p models
+curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
+```
+
+Le SHA-256 attendu est `a70bcbe8da5f791b751c293a851505eb1aa9aa44c50def0afc41fd34bd60c3c2`
+(`shasum -a 256 models/attunet.bpk`).
+
+Ces poids sont ceux de Fetal-BET, convertis au format `burnpack` de Burn, sous la
+même licence CC BY 4.0 : voir [Algorithmes et références](algorithmes.md) pour la
+référence à citer. Vous pouvez aussi les régénérer vous-même :
 
 ### Les régénérer (avancé)
 

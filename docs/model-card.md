@@ -16,8 +16,21 @@ Poids de **Fetal-BET** (Attention U-Net 2D pour l'extraction du cerveau en IRM
 fœtale), convertis au format `burnpack` de [Burn](https://burn.dev) pour la
 commande `medx fetalbet` de [medoxide](https://github.com/rousseau/medoxide).
 
-Il s'agit d'un **travail dérivé** : le modèle et ses poids sont ceux des auteurs de
-Fetal-BET. Rien n'a été réentraîné.
+## Modèle d'origine
+
+Ce modèle est **Fetal-BET**, conçu et entraîné par Razieh Faghihpirayesh, Davood
+Karimi, Deniz Erdoğmuş et Ali Gholipour. Ce dépôt n'en est qu'une **conversion de
+format** : rien n'a été réentraîné.
+
+- **Article** : Faghihpirayesh R., Karimi D., Erdoğmuş D., Gholipour A.,
+  *Fetal-BET: Brain Extraction Tool for Fetal MRI*, IEEE Open Journal of
+  Engineering in Medicine and Biology, 2024.
+- **Dépôt d'origine** : <https://github.com/IntelligentImaging/fetal-brain-extraction>
+- **Licence d'origine** : [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  Ces poids sont redistribués sous la **même licence**.
+
+La conversion n'a pas été réalisée par les auteurs d'origine et n'engage pas leur
+responsabilité.
 
 ## Fichier
 
@@ -29,6 +42,9 @@ Fetal-BET. Rien n'a été réentraîné.
 
 ```bash
 hf download rousseau/medoxide-fetalbet attunet.bpk --local-dir models
+# ou, sans outil particulier :
+curl -L -o models/attunet.bpk https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/attunet.bpk
+
 ./target/release/medx fetalbet --input mon_image.nii.gz --output mon_masque.nii.gz
 ```
 
@@ -49,8 +65,9 @@ Voir la documentation de medoxide pour l'installation et les options.
 ## Licence et citation
 
 Comme Fetal-BET, ces poids sont sous licence
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Si vous les utilisez,
-merci de citer l'article de Fetal-BET :
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) : vous pouvez les
+réutiliser en citant les auteurs d'origine, en indiquant la licence et les
+modifications ci-dessus. Merci de citer l'article de Fetal-BET :
 
 ```bibtex
 @article{faghihpirayesh2024fetal,
@@ -61,8 +78,6 @@ merci de citer l'article de Fetal-BET :
   publisher={IEEE}
 }
 ```
-
-Dépôt d'origine : <https://github.com/IntelligentImaging/fetal-brain-extraction>.
 
 ## Limites
 
