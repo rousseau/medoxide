@@ -34,7 +34,7 @@ sur les 8 volumes de test, il diffère du masque de référence de 0 à 14 voxel
 
 ```
 crates/
-  medoxide-mask/   bibliothèque : logique de segmentation (masque cérébral fœtal)
+  medoxide-fetalbet/   bibliothèque : logique de segmentation (masque cérébral fœtal)
   medx/            binaire CLI : point d'entrée unique, une sous-commande par module
 ```
 

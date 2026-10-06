@@ -1,4 +1,4 @@
-//! `medoxide-mask` : extraction du masque cérébral fœtal.
+//! `medoxide-fetalbet` : extraction du masque cérébral fœtal.
 //!
 //! Portage du modèle de segmentation Fetal-BET (PyTorch) vers Burn,
 //! via un export ONNX intermédiaire. Voir `docs/LEARNING.md` à la racine
@@ -685,7 +685,7 @@ mod tests {
 
     /// Étape 6b, version complète : les 8 volumes (~27 min, car 176 passages par
     /// volume pour les tailles 260 et 300). Lancer avec :
-    /// `cargo test -p medoxide-mask -- --ignored --nocapture tiled_inference`
+    /// `cargo test -p medoxide-fetalbet -- --ignored --nocapture tiled_inference`
     #[test]
     #[ignore = "27 min : voir la doc du test"]
     fn tiled_inference_matches_monai_all() {
@@ -811,7 +811,7 @@ mod tests {
     }
 
     /// Étape 8, version complète : les 8 volumes (long). Lancer avec :
-    /// `cargo test --release -p medoxide-mask -- --ignored --nocapture segment_end_to_end_all`
+    /// `cargo test --release -p medoxide-fetalbet -- --ignored --nocapture segment_end_to_end_all`
     #[test]
     #[ignore = "long : voir la doc du test"]
     fn segment_end_to_end_all() {

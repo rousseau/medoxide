@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/medoxide-mask", "crates/medx"]
+members = ["crates/medoxide-fetalbet", "crates/medx"]
 
 # Dépendances partagées, versionnées une seule fois ici et héritées
 # par les crates membres via `workspace = true` dans leur propre Cargo.toml.

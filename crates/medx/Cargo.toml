@@ -9,4 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-medoxide-mask = { path = "../medoxide-mask" }
+medoxide-fetalbet = { path = "../medoxide-fetalbet" }

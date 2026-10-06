@@ -38,7 +38,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Mask { input, output, model } => {
-            match medoxide_mask::segment(&input, &output, &model) {
+            match medoxide_fetalbet::segment(&input, &output, &model) {
                 Ok(()) => {
                     println!("Masque écrit dans {output:?}");
                     ExitCode::SUCCESS

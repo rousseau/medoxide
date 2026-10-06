@@ -1,5 +1,5 @@
 [package]
-name = "medoxide-mask"
+name = "medoxide-fetalbet"
 version.workspace = true
 edition.workspace = true
 

@@ -13,7 +13,7 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
 ## 2026-10-01 — Démarrage du workspace
 
 - **Quoi** : un *workspace* Cargo regroupe plusieurs crates (ici
-  `medoxide-mask` et `medx`) qui partagent un seul `Cargo.lock`, donc des
+  `medoxide-fetalbet` et `medx`) qui partagent un seul `Cargo.lock`, donc des
   versions de dépendances cohérentes entre eux.
 - **Pourquoi ici** : on anticipe que chaque module (masquage, recalage,
   reconstruction...) sera un crate séparé, pour pouvoir les faire évoluer
@@ -21,13 +21,13 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
   en façade.
 - **Où** : `Cargo.toml` (racine).
 
-- **Quoi** : séparer une *bibliothèque* (`medoxide-mask`, qui contient la
+- **Quoi** : séparer une *bibliothèque* (`medoxide-fetalbet`, qui contient la
   logique) d'un *binaire* (`medx`, qui ne fait que l'interface en ligne
   de commande et appelle la bibliothèque).
 - **Pourquoi ici** : la logique de segmentation doit pouvoir être testée
   et réutilisée (par d'autres sous-commandes, ou plus tard par un
   éventuel binding) sans dépendre du CLI.
-- **Où** : `crates/medoxide-mask/src/lib.rs` vs `crates/medx/src/main.rs`.
+- **Où** : `crates/medoxide-fetalbet/src/lib.rs` vs `crates/medx/src/main.rs`.
 
 ---
 
@@ -38,7 +38,7 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
   membre l'hérite avec `nifti = { workspace = true }`.
 - **Pourquoi ici** : lire du NIfTI (y compris `.nii.gz`) est un problème déjà
   résolu ; le réécrire n'apporterait rien au projet.
-- **Où** : `Cargo.toml` (racine), `crates/medoxide-mask/Cargo.toml`.
+- **Où** : `Cargo.toml` (racine), `crates/medoxide-fetalbet/Cargo.toml`.
 
 - **Quoi** : `Result<T, E>` et l'opérateur `?`. `?` après un appel falsifiable
   veut dire « si erreur, quitte la fonction en la renvoyant ; sinon, donne-moi
@@ -46,14 +46,14 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
   type d'erreur de *notre* fonction.
 - **Pourquoi ici** : ouvrir un fichier peut échouer (absent, invalide) ; on ne
   veut pas de `panic!` mais une erreur que l'appelant peut traiter.
-- **Où** : `volume_info` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `volume_info` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : une variante d'enum qui *contient* une valeur
   (`MaskError::Nifti(nifti::NiftiError)`) et `impl From<NiftiError> for
   MaskError`, qui dit à Rust comment passer d'un type d'erreur à l'autre.
 - **Pourquoi ici** : pour que `?` fonctionne directement sur les appels de la
   crate `nifti` tout en gardant un seul type d'erreur public.
-- **Où** : `MaskError` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `MaskError` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 **Critère 3a atteint** : dimensions et espacement identiques à nibabel sur les
 8 volumes (test `volume_info_matches_nibabel`).
@@ -67,7 +67,7 @@ Format suggéré par entrée : **quoi** (le concept) · **pourquoi ici**
   sur les axes du scanner, orientations LPS, LIP, PIR...). Le prétraitement
   et le ré-échantillonnage inverse (étapes 5 à 7) en dépendront.
 - **Où** : champ `affine` de `VolumeInfo`, `volume_info` dans
-  `crates/medoxide-mask/src/lib.rs`.
+  `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : `Option<T>`, soit `Some(valeur)`, soit `None`. Rust n'a pas de
   `null` : une valeur possiblement absente est typée comme telle et le
@@ -90,7 +90,7 @@ volumes d'orientations différentes ; les 8 volumes ont un `sform`.
   l'architecture. On lance l'outil à la main et on commite le code généré
   (20 Ko, lisible) ; ce n'est pas une dépendance du projet. Les poids (121 Mo)
   restent hors de Git.
-- **Où** : `crates/medoxide-mask/src/model.rs`.
+- **Où** : `crates/medoxide-fetalbet/src/model.rs`.
 
 - **Quoi** : un *tenseur* Burn (`Tensor<4>` : le `4` est le rang, c'est-à-dire
   le nombre d'axes : lot, canaux, hauteur, largeur) et un *`Device`* (la
@@ -111,7 +111,7 @@ Burn n'a pas de version stable (`0.22.0-pre.4`) : on l'épingle exactement.
   `f32::from_le_bytes` convertit chaque paquet (little-endian) en `f32`.
 - **Pourquoi ici** : les références Python (entrée et logits d'une tuile) sont
   des `f32` bruts : pas besoin d'une crate pour lire du `.npy`.
-- **Où** : `lire_f32` dans les tests de `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `lire_f32` dans les tests de `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : fabriquer un `Tensor` depuis un `Vec<f32>` :
   `TensorData::new(vec, [1, 1, 256, 256])` joint les valeurs à une forme, puis
@@ -141,7 +141,7 @@ z-score), et le rééchantillonnage à 1 mm est indispensable : sur une coupe à
   erreur en une autre).
 - **Pourquoi ici** : les étapes suivantes (normalisation, rééchantillonnage,
   tuiles) travaillent sur le volume en mémoire.
-- **Où** : `read_volume` dans `crates/medoxide-mask/src/lib.rs` ; dépendance
+- **Où** : `read_volume` dans `crates/medoxide-fetalbet/src/lib.rs` ; dépendance
   `ndarray = "0.17"` (même version que `nifti`, un seul `ndarray` compilé).
 
 - **Quoi** : l'*ordre mémoire* d'un tableau. NIfTI stocke colonne par colonne
@@ -162,7 +162,7 @@ l'échelle, géré correctement par `nifti`).
   13 Mo, et le compilateur interdit toute autre lecture ou écriture simultanée.
 - **Pourquoi ici** : le prétraitement enchaîne plusieurs étapes sur un gros
   tableau ; on évite de le recopier à chaque étape.
-- **Où** : `normalize_slices` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `normalize_slices` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : parcourir des coupes avec `axis_iter_mut(Axis(2))` (une vue 2D
   mutable par coupe, sans copie), calculer avec des itérateurs (`filter`,
@@ -188,7 +188,7 @@ MONAI sur les 8 volumes, sans rééchantillonnage (seuil visé : 1e-4).
   à 1,17 mm non rééchantillonnée, il ne détecte rien). Fetal-BET rééchantillonne
   à 1 mm dans le plan avant l'inférence.
 - **Où** : `resample_axis`, `resample_in_plane` dans
-  `crates/medoxide-mask/src/lib.rs`.
+  `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : `index_axis(Axis(k), i)` (la tranche `i` selon l'axe `k`, vue sans
   copie), `scaled_add(alpha, &autre)` (`self += alpha × autre` sur toute une
@@ -223,7 +223,7 @@ les centres du premier et du dernier voxel (et non `N × zoom`).
 - **Pourquoi ici** : le découpage d'un axe en fenêtres de 256 avec 50 % de
   recouvrement est un calcul d'indices ; une soustraction négative ne doit
   jamais passer inaperçue.
-- **Où** : `window_plan` et `AxisWindows` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `window_plan` et `AxisWindows` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 **Critère 6a atteint** : positions de départ, complétion et longueur complétée
 identiques à `dense_patch_slices` de MONAI pour 9 tailles (100, 200, 240, 256,
@@ -240,7 +240,7 @@ identiques à `dense_patch_slices` de MONAI pour 9 tailles (100, 200, 240, 256,
   nouveau tableau (argmax).
 - **Pourquoi ici** : SliceInferer additionne les logits de chaque tuile à la
   bonne place d'un tableau de sortie, puis moyenne, puis rogne la complétion.
-- **Où** : `infer_logits`, `argmax_mask` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `infer_logits`, `argmax_mask` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : `#[ignore]`, qui exclut un test de `cargo test` sauf avec
   `-- --ignored`. On sépare un test rapide (fetus_06) d'un test complet.
@@ -261,7 +261,7 @@ volume de 260 ou 300 ; à reprendre à l'étape 8.
   qu'on les lui passe ; on s'en sert pour traiter les deux canaux de logits
   avec le même code.
 - **Pourquoi ici** : le rééchantillonnage inverse s'applique à chaque canal.
-- **Où** : `logits_to_mask` dans `crates/medoxide-mask/src/lib.rs`.
+- **Où** : `logits_to_mask` dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 - **Quoi** : généraliser une fonction existante. `resample_axis` prend
   maintenant la longueur de sortie et le pas en paramètres : le rééchantillonnage
@@ -306,7 +306,7 @@ un résultat différent (Dice 0,991 sur fetus_03).
   contre les masques officiels, et un compilé en `--release` pour mesurer le
   temps.
 - **Où** : `segment_end_to_end_fast` (fetus_06) et `segment_end_to_end_all`
-  (`#[ignore]`) dans `crates/medoxide-mask/src/lib.rs`.
+  (`#[ignore]`) dans `crates/medoxide-fetalbet/src/lib.rs`.
 
 **Critère 8 atteint** : `medx mask` (build release) produit les 8 masques, code
 de sortie 0. Contre les masques de Fetal-BET : Dice entre 0,999899 et 1,000000

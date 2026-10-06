@@ -3801,7 +3801,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "medoxide-mask"
+name = "medoxide-fetalbet"
 version = "0.1.0"
 dependencies = [
  "burn",
@@ -3815,7 +3815,7 @@ name = "medx"
 version = "0.1.0"
 dependencies = [
  "clap",
- "medoxide-mask",
+ "medoxide-fetalbet",
 ]
 
 [[package]]
