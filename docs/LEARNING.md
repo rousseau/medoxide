@@ -1190,4 +1190,35 @@ Autres valeurs essayées : Jacobi ω = 0,5 (6,3e-2 / 9,0e-3 / 2,3e-3 / 4,4e-4) ;
 
 ---
 
-*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 2 : reconstruire avec des poses)*
+## 2026-10-07 — Reconstruire avec des poses par coupe (boucle recalage / reconstruction, sous-étape 2)
+
+- **Quoi** : un **jeu de poses** `SlicePoses` : un mouvement rigide 4 × 4 par coupe de chaque stack (identité au départ), que le recalage fera évoluer. Les constructeurs `ReconstructionProblem::with_poses` et `normalized_adjoint_with_poses` le prennent ; `ReconstructionProblem::new` et
+  `normalized_adjoint` gardent leur signature et appellent la nouvelle version avec des poses identité : **tout le code et tous les tests d'avant restent valables sans modification**. Les poses entrent partout où l'on parcourt les coupes : adjoint normalisé, gradient, produit `H p`. Nouvelle erreur
+  `PoseMismatch` (forme du jeu de poses différente de celle des stacks).
+- **Limite** : la grille reste celle des poses d'en-tête (boîte des masques + marge de 10 mm) ; un mouvement plus grand que la marge ferait sortir des voxels de masque de la grille.
+- **Où** : `SlicePoses`, `coupes_avec_masque(stacks, poses)`, `normalized_adjoint_with_poses`, `ReconstructionProblem::with_poses` dans `crates/medoxide-svr/src/recon.rs`.
+
+**Critères** (fixés avant) et résultats :
+1. **Poses identité** : mêmes résultats qu'avant (algèbre dense à **6,4e-8**, tous les tests d'avant passent).
+2. **Algèbre dense avec des poses non triviales** (rotations jusqu'à ±3°, translations jusqu'à ±2 mm, différentes pour chaque coupe) : valeur et gradient à **4,1e-8** de l'algèbre dense.
+3. **Équivalence avec un stack déplacé** : si toutes les coupes d'un stack ont le même mouvement `M`, le problème égale celui d'un stack d'affine `M · A` (mêmes données et masque, même grille) : valeur à 7e-9 et gradient à **1,8e-7** ; et sans les poses le problème est bien différent (le test le vérifie, pour qu'il ne soit pas trivial).
+
+**Vérifié par mutation** (4 sur 4 détectées) : `coupes_avec_masque` qui ignore les poses ; mauvais indice de coupe dans les poses (toujours la coupe 0 : attrapé par le test dense avec poses, pas par le test de stack entier où toutes les coupes partagent le même mouvement) ; adjoint normalisé qui ignore les poses ;
+problème qui garde des poses identité (attrapé par le test de stack déplacé, pas par le test dense dont l'aide lit les poses du problème : les deux tests se complètent). Ma première version de la 3ᵉ mutation ne compilait pas (valeur temporaire empruntée) et n'avait rien prouvé ; refaite.
+
+**Bornes de l'évaluation de la boucle** (critère 1 de l'étude 06 §15), mesurées ici car elles ne dépendent pas du recalage : STA31, 5 % de bruit, α = 0,01, mouvement propre à chaque coupe tiré dans ± l'amplitude autour du centre de la coupe (stacks simulés **à la position réelle** des coupes, PSF orientée avec elles) :
+
+| mouvement | erreur de départ (déplacement RMS sur le masque) | vraies poses (borne haute) | sans correction (borne basse) |
+|---|---|---|---|
+| ±2°/±2 mm | 2,09 mm | **27,99 dB**, NCC 0,971 (44 itérations) | 15,87 dB, NCC 0,526 |
+| ±4°/±4 mm | 4,13 mm | **27,82 dB**, NCC 0,970 (47) | 13,33 dB, NCC 0,186 |
+| ±6°/±6 mm | 6,68 mm | **27,66 dB**, NCC 0,968 (50) | 12,67 dB, NCC 0,097 |
+
+Avec les vraies poses la qualité reste à 0,3 à 0,65 dB de celle sans mouvement (28,31 dB, mesurée à l'étape précédente) : des coupes déplacées sortent un peu de la zone couverte. Sans correction, la reconstruction s'effondre. L'écart de **12 à 15 dB** est ce que la boucle doit récupérer. À ±2°/±2 mm, les critères
+de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) et ≥ 20,9 dB (borne basse + 5 dB).
+
+**Suite** : sous-étape 3 : recaler toutes les coupes contre un volume et composer les deltas aux poses ; sous-étape 4 : la boucle et son évaluation.
+
+---
+
+*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 3 : recaler toutes les coupes)*

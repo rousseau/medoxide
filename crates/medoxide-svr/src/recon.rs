@@ -9,6 +9,41 @@ use nalgebra::{Matrix4, Vector3};
 
 use crate::{Stack, SvrError, Volume};
 
+/// Mouvement rigide de **chaque coupe de chaque stack** (matrice 4 × 4 dans le repère monde, composée après l'affine d'en-tête : voir
+/// [`crate::Slice::with_motion`]). L'identité partout au départ ; c'est ce que le recalage fait évoluer à chaque cycle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlicePoses {
+    motions: Vec<Vec<Matrix4<f64>>>,
+}
+
+impl SlicePoses {
+    /// Des poses identité pour toutes les coupes de `stacks`.
+    pub fn identity(stacks: &[Stack]) -> SlicePoses {
+        SlicePoses { motions: stacks.iter().map(|s| vec![Matrix4::identity(); s.dim().2]).collect() }
+    }
+
+    /// Mouvement de la coupe `k` du stack `s`.
+    ///
+    /// # Panics
+    /// Si `s` ou `k` est hors du jeu de poses.
+    pub fn get(&self, s: usize, k: usize) -> &Matrix4<f64> {
+        &self.motions[s][k]
+    }
+
+    /// Fixe le mouvement de la coupe `k` du stack `s`.
+    ///
+    /// # Panics
+    /// Si `s` ou `k` est hors du jeu de poses.
+    pub fn set(&mut self, s: usize, k: usize, motion: Matrix4<f64>) {
+        self.motions[s][k] = motion;
+    }
+
+    /// `true` si ce jeu de poses a exactement la forme de `stacks` (même nombre de stacks, même nombre de coupes par stack).
+    pub fn matches(&self, stacks: &[Stack]) -> bool {
+        self.motions.len() == stacks.len() && self.motions.iter().zip(stacks).all(|(m, s)| m.len() == s.dim().2)
+    }
+}
+
 /// Support minimal (somme des poids rétroprojetés) au-dessous duquel un voxel est considéré comme non couvert par les données.
 /// Chaque pixel de masque répartit une masse totale de 1 sur les voxels : le support compte, en pixels, les données qui touchent
 /// le voxel. 1e-3 écarte les voxels que seule la queue d'une PSF atteint.
@@ -71,13 +106,15 @@ pub fn reconstruction_grid(stacks: &[Stack], resolution_mm: f64, margin_mm: f64)
     Ok(GridSpec { affine, dims: (n(0), n(1), n(2)), resolution_mm })
 }
 
-/// Toutes les coupes de tous les stacks, chacune avec son masque 2D (vue sur le masque du stack). Les stacks doivent avoir un masque.
-fn coupes_avec_masque<'a>(stacks: &'a [Stack]) -> Vec<(ArrayView2<'a, bool>, crate::Slice<'a>)> {
+/// Toutes les coupes de tous les stacks, **avec leur mouvement** (`poses`), chacune avec son masque 2D (vue sur le masque du stack). Les stacks
+/// doivent avoir un masque et `poses` doit avoir leur forme.
+fn coupes_avec_masque<'a>(stacks: &'a [Stack], poses: &'a SlicePoses) -> Vec<(ArrayView2<'a, bool>, crate::Slice<'a>)> {
     stacks
         .iter()
-        .flat_map(|stack| {
+        .enumerate()
+        .flat_map(|(s, stack)| {
             let masque = stack.brain_mask().expect("le masque a été vérifié").voxels();
-            stack.slices().map(move |coupe| (masque.index_axis(Axis(2), coupe.index()), coupe))
+            stack.slices().map(move |coupe| (masque.index_axis(Axis(2), coupe.index()), coupe.with_motion(*poses.get(s, coupe.index()))))
         })
         .collect()
 }
@@ -101,11 +138,22 @@ pub struct NormalizedAdjoint {
 /// # Erreurs
 /// [`SvrError::NoMask`] si un stack n'a pas de masque attaché.
 pub fn normalized_adjoint(grid: &GridSpec, stacks: &[Stack]) -> Result<NormalizedAdjoint, SvrError> {
+    normalized_adjoint_with_poses(grid, stacks, &SlicePoses::identity(stacks))
+}
+
+/// Comme [`normalized_adjoint`], avec le mouvement `poses` de chaque coupe (la PSF tourne avec elle).
+///
+/// # Erreurs
+/// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+pub fn normalized_adjoint_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<NormalizedAdjoint, SvrError> {
+    if !poses.matches(stacks) {
+        return Err(SvrError::PoseMismatch);
+    }
     let geometrie = grid.zeros();
     for stack in stacks {
         stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
     }
-    let coupes = coupes_avec_masque(stacks);
+    let coupes = coupes_avec_masque(stacks, poses);
     // Les coupes sont indépendantes : chaque tâche accumule dans ses propres volumes (écrire dans un volume partagé serait une course aux
     // données), puis on additionne les volumes.
     let (numerateur, denominateur) = coupes
@@ -166,6 +214,7 @@ pub struct ReconstructionProblem<'a> {
     grid: GridSpec,
     stacks: &'a [Stack],
     alpha: f64,
+    poses: SlicePoses,
     domain: Array3<bool>,
     initial: Array3<f32>,
     support: Array3<f32>,
@@ -177,13 +226,23 @@ impl<'a> ReconstructionProblem<'a> {
     /// # Erreurs
     /// [`SvrError::InvalidRegularization`] si `alpha` est négatif ou non fini ; [`SvrError::NoMask`] si un stack n'a pas de masque.
     pub fn new(grid: &GridSpec, stacks: &'a [Stack], alpha: f64) -> Result<ReconstructionProblem<'a>, SvrError> {
+        ReconstructionProblem::with_poses(grid, stacks, &SlicePoses::identity(stacks), alpha)
+    }
+
+    /// Comme [`ReconstructionProblem::new`], avec le mouvement `poses` de chaque coupe. Le domaine et le point de départ en dépendent ; la grille,
+    /// elle, est celle qu'on lui donne (celle des poses d'en-tête, marge comprise : un mouvement plus grand que la marge ferait sortir de la grille
+    /// des voxels de masque).
+    ///
+    /// # Erreurs
+    /// Celles de [`ReconstructionProblem::new`], plus [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+    pub fn with_poses(grid: &GridSpec, stacks: &'a [Stack], poses: &SlicePoses, alpha: f64) -> Result<ReconstructionProblem<'a>, SvrError> {
         // `!(a >= 0.0)` est vrai aussi pour NaN.
         if !(alpha >= 0.0) || !alpha.is_finite() {
             return Err(SvrError::InvalidRegularization);
         }
-        let init = normalized_adjoint(grid, stacks)?;
+        let init = normalized_adjoint_with_poses(grid, stacks, poses)?;
         let domain = init.support.mapv(|s| s >= SUPPORT_MIN);
-        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, domain, initial: init.image, support: init.support })
+        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, poses: poses.clone(), domain, initial: init.image, support: init.support })
     }
 
     /// Voxels inconnus du problème.
@@ -230,7 +289,7 @@ impl<'a> ReconstructionProblem<'a> {
         let volume = Volume::new(restreint, self.grid.affine).expect("l'affine d'une grille est inversible");
         // Une passe normale par coupe, en parallèle ; chaque tâche accumule le gradient dans son propre volume, puis on additionne.
         let dims = self.grid.dims;
-        let (mut gradient, data) = coupes_avec_masque(self.stacks)
+        let (mut gradient, data) = coupes_avec_masque(self.stacks, &self.poses)
             .par_iter()
             .fold(
                 || (Array3::<f64>::zeros(dims), 0.0),
@@ -733,8 +792,9 @@ mod tests {
             unite[*v] = 1.0;
             let volume = Volume::new(unite, grille.affine).unwrap();
             let mut r = 0;
-            for stack in stacks {
+            for (si, stack) in stacks.iter().enumerate() {
                 for coupe in stack.slices() {
+                    let coupe = coupe.with_motion(*probleme.poses.get(si, coupe.index()));
                     let sim = volume.simulate_slice(&coupe, &coupe.psf());
                     for i in 0..coupe.dim().0 {
                         for j in 0..coupe.dim().1 {
@@ -763,10 +823,45 @@ mod tests {
     /// unité du domaine ; `½‖M(Ax − y)‖² + (α/2)‖Gx‖²` et `AᵀM(Ax − y) + α GᵀGx` sont ensuite calculés en matrices denses.
     #[test]
     fn objective_matches_dense_linear_algebra() {
-        let t = Temp::new("dense");
+        verifier_objectif_dense(false);
+    }
+
+    /// Même équivalence avec des poses non triviales : rotations jusqu'à ±3° et translations jusqu'à ±2 mm, différentes pour chaque coupe.
+    #[test]
+    fn objective_with_poses_matches_dense_linear_algebra() {
+        verifier_objectif_dense(true);
+    }
+
+    /// Mouvement rigide `M = T(c + t) · R(ω) · T(−c)` : rotation du vecteur `omega` (rad) autour du point `c`, puis translation `t`.
+    fn mouvement_rigide(omega: &Vector3<f64>, t: &Vector3<f64>, c: &Vector3<f64>) -> Matrix4<f64> {
+        let r = Rotation3::from_scaled_axis(*omega);
+        let mut m = Matrix4::identity();
+        m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(c + t - r * c));
+        m
+    }
+
+    /// Poses aléatoires par coupe (autour du centre de la coupe) : rotation et translation tirées uniformément dans ± `degres` et ± `mm`.
+    fn poses_aleatoires(stacks: &[Stack], degres: f64, mm: f64, graine: u64) -> SlicePoses {
+        let mut alea = Alea(graine);
+        let mut poses = SlicePoses::identity(stacks);
+        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
+        for (si, stack) in stacks.iter().enumerate() {
+            for coupe in stack.slices() {
+                let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
+                let t = Vector3::new(tire(mm), tire(mm), tire(mm));
+                poses.set(si, coupe.index(), mouvement_rigide(&omega, &t, &coupe.geometric_center()));
+            }
+        }
+        poses
+    }
+
+    fn verifier_objectif_dense(avec_poses: bool) {
+        let t = Temp::new(if avec_poses { "dense_poses" } else { "dense" });
         let (grille, stacks) = petit_probleme(&t);
         let alpha = 0.7;
-        let probleme = ReconstructionProblem::new(&grille, &stacks, alpha).unwrap();
+        let poses = if avec_poses { poses_aleatoires(&stacks, 3.0, 2.0, 99) } else { SlicePoses::identity(&stacks) };
+        let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &poses, alpha).unwrap();
         let dense = systeme_dense(&probleme, &grille, &stacks);
         let (voxels, a, y, m, paires) = (dense.voxels, dense.a, dense.y, dense.m, dense.paires);
         let n = voxels.len();
@@ -1460,6 +1555,148 @@ mod tests {
             let sous: Vec<f64> = points.iter().map(|&k| ((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12)).collect();
             let psnrs: Vec<f64> = points.iter().map(|&k| tr.snapshots.iter().find(|(p, _)| *p == k).map_or(f64::NAN, |(_, x)| qualite(&c, x).1)).collect();
             println!("{nom:30} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)", sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes);
+        }
+    }
+    /// Si toutes les coupes d'un stack ont le même mouvement `M`, le problème est identique à celui d'un stack dont l'affine est `M · A` (même
+    /// données, même masque), sur la même grille : valeur de chaque terme et gradient.
+    #[test]
+    fn whole_stack_motion_equals_a_stack_with_the_moved_affine() {
+        let t = Temp::new("pose_stack");
+        let (grille, stacks) = petit_probleme(&t);
+        let mouvements = [
+            mouvement_rigide(&Vector3::new(0.05, -0.03, 0.04), &Vector3::new(1.2, -0.8, 0.5), &Vector3::new(2.0, 1.0, -1.0)),
+            mouvement_rigide(&Vector3::new(-0.04, 0.06, -0.02), &Vector3::new(-0.9, 1.1, 0.3), &Vector3::new(-1.0, 2.0, 0.5)),
+        ];
+        let mut poses = SlicePoses::identity(&stacks);
+        let mut deplaces = Vec::new();
+        for (si, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                poses.set(si, k, mouvements[si]);
+            }
+            let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
+            let sp = stack.spacing();
+            deplaces.push(stack_avec_masque(&t, &format!("deplace{si}"), stack.data(), &masque, &(mouvements[si] * stack.affine()), [sp[0] as f32, sp[1] as f32, sp[2] as f32]));
+        }
+        let (a, b) = (ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap(), ReconstructionProblem::new(&grille, &deplaces, 0.7).unwrap());
+        assert_eq!(a.domain().iter().filter(|&&d| d).count(), b.domain().iter().filter(|&&d| d).count(), "même domaine");
+        let mut alea = Alea(4242);
+        let x = Array3::from_shape_fn(grille.dims, |_| alea.suivant() * 10.0);
+        let (ea, eb) = (a.evaluate(&x), b.evaluate(&x));
+        let relatif = |p: f64, q: f64| (p - q).abs() / q.abs().max(1e-12);
+        println!("attache {:.6} / {:.6} ; régularisation {:.6} / {:.6}", ea.data, eb.data, ea.regularization, eb.regularization);
+        assert!(relatif(ea.data, eb.data) < 1e-5 && relatif(ea.regularization, eb.regularization) < 1e-9);
+        let norme = eb.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let pire = ea.gradient.iter().zip(eb.gradient.iter()).map(|(p, q)| (p - q).abs()).fold(0.0, f64::max) / norme;
+        println!("gradient : écart max relatif {pire:.1e}");
+        assert!(pire < 1e-5, "{pire:.2e}");
+        // et ce n'est pas trivial : sans les poses, le problème est bien différent
+        let sans = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap().evaluate(&x);
+        assert!(relatif(sans.data, eb.data) > 1e-3, "les poses doivent changer le problème : {} contre {}", sans.data, eb.data);
+    }
+
+    #[test]
+    fn poses_must_have_the_shape_of_the_stacks() {
+        let t = Temp::new("poses_forme");
+        let (grille, stacks) = petit_probleme(&t);
+        let autre = SlicePoses::identity(&stacks[..1]);
+        assert!(matches!(ReconstructionProblem::with_poses(&grille, &stacks, &autre, 0.7), Err(SvrError::PoseMismatch)));
+        assert!(matches!(normalized_adjoint_with_poses(&grille, &stacks, &autre), Err(SvrError::PoseMismatch)));
+        assert!(SlicePoses::identity(&stacks).matches(&stacks));
+        assert!(!autre.matches(&stacks));
+    }
+    /// Un atlas et trois stacks (axial, coronal, sagittal) simulés avec un **mouvement rigide propre à chaque coupe**, et ce mouvement vrai.
+    /// Pour chaque coupe : le mouvement est tiré uniformément dans ± `amplitude` (degrés par axe et mm par axe) autour du centre de la
+    /// coupe, la coupe est simulée par l'opérateur **à sa position réelle** (PSF orientée avec elle), puis on ajoute `bruit_pct` % de bruit gaussien.
+    /// Les stacks gardent leur affine d'en-tête : le mouvement est la quantité inconnue que le recalage devra retrouver. Mis en cache dans
+    /// `data/atlas/sim/<atlas>_mvt<amplitude>_b<bruit>/` (les poses vraies dans `poses.tsv`).
+    fn stacks_atlas_avec_mouvement(nom_atlas: &str, amplitude: u32, bruit_pct: u32) -> (Volume, Vec<Stack>, SlicePoses) {
+        let (atlas, modeles) = stacks_atlas_sans_bruit(nom_atlas);
+        let dossier = PathBuf::from(format!("{}/data/atlas/sim/{nom_atlas}_mvt{amplitude}_b{bruit_pct}", racine()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let fichier_poses = dossier.join("poses.tsv");
+        if !fichier_poses.exists() {
+            let vraies = poses_aleatoires(&modeles, f64::from(amplitude), f64::from(amplitude), 1000 + u64::from(amplitude));
+            let mut lignes = Vec::new();
+            for (n, modele) in modeles.iter().enumerate() {
+                let dims = modele.dim();
+                let (mut data, mut masque) = (Array3::<f32>::zeros(dims), Array3::<u8>::zeros(dims));
+                for coupe in modele.slices() {
+                    let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
+                    let sim = atlas.simulate_slice(&posee, &posee.psf());
+                    for ((i, j), &v) in sim.values.indexed_iter() {
+                        data[[i, j, coupe.index()]] = v;
+                        masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0);
+                    }
+                    let m = vraies.get(n, coupe.index());
+                    lignes.push(format!("{n}\t{}\t{}", coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+                }
+                if bruit_pct > 0 {
+                    let (somme, n_m) = data.iter().zip(masque.iter()).filter(|(_, &m)| m > 0).fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
+                    let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
+                    let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919 ^ u64::from(amplitude));
+                    data.mapv_inplace(|v| {
+                        let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0;
+                        (f64::from(v) + sigma * gauss) as f32
+                    });
+                }
+                let sp = modele.spacing();
+                let h = en_tete(modele.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32]);
+                WriterOptions::new(dossier.join(format!("stack{n}.nii.gz"))).reference_header(&h).write_nifti(&data).unwrap();
+                WriterOptions::new(dossier.join(format!("stack{n}_mask.nii.gz"))).reference_header(&h).write_nifti(&masque).unwrap();
+            }
+            std::fs::write(&fichier_poses, lignes.join("\n")).unwrap();
+        }
+        let stacks: Vec<Stack> = (0..modeles.len())
+            .map(|n| {
+                let mut stack = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).unwrap();
+                stack.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                stack
+            })
+            .collect();
+        let mut vraies = SlicePoses::identity(&stacks);
+        for ligne in std::fs::read_to_string(&fichier_poses).unwrap().lines() {
+            let c: Vec<&str> = ligne.split('\t').collect();
+            let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
+            vraies.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+        }
+        (atlas, stacks, vraies)
+    }
+
+    /// BORNES de l'évaluation de la boucle recalage / reconstruction (étude 06 §15) sur STA31 avec un mouvement propre à chaque coupe : la
+    /// reconstruction avec les **vraies poses** (borne haute) et **sans correction**, c'est-à-dire avec les poses d'en-tête (borne basse). Le
+    /// déplacement quadratique moyen (sur les pixels de masque) entre poses d'en-tête et vraies poses donne l'erreur de départ du recalage.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn bounds_with_true_poses_and_without_correction_on_sta31() {
+        for amplitude in [2u32, 4, 6] {
+            let (atlas, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", amplitude, 5);
+            let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+            let identite = SlicePoses::identity(&stacks);
+            let (haute, basse) = (ReconstructionProblem::with_poses(&grille, &stacks, &vraies, 0.01).unwrap(), ReconstructionProblem::with_poses(&grille, &stacks, &identite, 0.01).unwrap());
+            let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+            let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
+            // erreur de départ : déplacement entre pose d'en-tête et vraie pose, sur les pixels de masque
+            let (mut somme, mut n) = (0.0, 0usize);
+            for (si, stack) in stacks.iter().enumerate() {
+                let masque = stack.brain_mask().unwrap().voxels();
+                for coupe in stack.slices() {
+                    let m = vraies.get(si, coupe.index());
+                    for ((i, j), &dedans) in masque.index_axis(Axis(2), coupe.index()).indexed_iter() {
+                        if dedans {
+                            let x = coupe.pixel_to_world(i as f64, j as f64);
+                            somme += ((m * x.push(1.0)).xyz() - x).norm_squared();
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            println!("--- mouvement ±{amplitude}°/±{amplitude} mm : erreur de départ (déplacement quadratique moyen) {:.2} mm", (somme / n as f64).sqrt());
+            for (nom, probleme) in [("vraies poses (borne haute)", &haute), ("sans correction (borne basse)", &basse)] {
+                let debut = std::time::Instant::now();
+                let r = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4);
+                ligne_qualite(nom, &c, &r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64());
+            }
         }
     }
 }
