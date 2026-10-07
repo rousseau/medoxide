@@ -13,6 +13,7 @@
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
 pub mod diff;
+pub mod optimizers;
 pub mod recon;
 
 use std::path::{Path, PathBuf};

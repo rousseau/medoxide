@@ -1129,4 +1129,48 @@ le réglage se transfère, avec un optimum légèrement décalé pour un cerveau
 
 ---
 
-*(à compléter à la prochaine étape : comparaison d'optimiseurs, puis boucle recalage / reconstruction)*
+## 2026-10-07 — Comparaison d'optimiseurs sur l'objectif de reconstruction (étape 4a, sous-étape 6)
+
+- **Quoi** : six optimiseurs sur le **même objectif** (valeur et gradient analytique), depuis le même point (l'adjoint normalisé), comparés à budget égal de **passes** (une simulation et une rétroprojection de toutes les coupes, qui domine
+  le coût) : gradient conjugué ; plus forte pente à pas exact (`g·g / g·Hg`, une passe par itération grâce à la récurrence `g ← g − αHg`) ; Barzilai-Borwein (`s·s / s·y`) ; Jacobi préconditionné (`x ← x − ωD∘g`, `D = 1/(support + 6α/h²)`, dans l'esprit
+  de SVRTK et NeSVoR) ; **Adam** et **L-BFGS de Burn** (`burn-optim`), qui reçoivent mon gradient analytique.
+- **Quoi** : **donner un gradient extérieur à Burn**. L'optimiseur travaille sur un `Module` contenant l'inconnue dans un `Param<Tensor<3>>` ; `GradientsParams::register(param.id, tenseur)` y place un gradient calculé ailleurs ; pour L-BFGS, la fermeture
+  `FnMut(M) -> (f64, GradientsParams)` rend la valeur et le gradient. **Les optimiseurs de Burn exigent un périphérique avec autodiff activé** (`Device::….autodiff()`), même quand le gradient vient de l'extérieur, et travaillent en `f32`.
+- **Où** : `crates/medoxide-svr/src/optimizers.rs` (`Trace`, `conjugate_gradient`, `steepest_descent`, `barzilai_borwein`, `jacobi`, `adam`, `lbfgs`) ; `ReconstructionProblem::{support, alpha, resolution_mm, conjugate_gradient_observed}` ; tests de comparaison ignorés.
+
+**Protocole** (fixé avant) : STA21 avec 5 % de bruit, α = 0,01, minimum `f*` = gradient conjugué à 200 itérations (`f₀ = 4,811e9`, `f* = 9,746e8`, NCC 0,9814, PSNR 28,93 dB) ; sous-optimalité relative `(f − f*)/(f₀ − f*)` et PSNR à 10 / 25 / 50 / 100 passes ; les optimiseurs à paramètre sont balayés
+sur ce même problème. **Hypothèse notée avant de mesurer** : CG gagne en passes, L-BFGS est proche, Adam est le plus lent. **Confirmée.**
+
+| optimiseur | sous-optimalité à 10 / 25 / 50 / 100 passes | PSNR (dB) à 10 / 25 / 50 / 100 | durée |
+|---|---|---|---|
+| gradient conjugué | 1,1e-2 / 4,3e-4 / **1,6e-6** / **5,2e-11** | 28,84 / 28,92 / 28,93 / 28,93 | 33 s |
+| L-BFGS de Burn (pas fixe, `lr` = 1) | 1,4e-2 / 9,0e-4 / 5,6e-6 / 2,1e-10 | 28,75 / 28,96 / 28,93 / 28,93 | 43 s |
+| Barzilai-Borwein | 1,1e-1 / 3,0e-3 / 1,2e-5 / 6,8e-8 | 27,49 / 29,03 / 28,93 / 28,93 | 37 s |
+| Jacobi ω = 1 | 1,5e-2 / 2,3e-3 / 4,5e-4 / 3,0e-5 | 28,95 / 29,04 / 28,96 / 28,94 | 38 s |
+| plus forte pente (pas exact) | 2,1e-2 / 9,0e-3 / 4,3e-3 / 1,5e-3 | 29,03 / 29,09 / 29,05 / 29,00 | 38 s |
+| Adam, `lr` = 100 (meilleur, plateau 50 à 200) | 1,0e-1 / 2,4e-2 / 1,9e-3 / 1,1e-5 | 24,76 / 27,19 / 28,78 / 28,93 | 39 s |
+| Jacobi ω = 1,5 | **diverge** (4e31) | | |
+
+Autres valeurs essayées : Jacobi ω = 0,5 (6,3e-2 / 9,0e-3 / 2,3e-3 / 4,4e-4) ; Adam `lr` = 2 (4,3e-1 à 100 passes), 10 (1,5e-2), 50 (1,4e-5), 200 (1,2e-5), 400 (1,8e-5).
+
+**Lectures.**
+1. **En précision de l'objectif** : CG > L-BFGS > Barzilai-Borwein > Jacobi ≈ plus forte pente > Adam, comme prévu. **En qualité d'image** (bruit présent), la différence s'efface : le PSNR est à 0,1 dB du minimum (28,93 dB) dès **10 passes** pour CG, la plus forte pente et Jacobi, dès **25** pour
+   Barzilai-Borwein et L-BFGS, vers **100** pour Adam. Une précision de l'objectif meilleure que 1e-2 n'améliore pas l'image.
+2. **Arrêt précoce = régularisation implicite** : plusieurs méthodes à 10 ou 25 passes dépassent le PSNR du minimum exact (29,03 à 29,10 contre 28,93 dB) : α = 0,01 est peut-être un peu petit pour ce niveau de bruit (l'optimum de α sur STA21 était plat entre 0,01 et 0,03).
+3. **Jacobi n'est stable que pour ω < 2/λmax(D·H)** : ω = 1,5 diverge, ω = 1 (la valeur de SVRTK et de NeSVoR) est sûr et lent.
+4. **Coût par passe** : 0,33 à 0,43 s ; les conversions `f64 ↔ f32` à chaque passe pour les optimiseurs de Burn ajoutent de 15 à 30 % (CG 33 s, L-BFGS 43 s).
+
+**Fragilités de Burn, avec ce qui est vérifié et ce qui ne l'est pas.**
+- **Adam** : le `lr` demande un balayage (4,3e-1 de sous-optimalité à `lr` = 2, 1,1e-5 à 100) ; **ma première grille (2, 10, 50) avait son optimum au bord** : étendue à 400, optimum encadré. Même erreur de protocole que pour α.
+- **L-BFGS** : l'itération de départ vaut `min(1/‖g‖₁, 1) · lr`, et l'historique n'est mis à jour que si `ys > 1e-10` (seuils lus dans `lbfgs.rs`). Avec `lr` = 1 le premier pas vaut 6e-8 et fonctionne ; **mettre l'objectif à l'échelle (÷ f₀) le bloque entièrement** (sous-optimalité 1,0 partout, `x` ne change pas) ; la recherche de Wolfe
+  avec `lr` = 1 est bloquée aussi (101 passes sans progrès) ; avec un premier pas de 1 (`lr` = ‖g₀‖₁ = 1,7e7) elle **fonctionne** (1,0e-6 à 100 passes, 28,93 dB) ; sans Wolfe un premier pas de 0,1 **diverge** (NaN). **Explication probable, partiellement confirmée par ces sondes** : en `f32`, un premier pas trop petit ne modifie pas `x`, donc aucune
+  information de courbure ne s'accumule. La trace d'un L-BFGS à Wolfe contient les **points d'essai** de la recherche linéaire (PSNR erratiques, jusqu'à −78 dB à certains budgets) : seul l'itéré final accepté a un sens.
+- **Limites de la comparaison** : un seul problème (STA21, une réalisation de bruit, α = 0,01) ; budgets en passes (pas en temps) ; les paramètres de chaque optimiseur sont réglés sur ce même problème ; le « Jacobi » mesuré n'est pas exactement celui de SVRTK et de NeSVoR (pas de poids EM, régularisation dans le gradient plutôt qu'en pas séparé).
+
+**Vérifié par mutation** (5 sur 5 détectées, la 3ᵉ après correction d'une mutation d'abord mal formée) : récurrence de `f` de signe inversé (plus forte pente) ; mise à jour de Jacobi de signe inversé ; conversion tenseur → tableau en ordre colonne ; instantané du gradient conjugué au mauvais budget ; Adam avec un gradient nul.
+
+**Pas encore fait** : le gradient par **autodiff de Burn** sur un modèle direct en tenseurs (vérification contre l'adjoint, mémoire à mesurer) ; des régularisations **non quadratiques** (TV, Huber), où le gradient conjugué sur les équations normales ne s'applique plus et où L-BFGS et Adam deviennent les concurrents naturels ; le GPU.
+
+---
+
+*(à compléter à la prochaine étape : boucle recalage / reconstruction, ou régularisations non quadratiques)*

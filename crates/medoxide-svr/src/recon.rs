@@ -168,6 +168,7 @@ pub struct ReconstructionProblem<'a> {
     alpha: f64,
     domain: Array3<bool>,
     initial: Array3<f32>,
+    support: Array3<f32>,
 }
 
 impl<'a> ReconstructionProblem<'a> {
@@ -182,12 +183,27 @@ impl<'a> ReconstructionProblem<'a> {
         }
         let init = normalized_adjoint(grid, stacks)?;
         let domain = init.support.mapv(|s| s >= SUPPORT_MIN);
-        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, domain, initial: init.image })
+        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, domain, initial: init.image, support: init.support })
     }
 
     /// Voxels inconnus du problème.
     pub fn domain(&self) -> &Array3<bool> {
         &self.domain
+    }
+
+    /// Support de l'adjoint normalisé : somme des poids rétroprojetés en chaque voxel (voir [`NormalizedAdjoint::support`]).
+    pub fn support(&self) -> &Array3<f32> {
+        &self.support
+    }
+
+    /// Poids `α` de la régularisation.
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    /// Pas `h` de la grille, en mm.
+    pub fn resolution_mm(&self) -> f64 {
+        self.grid.resolution_mm
     }
 
     /// Point de départ : l'adjoint normalisé (nul hors du domaine).
@@ -278,6 +294,12 @@ impl<'a> ReconstructionProblem<'a> {
     /// Le long d'une itération, l'objectif diminue exactement de `½ · pas · ‖r‖²` : il est suivi sans passe supplémentaire (voir
     /// [`CgResult::objective_history`]). `x0` hors du domaine est ignoré.
     pub fn conjugate_gradient(&self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64) -> CgResult {
+        self.conjugate_gradient_observed(x0, max_iterations, tolerance, |_, _| {})
+    }
+
+    /// Comme [`ReconstructionProblem::conjugate_gradient`], en appelant `observateur(k, x)` avec l'itéré `x` après chaque itération `k`
+    /// (`k = 0` : le départ restreint au domaine). Sert à enregistrer des instantanés pour comparer les optimiseurs.
+    pub fn conjugate_gradient_observed(&self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64, mut observateur: impl FnMut(usize, &Array3<f64>)) -> CgResult {
         let b = self.right_hand_side();
         let norme_b = dot(&b, &b).sqrt();
         let mut x = x0.clone();
@@ -286,6 +308,7 @@ impl<'a> ReconstructionProblem<'a> {
                 *v = 0.0;
             }
         }
+        observateur(0, &x);
         let depart = self.evaluate(&x);
         let mut objectif = depart.value();
         // r = b − H x = −gradient (le gradient de f en x vaut H x − b)
@@ -306,6 +329,7 @@ impl<'a> ReconstructionProblem<'a> {
             p = &r + &(&p * (rs_nouveau / rs));
             rs = rs_nouveau;
             iterations += 1;
+            observateur(iterations, &x);
             historique_f.push(objectif);
             historique_r.push(rs.sqrt() / norme_b);
             converge = *historique_r.last().unwrap() <= tolerance;
@@ -1262,6 +1286,180 @@ mod tests {
                 .collect();
             let (x, it, res, d) = reconstruire(&grille, &perturbes, ALPHA_CHOISI);
             ligne_qualite(nom, &c, &x, it, res, d);
+        }
+    }
+    // ------------------------------------------------------------------ optimiseurs (comparaison, gradient analytique)
+
+    use crate::optimizers;
+
+    /// Chaque optimiseur diminue l'objectif sur le petit problème, et son suivi de l'objectif égale l'objectif recalculé sur les instantanés de
+    /// l'itéré (le gradient conjugué et la plus forte pente suivent `f` par récurrence, les autres le mesurent à chaque passe).
+    #[test]
+    fn every_optimizer_decreases_the_objective_and_its_trace_is_consistent() {
+        let t = Temp::new("optimiseurs");
+        let (grille, stacks) = petit_probleme(&t);
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
+        let x0 = probleme.initial_guess();
+        let f0 = probleme.evaluate(&x0).value();
+        let budget = 12;
+        let points = [4, 8, 12];
+        let device = burn::tensor::Device::flex().autodiff();
+        let traces: Vec<(&str, optimizers::Trace)> = vec![
+            ("gradient conjugué", optimizers::conjugate_gradient(&probleme, &x0, budget, &points)),
+            ("plus forte pente", optimizers::steepest_descent(&probleme, &x0, budget, &points)),
+            ("Barzilai-Borwein", optimizers::barzilai_borwein(&probleme, &x0, budget, &points)),
+            ("Jacobi", optimizers::jacobi(&probleme, &x0, 1.0, budget, &points)),
+            ("Adam (Burn)", optimizers::adam(&probleme, &x0, 0.3, budget, &points, &device)),
+            ("L-BFGS (Burn)", optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, budget, &points, &device)),
+        ];
+        for (nom, tr) in &traces {
+            let f_fin = *tr.objective.last().unwrap();
+            println!("{nom:20} : {} passes, objectif {f0:.3} → {f_fin:.3}", tr.passes);
+            assert_eq!(tr.passes, budget, "{nom}");
+            assert!(f_fin < f0, "{nom} : {f_fin} contre {f0}");
+            assert_eq!(tr.snapshots.len(), 3, "{nom}");
+            for (passes, x) in &tr.snapshots {
+                // la valeur de l'itéré disponible après `passes` passes : objective[passes - 2] pour le gradient conjugué (2 passes de départ),
+                // objective[passes - 1] pour les autres
+                let indice = if *nom == "gradient conjugué" { passes - 2 } else { passes - 1 };
+                let reel = probleme.evaluate(x).value();
+                let suivi = tr.objective[indice];
+                assert!((suivi - reel).abs() / reel.abs() < 1e-5, "{nom}, {passes} passes : suivi {suivi} contre recalculé {reel}");
+            }
+        }
+        // monotones : gradient conjugué et plus forte pente à pas exact
+        for nom in ["gradient conjugué", "plus forte pente"] {
+            let tr = &traces.iter().find(|(n, _)| *n == nom).unwrap().1;
+            assert!(tr.objective.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()), "{nom} doit être monotone");
+        }
+        // à budget égal, le gradient conjugué n'est pas pire que la plus forte pente (hypothèse de la théorie, vérifiée ici)
+        let f = |nom: &str| *traces.iter().find(|(n, _)| *n == nom).unwrap().1.objective.last().unwrap();
+        assert!(f("gradient conjugué") <= f("plus forte pente") * (1.0 + 1e-9) + 1e-9);
+    }
+
+    /// Les conversions tableau ↔ tenseur de Burn sont fidèles à l'arrondi `f32` près et respectent l'ordre des axes.
+    #[test]
+    fn array_tensor_conversion_round_trips() {
+        let a = Array3::from_shape_fn((3, 4, 5), |(i, j, k)| (100 * i + 10 * j + k) as f64 + 0.25);
+        let device = burn::tensor::Device::flex().autodiff();
+        // un optimiseur sans itération rend le départ converti puis reconverti : on l'observe par `adam` avec 1 passe
+        let t = Temp::new("conversion");
+        let (grille, stacks) = petit_probleme(&t);
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
+        let x0 = Array3::from_shape_fn(grille.dims, |(i, j, k)| (i * 100 + j * 10 + k) as f64 * 0.01);
+        let tr = optimizers::adam(&probleme, &x0, 0.1, 1, &[1], &device);
+        for (idx, &v) in tr.snapshots[0].1.indexed_iter() {
+            let attendu = if probleme.domain()[idx] { x0[idx] } else { 0.0 };
+            assert!((v - attendu).abs() <= 1e-6 * attendu.abs().max(1.0), "{idx:?} : {v} contre {attendu}");
+        }
+        let _ = a;
+    }
+    /// COMPARAISON des optimiseurs (étape 4a) sur STA21 (5 % de bruit), `α = 0,01`, depuis l'adjoint normalisé, à budgets égaux de passes
+    /// (10, 25, 50, 100). Pour chaque optimiseur, sous-optimalité relative `(f − f*) / (f₀ − f*)` (`f*` : le minimum, par gradient conjugué
+    /// poussé à 200 itérations) et qualité (NCC, PSNR) contre l'atlas. Les optimiseurs à paramètre sont essayés avec plusieurs valeurs.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn compare_optimizers_on_sta21() {
+        let (atlas, stacks) = stacks_atlas_simules("STA21", 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.01).unwrap();
+        let c = construire_comparaison(&grille, probleme.support(), &atlas, &stacks);
+        let x0 = probleme.initial_guess();
+        let f0 = probleme.evaluate(&x0).value();
+        let reference = optimizers::conjugate_gradient(&probleme, &x0, 202, &[]);
+        let f_etoile = probleme.evaluate(&reference.x).value();
+        let q_etoile = qualite(&c, &reference.x);
+        println!("f₀ = {f0:.6e}, f* = {f_etoile:.6e} (CG, 200 itérations), qualité du minimum : NCC {:.4}, PSNR {:.2} dB", q_etoile.0, q_etoile.1);
+        let points = [10, 25, 50, 100];
+        let device = burn::tensor::Device::flex().autodiff();
+        let essais: Vec<(String, Box<dyn Fn() -> (optimizers::Trace, usize)>)> = vec![
+            ("gradient conjugué".into(), Box::new(|| (optimizers::conjugate_gradient(&probleme, &x0, 100, &points), 2))),
+            ("plus forte pente".into(), Box::new(|| (optimizers::steepest_descent(&probleme, &x0, 100, &points), 1))),
+            ("Barzilai-Borwein".into(), Box::new(|| (optimizers::barzilai_borwein(&probleme, &x0, 100, &points), 1))),
+            ("Jacobi ω = 0,5".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 0.5, 100, &points), 1))),
+            ("Jacobi ω = 1".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.0, 100, &points), 1))),
+            ("Jacobi ω = 1,5".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.5, 100, &points), 1))),
+            ("Adam lr = 2".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 2.0, 100, &points, &device), 1))),
+            ("Adam lr = 10".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 10.0, 100, &points, &device), 1))),
+            ("Adam lr = 50".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 50.0, 100, &points, &device), 1))),
+            ("L-BFGS (pas fixe)".into(), Box::new(|| (optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, 100, &points, &device), 1))),
+            ("L-BFGS (Wolfe)".into(), Box::new(|| (optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, 1.0, 100, &points, &device), 1))),
+        ];
+        println!("{:20} | {:^27} | {:^45} | durée", "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100");
+        for (nom, lancer) in &essais {
+            let debut = std::time::Instant::now();
+            let (tr, decalage) = lancer();
+            let duree = debut.elapsed().as_secs_f64();
+            let mut sous = Vec::new();
+            let mut psnrs = Vec::new();
+            for &k in &points {
+                let indice = (k - decalage).min(tr.objective.len() - 1);
+                sous.push(((tr.objective[indice] - f_etoile) / (f0 - f_etoile)).max(1e-12));
+                let image = &tr.snapshots.iter().find(|(p, _)| *p == k).map(|(_, x)| x.clone());
+                psnrs.push(image.as_ref().map_or(f64::NAN, |x| qualite(&c, x).1));
+            }
+            println!(
+                "{nom:20} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} (NCC final {:.4}) | {duree:.0} s, {} passes",
+                sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], qualite(&c, &tr.x).0, tr.passes
+            );
+        }
+    }
+    /// Sondes sur les anomalies de `compare_optimizers_on_sta21` : (1) Adam avec des `lr` plus grands (l'optimum était au bord de la grille) ;
+    /// (2) L-BFGS de Burn mis à l'échelle (valeur et gradient divisés par f₀) avec et sans Wolfe. Même protocole et même tableau.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn probe_optimizer_anomalies_on_sta21() {
+        let (atlas, stacks) = stacks_atlas_simules("STA21", 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.01).unwrap();
+        let c = construire_comparaison(&grille, probleme.support(), &atlas, &stacks);
+        let x0 = probleme.initial_guess();
+        let f0 = probleme.evaluate(&x0).value();
+        let f_etoile = probleme.evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x).value();
+        let points = [10, 25, 50, 100];
+        let device = burn::tensor::Device::flex().autodiff();
+        let essais: Vec<(String, Box<dyn Fn() -> optimizers::Trace>)> = vec![
+            ("Adam lr = 100".into(), Box::new(|| optimizers::adam(&probleme, &x0, 100.0, 100, &points, &device))),
+            ("Adam lr = 200".into(), Box::new(|| optimizers::adam(&probleme, &x0, 200.0, 100, &points, &device))),
+            ("Adam lr = 400".into(), Box::new(|| optimizers::adam(&probleme, &x0, 400.0, 100, &points, &device))),
+            ("L-BFGS échelle f₀".into(), Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, f0, 100, &points, &device))),
+            ("L-BFGS Wolfe échelle f₀".into(), Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, f0, 100, &points, &device))),
+        ];
+        println!("{:24} | {:^27} | {:^28}", "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100");
+        for (nom, lancer) in &essais {
+            let tr = lancer();
+            let mut sous = Vec::new();
+            let mut psnrs = Vec::new();
+            for &k in &points {
+                sous.push(((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12));
+                psnrs.push(tr.snapshots.iter().find(|(p, _)| *p == k).map_or(f64::NAN, |(_, x)| qualite(&c, x).1));
+            }
+            println!("{nom:24} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)", sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes);
+        }
+    }
+    /// Sonde de l'explication de l'échec de L-BFGS de Burn (Wolfe, ou mise à l'échelle) : le premier pas vaut `min(1/‖g‖₁, 1) · lr` ; si ce pas est
+    /// trop petit pour modifier `x` en `f32`, l'historique n'est jamais mis à jour. Avec `lr = c · ‖g₀‖₁` le premier pas vaut `c` : on essaie `c = 0,1`
+    /// avec et sans Wolfe, sans mise à l'échelle de l'objectif.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn probe_lbfgs_initial_step_on_sta21() {
+        let (atlas, stacks) = stacks_atlas_simules("STA21", 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.01).unwrap();
+        let c = construire_comparaison(&grille, probleme.support(), &atlas, &stacks);
+        let x0 = probleme.initial_guess();
+        let e0 = probleme.evaluate(&x0);
+        let (f0, g1) = (e0.value(), e0.gradient.iter().map(|v| v.abs()).sum::<f64>());
+        let f_etoile = probleme.evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x).value();
+        println!("‖g₀‖₁ = {g1:.3e}, |g₀|max = {:.3e}", e0.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
+        let points = [10, 25, 50, 100];
+        let device = burn::tensor::Device::flex().autodiff();
+        for (nom, wolfe, facteur) in [("sans Wolfe, premier pas 0,1", false, 0.1), ("Wolfe, premier pas 0,1", true, 0.1), ("Wolfe, premier pas 1", true, 1.0)] {
+            let tr = optimizers::lbfgs(&probleme, &x0, facteur * g1, 10, wolfe, 1.0, 100, &points, &device);
+            let sous: Vec<f64> = points.iter().map(|&k| ((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12)).collect();
+            let psnrs: Vec<f64> = points.iter().map(|&k| tr.snapshots.iter().find(|(p, _)| *p == k).map_or(f64::NAN, |(_, x)| qualite(&c, x).1)).collect();
+            println!("{nom:30} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)", sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes);
         }
     }
 }
