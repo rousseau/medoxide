@@ -175,6 +175,12 @@ impl<'a> ReconstructionProblem<'a> {
 
     /// Valeur de l'objectif et gradient en `x` (grille entière ; les voxels hors du domaine sont ignorés).
     pub fn evaluate(&self, x: &Array3<f64>) -> Evaluation {
+        self.evaluate_with(x, true)
+    }
+
+    /// Comme [`ReconstructionProblem::evaluate`] ; avec `use_data = false`, les pixels `yₖ` sont remplacés par 0, ce qui donne le
+    /// gradient de la partie quadratique seule : `H x` (voir [`ReconstructionProblem::normal_operator`]).
+    fn evaluate_with(&self, x: &Array3<f64>, use_data: bool) -> Evaluation {
         assert_eq!(x.dim(), self.grid.dims, "x doit avoir la forme de la grille");
         // x restreint au domaine, converti en f32 pour l'opérateur (qui accumule en f64)
         let mut restreint = Array3::<f32>::zeros(self.grid.dims);
@@ -195,7 +201,7 @@ impl<'a> ReconstructionProblem<'a> {
                 let mut residu = Array2::<f32>::zeros(coupe.dim());
                 for ((i, j), r) in residu.indexed_iter_mut() {
                     if m[[i, j]] {
-                        *r = sim.values[[i, j]] - coupe.data()[[i, j]];
+                        *r = sim.values[[i, j]] - if use_data { coupe.data()[[i, j]] } else { 0.0 };
                         data += 0.5 * f64::from(*r) * f64::from(*r);
                     }
                 }
@@ -209,6 +215,81 @@ impl<'a> ReconstructionProblem<'a> {
             }
         }
         Evaluation { data, regularization, gradient }
+    }
+}
+
+/// Résultat de [`ReconstructionProblem::conjugate_gradient`].
+#[derive(Debug, Clone)]
+pub struct CgResult {
+    /// Solution (grille entière, nulle hors du domaine).
+    pub x: Array3<f64>,
+    /// Nombre d'itérations effectuées.
+    pub iterations: usize,
+    /// Objectif suivi par récurrence : `iterations + 1` valeurs, de la valeur au départ à la valeur finale.
+    pub objective_history: Vec<f64>,
+    /// Résidu relatif `‖b − H x‖ / ‖b‖` suivi par récurrence : `iterations + 1` valeurs.
+    pub residual_history: Vec<f64>,
+    /// `true` si la tolérance a été atteinte avant `max_iterations`.
+    pub converged: bool,
+}
+
+/// Produit scalaire de deux tableaux de même forme.
+fn dot(a: &Array3<f64>, b: &Array3<f64>) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+impl<'a> ReconstructionProblem<'a> {
+    /// **Produit `H p`** de la partie quadratique `H = Σ AₖᵀMₖAₖ + α GᵀG` avec `p` : le gradient de l'objectif privé de ses données (`y = 0`)
+    /// évalué en `p`. Symétrique et défini positif sur le domaine.
+    pub fn normal_operator(&self, p: &Array3<f64>) -> Array3<f64> {
+        self.evaluate_with(p, false).gradient
+    }
+
+    /// Second membre `b = Σ AₖᵀMₖyₖ` des équations normales `H x = b` : l'opposé du gradient de l'objectif en 0.
+    pub fn right_hand_side(&self) -> Array3<f64> {
+        let zero = Array3::<f64>::zeros(self.grid.dims);
+        -self.evaluate_with(&zero, true).gradient
+    }
+
+    /// **Gradient conjugué** sur les équations normales `H x = b`, à partir de `x0`, jusqu'à ce que `‖b − H x‖ / ‖b‖ ≤ tolerance` ou
+    /// `max_iterations` itérations (une passe `H p` chacune : une simulation et une rétroprojection de toutes les coupes).
+    ///
+    /// Le long d'une itération, l'objectif diminue exactement de `½ · pas · ‖r‖²` : il est suivi sans passe supplémentaire (voir
+    /// [`CgResult::objective_history`]). `x0` hors du domaine est ignoré.
+    pub fn conjugate_gradient(&self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64) -> CgResult {
+        let b = self.right_hand_side();
+        let norme_b = dot(&b, &b).sqrt();
+        let mut x = x0.clone();
+        for (v, &d) in x.iter_mut().zip(self.domain.iter()) {
+            if !d {
+                *v = 0.0;
+            }
+        }
+        let depart = self.evaluate(&x);
+        let mut objectif = depart.value();
+        // r = b − H x = −gradient (le gradient de f en x vaut H x − b)
+        let mut r = -depart.gradient;
+        let mut p = r.clone();
+        let mut rs = dot(&r, &r);
+        let mut historique_f = vec![objectif];
+        let mut historique_r = vec![rs.sqrt() / norme_b];
+        let mut converge = historique_r[0] <= tolerance;
+        let mut iterations = 0;
+        while !converge && iterations < max_iterations {
+            let hp = self.normal_operator(&p);
+            let pas = rs / dot(&p, &hp);
+            x.scaled_add(pas, &p);
+            r.scaled_add(-pas, &hp);
+            objectif -= 0.5 * pas * rs;
+            let rs_nouveau = dot(&r, &r);
+            p = &r + &(&p * (rs_nouveau / rs));
+            rs = rs_nouveau;
+            iterations += 1;
+            historique_f.push(objectif);
+            historique_r.push(rs.sqrt() / norme_b);
+            converge = *historique_r.last().unwrap() <= tolerance;
+        }
+        CgResult { x, iterations, objective_history: historique_f, residual_history: historique_r, converged: converge }
     }
 }
 
@@ -520,23 +601,22 @@ mod tests {
         (grille, stacks)
     }
 
-    /// Critère 1 : valeur et gradient égalent l'algèbre dense. La matrice `A` est construite en appliquant l'opérateur à chaque voxel
-    /// unité du domaine ; `½‖M(Ax − y)‖² + (α/2)‖Gx‖²` et `AᵀM(Ax − y) + α GᵀGx` sont ensuite calculés en matrices denses.
-    #[test]
-    fn objective_matches_dense_linear_algebra() {
-        let t = Temp::new("dense");
-        let (grille, stacks) = petit_probleme(&t);
-        let alpha = 0.7;
-        let probleme = ReconstructionProblem::new(&grille, &stacks, alpha).unwrap();
+
+    /// Le problème sous forme dense : voxels du domaine, matrice `A` (lignes : pixels de toutes les coupes de tous les stacks ; colonnes :
+    /// voxels du domaine, obtenues en appliquant l'opérateur à chaque voxel unité), pixels `y`, masque `m`, paires de voisins du domaine.
+    struct Dense {
+        voxels: Vec<[usize; 3]>,
+        a: DMatrix<f64>,
+        y: Vec<f64>,
+        m: Vec<f64>,
+        paires: Vec<(usize, usize)>,
+    }
+
+    fn systeme_dense(probleme: &ReconstructionProblem, grille: &GridSpec, stacks: &[Stack]) -> Dense {
         let voxels: Vec<[usize; 3]> = probleme.domain().indexed_iter().filter(|(_, &d)| d).map(|((i, j, k), _)| [i, j, k]).collect();
         let n = voxels.len();
-        let hors = probleme.domain().iter().filter(|&&d| !d).count();
-        println!("grille {:?}, {n} voxels dans le domaine, {hors} hors du domaine", grille.dims);
-        assert!(n > 40 && n < 600, "taille du problème dense : {n}");
-        assert!(hors > 100, "il faut des voxels hors du domaine pour éprouver leur exclusion : {hors}");
-        // lignes : (stack, coupe, i, j) ; y et masque dans le même ordre
         let (mut y, mut m) = (Vec::new(), Vec::new());
-        for stack in &stacks {
+        for stack in stacks {
             let masque = stack.brain_mask().unwrap().voxels();
             for coupe in stack.slices() {
                 for i in 0..coupe.dim().0 {
@@ -547,14 +627,13 @@ mod tests {
                 }
             }
         }
-        let lignes = y.len();
-        let mut a = DMatrix::<f64>::zeros(lignes, n);
+        let mut a = DMatrix::<f64>::zeros(y.len(), n);
         for (col, v) in voxels.iter().enumerate() {
             let mut unite = Array3::<f32>::zeros(grille.dims);
             unite[*v] = 1.0;
             let volume = Volume::new(unite, grille.affine).unwrap();
             let mut r = 0;
-            for stack in &stacks {
+            for stack in stacks {
                 for coupe in stack.slices() {
                     let sim = volume.simulate_slice(&coupe, &coupe.psf());
                     for i in 0..coupe.dim().0 {
@@ -566,7 +645,6 @@ mod tests {
                 }
             }
         }
-        // paires de voisins dont les deux voxels sont dans le domaine
         let colonne: std::collections::HashMap<[usize; 3], usize> = voxels.iter().enumerate().map(|(c, v)| (*v, c)).collect();
         let mut paires = Vec::new();
         for (c, v) in voxels.iter().enumerate() {
@@ -578,6 +656,24 @@ mod tests {
                 }
             }
         }
+        Dense { voxels, a, y, m, paires }
+    }
+
+    /// Critère 1 : valeur et gradient égalent l'algèbre dense. La matrice `A` est construite en appliquant l'opérateur à chaque voxel
+    /// unité du domaine ; `½‖M(Ax − y)‖² + (α/2)‖Gx‖²` et `AᵀM(Ax − y) + α GᵀGx` sont ensuite calculés en matrices denses.
+    #[test]
+    fn objective_matches_dense_linear_algebra() {
+        let t = Temp::new("dense");
+        let (grille, stacks) = petit_probleme(&t);
+        let alpha = 0.7;
+        let probleme = ReconstructionProblem::new(&grille, &stacks, alpha).unwrap();
+        let dense = systeme_dense(&probleme, &grille, &stacks);
+        let (voxels, a, y, m, paires) = (dense.voxels, dense.a, dense.y, dense.m, dense.paires);
+        let n = voxels.len();
+        let hors = probleme.domain().iter().filter(|&&d| !d).count();
+        println!("grille {:?}, {n} voxels dans le domaine, {hors} hors du domaine", grille.dims);
+        assert!(n > 40 && n < 600, "taille du problème dense : {n}");
+        assert!(hors > 100, "il faut des voxels hors du domaine pour éprouver leur exclusion : {hors}");
         let h = grille.resolution_mm;
         let mut alea = Alea(77);
         let x_d = DVector::from_fn(n, |_, _| alea.suivant() * 10.0);
@@ -661,5 +757,111 @@ mod tests {
             assert!(matches!(ReconstructionProblem::new(&grille, &stacks, alpha), Err(SvrError::InvalidRegularization)), "{alpha}");
         }
         assert!(ReconstructionProblem::new(&grille, &stacks, 0.0).is_ok());
+    }
+    // ------------------------------------------------------------------ sous-étape 3 : gradient conjugué
+
+    /// Critères 1 à 4 : le gradient conjugué égale la solution directe des équations normales denses `(AᵀMA + α GᵀG) x = AᵀM y` ;
+    /// l'objectif décroît ; la valeur suivie égale `evaluate` ; le résidu final est petit ; `H` est symétrique et égale sa version dense.
+    #[test]
+    fn conjugate_gradient_matches_the_dense_solution() {
+        let t = Temp::new("cg");
+        let (grille, stacks) = petit_probleme(&t);
+        let alpha = 0.7;
+        let probleme = ReconstructionProblem::new(&grille, &stacks, alpha).unwrap();
+        let dense = systeme_dense(&probleme, &grille, &stacks);
+        let (voxels, n) = (&dense.voxels, dense.voxels.len());
+        let h = grille.resolution_mm;
+        // H_d = Aᵀ diag(m) A + α GᵀG et b_d = Aᵀ diag(m) y
+        let masque = DVector::from_vec(dense.m.clone());
+        let a_masquee = DMatrix::from_fn(dense.a.nrows(), n, |r, c| dense.a[(r, c)] * masque[r]);
+        let mut h_d = dense.a.transpose() * &a_masquee;
+        for &(c1, c2) in &dense.paires {
+            let w = alpha / (h * h);
+            h_d[(c1, c1)] += w;
+            h_d[(c2, c2)] += w;
+            h_d[(c1, c2)] -= w;
+            h_d[(c2, c1)] -= w;
+        }
+        let b_d = dense.a.transpose() * DVector::from_vec(dense.y.iter().zip(&dense.m).map(|(y, m)| y * m).collect());
+        let x_dense = h_d.clone().lu().solve(&b_d).expect("H est inversible");
+        let en_plein = |v: &DVector<f64>| {
+            let mut x = Array3::<f64>::zeros(grille.dims);
+            for (c, idx) in voxels.iter().enumerate() {
+                x[*idx] = v[c];
+            }
+            x
+        };
+        let vers_dense = |x: &Array3<f64>| DVector::from_fn(n, |c, _| x[voxels[c]]);
+
+        // H p dense contre normal_operator, et symétrie pᵀHq = qᵀHp
+        let mut alea = Alea(5);
+        let (p, q) = (DVector::from_fn(n, |_, _| alea.suivant() - 0.5), DVector::from_fn(n, |_, _| alea.suivant() - 0.5));
+        let hp = vers_dense(&probleme.normal_operator(&en_plein(&p)));
+        let hq = vers_dense(&probleme.normal_operator(&en_plein(&q)));
+        let ecart_h = (&hp - &h_d * &p).norm() / (&h_d * &p).norm();
+        let (pq, qp) = (q.dot(&hp), p.dot(&hq));
+        println!("H p : écart au produit dense {ecart_h:.2e} ; symétrie : qᵀHp = {pq:.6}, pᵀHq = {qp:.6}");
+        assert!(ecart_h < 1e-5, "{ecart_h:.2e}");
+        assert!((pq - qp).abs() / pq.abs() < 1e-6, "{pq} contre {qp}");
+        // second membre
+        let ecart_b = (vers_dense(&probleme.right_hand_side()) - &b_d).norm() / b_d.norm();
+        assert!(ecart_b < 1e-5, "{ecart_b:.2e}");
+
+        // gradient conjugué depuis l'adjoint normalisé
+        let x0 = probleme.initial_guess();
+        let r = probleme.conjugate_gradient(&x0, 2 * n, 1e-9);
+        let ecart = (vers_dense(&r.x) - &x_dense).norm() / x_dense.norm();
+        let residu_reel = {
+            let e = probleme.evaluate(&r.x);
+            dot(&e.gradient, &e.gradient).sqrt() / b_d.norm()
+        };
+        let f_reel = probleme.evaluate(&r.x).value();
+        println!(
+            "gradient conjugué : {} itérations (convergé : {}), résidu suivi {:.1e}, résidu réel {residu_reel:.1e}, écart à la solution dense {ecart:.2e} ; objectif {:.4} → {:.4} (recalculé {f_reel:.4})",
+            r.iterations,
+            r.converged,
+            r.residual_history.last().unwrap(),
+            r.objective_history[0],
+            r.objective_history.last().unwrap()
+        );
+        assert!(r.converged && r.iterations > 5);
+        assert!(ecart < 1e-4, "écart à la solution dense {ecart:.2e}");
+        assert!(residu_reel <= 1e-3, "résidu réel {residu_reel:.2e}");
+        assert!(r.objective_history.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()), "l'objectif doit décroître");
+        assert!((r.objective_history.last().unwrap() - f_reel).abs() / f_reel.abs() < 1e-6, "{} contre {f_reel}", r.objective_history.last().unwrap());
+        // nul hors du domaine
+        assert!(r.x.indexed_iter().filter(|(idx, _)| !probleme.domain()[*idx]).all(|(_, &v)| v == 0.0));
+    }
+
+    /// Le suivi de l'objectif par récurrence égale l'objectif recalculé à chaque itération (0 à 4), et décroît strictement.
+    #[test]
+    fn conjugate_gradient_objective_tracking_matches_evaluation() {
+        let t = Temp::new("cg_suivi");
+        let (grille, stacks) = petit_probleme(&t);
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
+        let x0 = probleme.initial_guess();
+        let suivi = probleme.conjugate_gradient(&x0, 4, 0.0).objective_history;
+        assert_eq!(suivi.len(), 5);
+        for k in 0..=4 {
+            let r = probleme.conjugate_gradient(&x0, k, 0.0);
+            let reel = probleme.evaluate(&r.x).value();
+            assert!((suivi[k] - reel).abs() / reel.abs() < 1e-6, "itération {k} : suivi {} contre recalculé {reel}", suivi[k]);
+            assert_eq!(r.iterations, k);
+        }
+        assert!(suivi.windows(2).all(|w| w[1] < w[0]), "{suivi:?}");
+    }
+
+    /// Zéro itération : le départ restreint au domaine, avec un historique d'une valeur.
+    #[test]
+    fn conjugate_gradient_with_zero_iterations_returns_the_restricted_start() {
+        let t = Temp::new("cg_zero");
+        let (grille, stacks) = petit_probleme(&t);
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
+        let depart = Array3::<f64>::from_elem(grille.dims, 3.0);
+        let r = probleme.conjugate_gradient(&depart, 0, 1e-12);
+        assert_eq!((r.iterations, r.objective_history.len(), r.residual_history.len()), (0, 1, 1));
+        for (idx, &v) in r.x.indexed_iter() {
+            assert_eq!(v, if probleme.domain()[idx] { 3.0 } else { 0.0 });
+        }
     }
 }

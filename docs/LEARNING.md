@@ -1035,4 +1035,27 @@ voxel est dans le domaine ; gradient non annulé hors du domaine ; régularisati
 
 ---
 
-*(à compléter à la prochaine étape : étape 4a, gradient conjugué)*
+## 2026-10-07 — Le gradient conjugué sur les équations normales (étape 4a, sous-étape 3)
+
+- **Quoi** : `f` est quadratique, donc son minimum annule le gradient : `H x = b`, avec `H = Σ AₖᵀMₖAₖ + α GᵀG` (symétrique, définie positive) et `b = Σ AₖᵀMₖyₖ`. Le gradient conjugué résout ce système **sans former
+  `H`** : il lui suffit du produit `H p`, qui est le gradient de l'objectif privé de ses données (`y = 0`) évalué en `p` ; et `b = −∇f(0)`. Aucun nouvel opérateur : `evaluate` a une variante sans données.
+- **Quoi** : l'algorithme. Résidu `r = b − H x`, direction `p` conjuguée aux précédentes, pas `r·r / p·Hp`, mise à jour de `x` et de `r`. En arithmétique exacte, au plus `n` itérations.
+- **Quoi** : **suivre l'objectif sans le recalculer**. Le long d'une itération, `f` diminue exactement de `½ · pas · ‖r‖²` : l'objectif est suivi sans passe supplémentaire, puis vérifié contre `evaluate`.
+- **Où** : `ReconstructionProblem::{normal_operator, right_hand_side, conjugate_gradient}`, `CgResult` dans `crates/medoxide-svr/src/recon.rs` ; refactorisation du test dense (helper `systeme_dense`).
+
+**Critères** (fixés avant le code) et résultats, sur le problème dense de 202 voxels de domaine :
+- **Solution égale à la solution directe** (LU dense de `AᵀMA + αGᵀG`) : écart **2,7e-8** relatif (critère 1e-4), en **62 itérations** depuis l'adjoint normalisé (tolérance 1e-9 sur le résidu).
+- **Objectif décroissant** à chaque itération ; objectif suivi égal à l'objectif recalculé (393,6804 → 347,7245 ; recalculé 347,7245, écart < 1e-6) ; suivi vérifié aussi aux itérations 0 à 4 par des évaluations indépendantes.
+- **Résidu** réel `‖∇f‖/‖b‖` = **1,0e-8** (critère 1e-3), recalculé par `evaluate` et non estimé par la récurrence.
+- **`H` symétrique** : `qᵀHp = pᵀHq = 0,126863` (à 1e-6) ; `H p` égal au produit dense à 1,8e-8 ; second membre égal au dense.
+- **Zéro itération** : le départ restreint au domaine, historique d'une valeur.
+
+**Vérifié par mutation** (6 sur 7 détectées) : récurrence de l'objectif de signe inversé ; coefficient `β` inversé ; résidu mis à jour avec le mauvais signe ; départ non restreint au domaine ; `H p` calculé avec les données ;
+second membre de signe inversé. La septième (pas calculé avec `r` au lieu de `p`) **survit parce qu'elle est équivalente** : `p_{k-1}` est conjuguée à `p_k`, donc `r_k·Hp_k = p_k·Hp_k` exactement, à l'arrondi près.
+
+**Coût** : chaque itération = une simulation et une rétroprojection de toutes les coupes. Sur l'atlas (120 coupes de 188² pixels) cela ferait ≈ 48 s par itération sur un cœur : l'évaluation sur l'atlas attend la sous-étape de performance
+(pixels limités au masque, `rayon`, fusion des deux rétroprojections).
+
+---
+
+*(à compléter à la prochaine étape : étape 4a, performance puis évaluation sur l'atlas)*
