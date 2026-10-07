@@ -901,4 +901,27 @@ jour des paramètres supprimée.
 
 ---
 
+## 2026-10-07 — Premier essai de recalage sur de vrais stacks (étape 3d, version courte)
+
+- **Quoi** : appliquer `register_slice` à de vraies coupes. Les coupes du stack coronal de 9 sujets sont recalées (pivot P3, pixels du masque
+  Fetal-BET, un niveau de résolution) contre le stack axial, puis contre le stack sagittal, chacun pris comme « volume ». Ce n'est pas un test de
+  justesse (aucune vérité terrain) mais une première mesure de comportement.
+- **Quoi** : un **critère faux, détecté en le mesurant**. J'avais prévu de juger les estimations par leur accord entre les deux références
+  (RMS de l'écart ≤ 0,5 × RMS du mouvement relatif entre coupes). Mesuré : **1,22**. Mais les stacks de référence ont eux-mêmes du mouvement entre
+  leurs coupes, donc deux références produisent deux estimations différentes même si le recalage est parfait : l'accord entre références n'est un
+  test de justesse que sur des références **corrigées du mouvement**. C'est la raison d'être de l'alternance recalage / reconstruction dans les six
+  dépôts. Le critère est consigné comme **non atteint et non diagnostique**, sans être relâché.
+- **Où** : `registration_on_real_stacks_with_two_independent_references` dans `crates/medoxide-svr/src/diff.rs` (ignoré ; `--release --ignored
+  --nocapture`) ; protocole et lecture complète dans `docs/svr/etude-05-estimation-mouvement.md` §9 (local).
+
+**Résultats** (208 coupes par référence) : NCC en hausse pour 100 % des coupes (médianes par sujet 0,34-0,80 → 0,52-0,86) ; correction estimée
+(RMS sur le masque) de médiane 3,1 mm, p90 7,3 mm, max 20 mm, **22 % au-delà de 6 mm** ; mouvement relatif entre coupes de 0,5 mm (sujets calmes) à 7 mm
+(sujets agités) ; accord entre références 1,22 (critère 0,5, indépendance parfaite ≈ 1,41). Les grandes corrections sont tantôt du mouvement réel,
+tantôt la distorsion des références : l'essai ne les distingue pas.
+
+**Décision** : la pyramide n'est pas ajoutée. Prochaines mesures proposées : départs multiples (part de coupes bloquées dans un minimum local), puis une
+première reconstruction pour boucler recalage et reconstruction.
+
+---
+
 *(à compléter à la prochaine étape : étape 3a, pyramide multi-résolution)*

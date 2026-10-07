@@ -1082,4 +1082,152 @@ mod tests {
             }
         }
     }
+    // ------------------------------------------------------------------ essai sur de vrais stacks (étape 3d, version courte)
+
+    /// Premier fichier `sub-X/ses-*/anat/*acq-<acq>_run-1_T2w.nii.gz` du jeu de développement, et le masque cérébral associé.
+    fn stack_reel(sujet: &str, acq: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let racine = std::path::PathBuf::from(format!("{}/../../data/svr/jeu_reel_tru_haste", env!("CARGO_MANIFEST_DIR")));
+        let mut sessions: Vec<_> = std::fs::read_dir(racine.join(sujet)).unwrap().flatten().map(|e| e.path()).collect();
+        sessions.sort();
+        for ses in sessions {
+            let nom = format!("{sujet}_{}_acq-{acq}_run-1", ses.file_name().unwrap().to_string_lossy());
+            let image = ses.join("anat").join(format!("{nom}_T2w.nii.gz"));
+            if image.exists() {
+                let masque = racine.join("derivatives/medx-fetalbet").join(sujet).join(ses.file_name().unwrap()).join("anat").join(format!("{nom}_desc-brain_mask.nii.gz"));
+                return (image, masque);
+            }
+        }
+        panic!("stack introuvable : {sujet} {acq}");
+    }
+
+    /// Résultat du recalage d'une coupe réelle contre une référence.
+    struct CoupeRecalee {
+        ncc_avant: f64,
+        ncc_apres: f64,
+        deplacement_moyen: Vector3<f64>, // moyenne, sur les points du masque, de T(x) − x (mm)
+        deplacement_rms: f64,
+    }
+
+    fn mediane(mut v: Vec<f64>) -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+
+    /// Recale les coupes retenues d'un stack (masque cérébral requis) contre un volume de référence, une par une.
+    fn recaler_stack(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device) -> Vec<CoupeRecalee> {
+        let masque = mobile.brain_mask().unwrap().voxels();
+        retenues
+            .iter()
+            .map(|&k| {
+                let coupe = mobile.slice(k).unwrap();
+                let (nx, ny) = coupe.dim();
+                let donnees = coupe.data();
+                let (mut points, mut intensites) = (Vec::new(), Vec::new());
+                for j in 0..ny {
+                    for i in 0..nx {
+                        if masque[[i, j, k]] {
+                            points.push(coupe.pixel_to_world(i as f64, j as f64));
+                            intensites.push(f64::from(donnees[[i, j]]));
+                        }
+                    }
+                }
+                let pivot = coupe.brain_pivot().unwrap();
+                let echelle = rotation_scale_mm(&points, &pivot).unwrap();
+                let resultat = register_slice(
+                    reference,
+                    tenseur_points(&points, device),
+                    tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+                    echelle,
+                    tenseur_1d(&intensites, device),
+                    tenseur_1d(&vec![1.0; points.len()], device),
+                    CONFIG_RECALAGE,
+                );
+                let deplacements: Vec<Vector3<f64>> = points.iter().map(|x| deplace(&resultat.params, x, &pivot, echelle) - x).collect();
+                CoupeRecalee {
+                    ncc_avant: resultat.ncc_history[0],
+                    ncc_apres: *resultat.ncc_history.last().unwrap(),
+                    deplacement_moyen: deplacements.iter().sum::<Vector3<f64>>() / deplacements.len() as f64,
+                    deplacement_rms: (deplacements.iter().map(|d| d.norm_squared()).sum::<f64>() / deplacements.len() as f64).sqrt(),
+                }
+            })
+            .collect()
+    }
+
+    /// Essai sur vrais stacks : voir `docs/svr/etude-05-estimation-mouvement.md` §9 pour le protocole et les critères. À lancer
+    /// en `--release --ignored --nocapture` (données locales).
+    #[test]
+    #[ignore = "données locales ; lent en debug"]
+    fn registration_on_real_stacks_with_two_independent_references() {
+        let device = device().autodiff();
+        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        let (mut toutes_ncc, mut tous_rms) = ([Vec::new(), Vec::new()], Vec::new());
+        let (mut somme_diff2, mut somme_v2, mut n_v) = (0.0, 0.0, 0usize);
+        let (mut n_coupes, mut n_baisse, mut n_grand) = (0usize, [0usize; 2], 0usize);
+        for sujet in sujets {
+            let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
+            let mut mobile = Stack::read(&chemin_b).unwrap();
+            mobile.set_brain_mask(&masque_b).unwrap();
+            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let max_aire = *aires.iter().max().unwrap();
+            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            let refs: Vec<Vec<CoupeRecalee>> = ["trufiax", "trufisag"]
+                .iter()
+                .map(|acq| {
+                    let (chemin, _) = stack_reel(sujet, acq);
+                    let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
+                    recaler_stack(&mobile, &retenues, &VolumeTensors::new(&volume, &device), &device)
+                })
+                .collect();
+            // M3 : mouvement relatif entre coupes = déplacement moyen moins sa médiane sur les coupes
+            let residus: Vec<Vec<Vector3<f64>>> = refs
+                .iter()
+                .map(|r| {
+                    let med = Vector3::from_fn(|a, _| mediane(r.iter().map(|c| c.deplacement_moyen[a]).collect()));
+                    r.iter().map(|c| c.deplacement_moyen - med).collect()
+                })
+                .collect();
+            let offsets: Vec<Vector3<f64>> = refs.iter().map(|r| Vector3::from_fn(|a, _| mediane(r.iter().map(|c| c.deplacement_moyen[a]).collect()))).collect();
+            let (mut d2, mut v2) = (0.0, 0.0);
+            for k in 0..retenues.len() {
+                d2 += (residus[0][k] - residus[1][k]).norm_squared();
+                v2 += 0.5 * (residus[0][k].norm_squared() + residus[1][k].norm_squared());
+            }
+            somme_diff2 += d2;
+            somme_v2 += v2;
+            n_v += retenues.len();
+            for (r, ncc) in refs.iter().zip(toutes_ncc.iter_mut()) {
+                ncc.extend(r.iter().map(|c| (c.ncc_avant, c.ncc_apres)));
+                tous_rms.extend(r.iter().map(|c| c.deplacement_rms));
+            }
+            n_coupes += refs[0].len() * 2;
+            for (m, r) in refs.iter().enumerate() {
+                n_baisse[m] += r.iter().filter(|c| c.ncc_apres <= c.ncc_avant).count();
+            }
+            n_grand += refs.iter().flatten().filter(|c| c.deplacement_rms > 6.0).count();
+            println!(
+                "{sujet} : {} coupes ; NCC médiane axial {:.2} → {:.2}, sagittal {:.2} → {:.2} ; décalage global (axial / sagittal) {:.1} / {:.1} mm ; mouvement relatif RMS {:.2} / {:.2} mm, écart entre références {:.2} mm",
+                retenues.len(),
+                mediane(refs[0].iter().map(|c| c.ncc_avant).collect()),
+                mediane(refs[0].iter().map(|c| c.ncc_apres).collect()),
+                mediane(refs[1].iter().map(|c| c.ncc_avant).collect()),
+                mediane(refs[1].iter().map(|c| c.ncc_apres).collect()),
+                offsets[0].norm(),
+                offsets[1].norm(),
+                (residus[0].iter().map(|v| v.norm_squared()).sum::<f64>() / retenues.len() as f64).sqrt(),
+                (residus[1].iter().map(|v| v.norm_squared()).sum::<f64>() / retenues.len() as f64).sqrt(),
+                (d2 / retenues.len() as f64).sqrt()
+            );
+        }
+        let rapport = (somme_diff2 / somme_v2).sqrt();
+        let mut rms = tous_rms.clone();
+        rms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| rms[((rms.len() - 1) as f64 * p) as usize];
+        println!("--- {n_v} coupes par référence ({n_coupes} recalages)");
+        for (m, nom) in ["axial", "sagittal"].iter().enumerate() {
+            let hausse = toutes_ncc[m].iter().filter(|(a, b)| b > a).count() as f64 / toutes_ncc[m].len() as f64;
+            println!("M1 référence {nom} : NCC en hausse pour {:.1} % des coupes ({} baisses)", hausse * 100.0, n_baisse[m]);
+        }
+        println!("M2 amplitude du déplacement estimé (RMS sur le masque) : médiane {:.2}, p90 {:.2}, max {:.2} mm ; {:.1} % des recalages > 6 mm", q(0.5), q(0.9), q(1.0), 100.0 * n_grand as f64 / n_coupes as f64);
+        println!("M3 écart entre références / mouvement relatif : {rapport:.2} (critère ≤ 0,5)");
+    }
 }
