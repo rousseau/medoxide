@@ -1173,4 +1173,21 @@ Autres valeurs essayées : Jacobi ω = 0,5 (6,3e-2 / 9,0e-3 / 2,3e-3 / 4,4e-4) ;
 
 ---
 
-*(à compléter à la prochaine étape : boucle recalage / reconstruction, ou régularisations non quadratiques)*
+## 2026-10-07 — Un mouvement propre à chaque coupe (boucle recalage / reconstruction, sous-étape 1)
+
+- **Quoi** : jusqu'ici toutes les coupes d'un stack partageaient l'affine du stack. Une `Slice` porte maintenant un **mouvement rigide** `M` (matrice 4 × 4, repère monde), l'identité par défaut, composé **après** l'affine d'en-tête : sa géométrie est `M · A · T(0, 0, k)`.
+  `Slice::with_motion(M)` rend la même coupe avec ce mouvement (**absolu**, il remplace l'ancien) ; `Slice::motion()` le lit. Le pas des pixels et l'épaisseur ne changent pas ; les positions des pixels, les axes du plan, la normale, le centre, le pivot P3 et la
+  **PSF** (covariance `R Σ Rᵀ`) suivent le mouvement. Aucun code d'appel existant n'est modifié : `Stack::slice` et `Stack::slices` rendent des coupes à mouvement identité.
+- **Où** : `Slice` dans `crates/medoxide-svr/src/lib.rs` (champ `motion`, `with_motion`, `motion`, `colonne_mobile` privée).
+- **Pourquoi la composition à gauche** : le recalage d'une coupe estime un delta `D` appliqué dans le repère monde à la position **courante** de la coupe ; la nouvelle pose est `D · M`. C'est la convention de la pose de la sous-étape 3a (`apply_pose`), de pyrecon (`M_k = T(c) · M(θ, t) · T(−c) · A`) et de nos simulations de mouvement synthétique.
+
+**Critère** (fixé avant) : une coupe avec mouvement est **strictement équivalente** à un stack d'une seule coupe dont l'affine vaut `M · A · T(0, 0, k)`. **Résultat** : positions des pixels à moins de 1e-4 mm, axes et normale à 1e-6, covariance de PSF à 1e-5, et valeurs simulées d'un volume à
+**1,8e-7** (déterminant positif) et **3,0e-8** (déterminant négatif) près, soit l'arrondi `f32` de l'affine écrite dans le fichier. Une translation décale les pixels sans toucher les axes ni la PSF ; une rotation tourne les axes, la normale et la covariance, et conserve les angles.
+
+**Vérifié par mutation** (3 sur 3 détectées) : produit dans le mauvais ordre (`A · M` au lieu de `M · A`) ; axes calculés sans le mouvement ; `with_motion` composé avec l'ancien mouvement au lieu de le remplacer.
+
+**Suite** : reconstruire avec des poses (opérateur, adjoint normalisé, problème), recaler toutes les coupes contre le volume reconstruit, puis la boucle et son évaluation sur l'atlas avec un mouvement synthétique par coupe.
+
+---
+
+*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 2 : reconstruire avec des poses)*

@@ -813,12 +813,12 @@ impl Stack {
     ///
     /// La coupe **emprunte** ce stack : le `'_` de `Slice<'_>` dit qu'elle ne peut pas lui survivre.
     pub fn slice(&self, k: usize) -> Option<Slice<'_>> {
-        (k < self.data.dim().2).then_some(Slice { stack: self, k })
+        (k < self.data.dim().2).then_some(Slice { stack: self, k, motion: Matrix4::identity() })
     }
 
     /// Toutes les coupes, dans l'ordre des `k` croissants.
     pub fn slices(&self) -> impl Iterator<Item = Slice<'_>> {
-        (0..self.data.dim().2).map(move |k| Slice { stack: self, k })
+        (0..self.data.dim().2).map(move |k| Slice { stack: self, k, motion: Matrix4::identity() })
     }
 }
 
@@ -829,12 +829,15 @@ impl Stack {
 /// indice, donc `Copy`.
 ///
 /// Géométrie de la coupe `k` : un point de coordonnées `(i, j)` dans le plan de la coupe a pour
-/// position monde `A · (i, j, k, 1)`, soit la matrice [`Slice::affine`] appliquée à `(i, j, 0, 1)`.
-/// Aucune transformation de mouvement n'est incluse : elle viendra composée **après** cette matrice.
+/// position monde `M · A · (i, j, k, 1)`, soit la matrice [`Slice::affine`] appliquée à `(i, j, 0, 1)`, où `A` est l'affine
+/// d'en-tête du stack et `M` le **mouvement** rigide propre à la coupe (l'identité tant qu'on ne le fixe pas par
+/// [`Slice::with_motion`]) : le mouvement est composé **après** l'affine d'en-tête, dans le repère monde. Le pas des pixels et
+/// l'épaisseur ne changent pas ; les axes, la normale, le pivot et la PSF suivent le mouvement.
 #[derive(Debug, Clone, Copy)]
 pub struct Slice<'a> {
     stack: &'a Stack,
     k: usize,
+    motion: Matrix4<f64>,
 }
 
 impl<'a> Slice<'a> {
@@ -856,16 +859,32 @@ impl<'a> Slice<'a> {
         self.stack.data.index_axis(Axis(2), self.k)
     }
 
-    /// Affine de la coupe : `A · T(0, 0, k)`. Envoie `(i, j, 0, 1)` sur la position monde (mm) du
+    /// Cette coupe avec le mouvement rigide `motion` (matrice 4×4, repère monde) à la place du précédent : sa géométrie devient
+    /// `motion · A · T(0, 0, k)`. Le mouvement est **absolu** par rapport à la géométrie d'en-tête, pas composé avec l'ancien.
+    pub fn with_motion(&self, motion: Matrix4<f64>) -> Slice<'a> {
+        Slice { motion, ..*self }
+    }
+
+    /// Mouvement rigide de la coupe par rapport à la géométrie d'en-tête (l'identité par défaut).
+    pub fn motion(&self) -> &Matrix4<f64> {
+        &self.motion
+    }
+
+    /// Affine de la coupe : `M · A · T(0, 0, k)`. Envoie `(i, j, 0, 1)` sur la position monde (mm) du
     /// voxel `(i, j)` de cette coupe. La translation de `k` pas le long de la 3ᵉ colonne s'ajoute à
-    /// l'origine : `A · T(0,0,k)` a la même partie linéaire que `A`, avec `origine + k · colonne 3`.
+    /// l'origine : `A · T(0,0,k)` a la même partie linéaire que `A`, avec `origine + k · colonne 3` ; le mouvement `M` s'applique ensuite.
     pub fn affine(&self) -> Matrix4<f64> {
         let mut m = *self.stack.affine();
         let k = self.k as f64;
         for r in 0..3 {
             m[(r, 3)] += k * m[(r, 2)];
         }
-        m
+        self.motion * m
+    }
+
+    /// Colonne `c` de la partie linéaire de l'affine du stack, tournée par le mouvement (le mouvement est rigide : la norme est conservée).
+    fn colonne_mobile(&self, c: usize) -> Vector3<f64> {
+        self.motion.fixed_view::<3, 3>(0, 0) * self.stack.affine().fixed_view::<3, 1>(0, c).into_owned()
     }
 
     /// Position monde (RAS+, mm) du point `(i, j)` du plan de la coupe (indices continus permis).
@@ -873,20 +892,16 @@ impl<'a> Slice<'a> {
         (self.affine() * Vector4::new(i, j, 0.0, 1.0)).xyz()
     }
 
-    /// Axes du plan de la coupe : colonnes 0 et 1 de l'affine, normalisées (vecteurs unitaires).
+    /// Axes du plan de la coupe : colonnes 0 et 1 de l'affine (mouvement compris), normalisées (vecteurs unitaires).
     pub fn in_plane_axes(&self) -> [Vector3<f64>; 2] {
-        let a = self.stack.affine();
-        [
-            a.fixed_view::<3, 1>(0, 0).into_owned().normalize(),
-            a.fixed_view::<3, 1>(0, 1).into_owned().normalize(),
-        ]
+        [self.colonne_mobile(0).normalize(), self.colonne_mobile(1).normalize()]
     }
 
     /// Normale de la coupe : **3ᵉ colonne de l'affine, normalisée**, orientée dans le sens des `k`
     /// croissants. Ce n'est volontairement pas le produit vectoriel des axes du plan, qui pointerait
     /// à l'envers pour une affine à déterminant négatif (le cas des stacks du jeu de développement).
     pub fn normal(&self) -> Vector3<f64> {
-        self.stack.affine().fixed_view::<3, 1>(0, 2).into_owned().normalize()
+        self.colonne_mobile(2).normalize()
     }
 
     /// Épaisseur de la coupe en mm : l'espacement entre coupes (NIfTI-1 n'a pas de champ
@@ -2244,6 +2259,138 @@ mod tests {
         for m in 0..2 {
             let min = par_variante[m].iter().cloned().fold(f64::MAX, f64::min);
             assert!(min >= 0.99, "{} : corrélation minimale {min:.4} < 0,99", noms[m]);
+        }
+    }
+    // ------------------------------------------------------------------ mouvement propre à chaque coupe
+
+    /// Mouvement rigide d'essai : rotation (0,2 ; −0,1 ; 0,3 rad) autour du point `c`, puis translation.
+    fn mouvement_exemple() -> (Matrix4<f64>, nalgebra::Rotation3<f64>) {
+        let r = nalgebra::Rotation3::from_euler_angles(0.2, -0.1, 0.3);
+        let c = Vector3::new(3.0, -2.0, 5.0);
+        let t = Vector3::new(1.5, -2.0, 0.7);
+        let mut m = Matrix4::identity();
+        m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(c + t - r * c));
+        (m, r)
+    }
+
+    /// Les 3 premières lignes d'une affine, en `f32`, pour un en-tête NIfTI.
+    fn lignes_depuis(a: &Matrix4<f64>) -> [[f32; 4]; 3] {
+        std::array::from_fn(|r| std::array::from_fn(|c| a[(r, c)] as f32))
+    }
+
+    /// Stack de 4 × 3 × 2 voxels, oblique, de pas `(sx, 1,5 ; 2,5)` (`sx < 0` : déterminant négatif).
+    fn stack_oblique(t: &Temp, sx: f64) -> Stack {
+        let r = nalgebra::Rotation3::from_euler_angles(0.4, -0.3, 0.7);
+        let lineaire = r.matrix() * Matrix3::from_diagonal(&Vector3::new(sx, 1.5, 2.5));
+        let mut a = Matrix4::identity();
+        a.fixed_view_mut::<3, 3>(0, 0).copy_from(&lineaire);
+        a.fixed_view_mut::<3, 1>(0, 3).copy_from(&Vector3::new(10.0, -5.0, 7.0));
+        stack_synthetique(t, lignes_depuis(&a), [sx.abs() as f32, 1.5, 2.5])
+    }
+
+    #[test]
+    fn slice_with_identity_motion_is_unchanged() {
+        let t = Temp::new("mvt_identite");
+        let s = stack_oblique(&t, 1.0);
+        let c = s.slice(1).unwrap();
+        let m = c.with_motion(Matrix4::identity());
+        assert_eq!(c.affine(), m.affine());
+        assert_eq!(c.in_plane_axes(), m.in_plane_axes());
+        assert_eq!(c.normal(), m.normal());
+        assert_eq!(c.psf().covariance(), m.psf().covariance());
+        assert_eq!(*c.motion(), Matrix4::identity());
+        assert_eq!(c.pixel_to_world(2.0, 1.0), m.pixel_to_world(2.0, 1.0));
+        // `with_motion` est absolu : le second mouvement remplace le premier, il ne se compose pas avec lui
+        let (m1, _) = mouvement_exemple();
+        let mut m2 = Matrix4::identity();
+        m2[(0, 3)] = 4.0;
+        assert_eq!(c.with_motion(m1).with_motion(m2).affine(), c.with_motion(m2).affine());
+    }
+
+    #[test]
+    fn translation_motion_shifts_pixels_and_keeps_axes_and_psf() {
+        let t = Temp::new("mvt_translation");
+        let s = stack_oblique(&t, 1.0);
+        let c = s.slice(1).unwrap();
+        let decalage = Vector3::new(1.5, -2.0, 0.7);
+        let mut m = Matrix4::identity();
+        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
+        let p = c.with_motion(m);
+        for (i, j) in [(0.0, 0.0), (3.0, 2.0), (1.5, 0.5)] {
+            assert!((p.pixel_to_world(i, j) - (c.pixel_to_world(i, j) + decalage)).norm() < 1e-12);
+        }
+        assert_eq!(p.in_plane_axes(), c.in_plane_axes());
+        assert_eq!(p.normal(), c.normal());
+        assert!((p.psf().covariance() - c.psf().covariance()).norm() < 1e-14);
+        assert_eq!(p.thickness(), c.thickness());
+        assert_eq!(p.dim(), c.dim());
+    }
+
+    #[test]
+    fn rotation_motion_rotates_axes_normal_pivot_and_psf() {
+        for sx in [1.0, -1.0] {
+            let t = Temp::new(&format!("mvt_rotation_{}", sx as i32));
+            let s = stack_oblique(&t, sx);
+            let c = s.slice(1).unwrap();
+            let (m, r) = mouvement_exemple();
+            let p = c.with_motion(m);
+            let [u, v] = c.in_plane_axes();
+            let [up, vp] = p.in_plane_axes();
+            assert!((up - r * u).norm() < 1e-12 && (vp - r * v).norm() < 1e-12, "sx = {sx}");
+            assert!((p.normal() - r * c.normal()).norm() < 1e-12);
+            // un mouvement rigide conserve les angles : la normale reste dans le même sens relatif aux axes du plan
+            assert!((up.dot(&vp) - u.dot(&v)).abs() < 1e-12);
+            // la covariance de la PSF tourne : R Σ Rᵀ
+            let attendue = r.matrix() * c.psf().covariance() * r.matrix().transpose();
+            assert!((p.psf().covariance() - attendue).norm() < 1e-12);
+            // les positions suivent M ; le pivot P3 (barycentre du masque) aussi
+            let monde = (m * c.pixel_to_world(2.0, 1.0).push(1.0)).xyz();
+            assert!((p.pixel_to_world(2.0, 1.0) - monde).norm() < 1e-12);
+            assert!((p.geometric_center() - (m * c.geometric_center().push(1.0)).xyz()).norm() < 1e-12);
+        }
+    }
+
+    /// Une coupe avec mouvement est strictement équivalente à un stack d'une seule coupe dont l'affine est `M · A · T(0, 0, k)` : même
+    /// géométrie, même PSF et même simulation d'un volume (déterminants positif et négatif).
+    #[test]
+    fn posed_slice_equals_a_stack_with_the_moved_affine() {
+        for sx in [1.0, -1.0] {
+            let t = Temp::new(&format!("mvt_equiv_{}", sx as i32));
+            let s = stack_oblique(&t, sx);
+            let (m, _) = mouvement_exemple();
+            let posee = s.slice(1).unwrap().with_motion(m);
+            // le stack de référence : une coupe, d'affine = affine de la coupe avec mouvement
+            let chemin = t.fichier("deplace.nii.gz");
+            let h = en_tete(lignes_depuis(&posee.affine()), [sx.abs() as f32, 1.5, 2.5], 1);
+            WriterOptions::new(&chemin).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((4, 3, 1), 1.0)).unwrap();
+            let deplace = Stack::read(&chemin).unwrap();
+            let ref_c = deplace.slice(0).unwrap();
+            for (i, j) in [(0.0, 0.0), (3.0, 2.0), (1.5, 0.5)] {
+                assert!((posee.pixel_to_world(i, j) - ref_c.pixel_to_world(i, j)).norm() < 1e-4, "sx = {sx}");
+            }
+            let ([u, v], [ur, vr]) = (posee.in_plane_axes(), ref_c.in_plane_axes());
+            assert!((u - ur).norm() < 1e-6 && (v - vr).norm() < 1e-6 && (posee.normal() - ref_c.normal()).norm() < 1e-6);
+            assert!((posee.psf().covariance() - ref_c.psf().covariance()).norm() < 1e-5);
+            // simulation d'un volume : mêmes valeurs
+            let mut graine = 12345u64;
+            let data = Array3::from_shape_fn((14, 14, 14), |_| {
+                graine ^= graine << 13;
+                graine ^= graine >> 7;
+                graine ^= graine << 17;
+                (graine >> 40) as f32 / (1u64 << 24) as f32
+            });
+            let mut a = Matrix4::identity();
+            a[(0, 3)] = -2.0;
+            a[(1, 3)] = -18.0;
+            a[(2, 3)] = 0.0;
+            let volume = Volume::new(data, a).unwrap();
+            let (sim_posee, sim_ref) = (volume.simulate_slice(&posee, &posee.psf()), volume.simulate_slice(&ref_c, &ref_c.psf()));
+            let pire = sim_posee.values.iter().zip(sim_ref.values.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            let couvert = sim_ref.coverage.iter().filter(|&&c| c > 0.0).count();
+            println!("sx = {sx} : {couvert} pixels couverts sur 12 ; écart max des valeurs simulées {pire:.1e}");
+            assert!(couvert >= 6, "le cas de test doit couvrir des pixels : {couvert}");
+            assert!(pire < 1e-3, "sx = {sx} : {pire}");
         }
     }
 }
