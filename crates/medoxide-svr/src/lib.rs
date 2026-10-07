@@ -276,14 +276,18 @@ impl Volume {
     /// dans le volume (`W = 0` : aucun échantillon dans la grille). C'est la matrice creuse `C` de l'opérateur,
     /// produite ligne par ligne sans jamais être stockée.
     ///
-    /// Les décalages de la PSF sont convertis une fois en indices de voxel (partie linéaire de l'inverse).
-    fn for_each_pixel(&self, coupe: &Slice, psf: &Psf, mut f: impl FnMut(usize, usize, &[([usize; 3], f64)], f64)) {
+    /// Les décalages de la PSF sont convertis une fois en indices de voxel (partie linéaire de l'inverse). Avec `masque`, seuls les pixels
+    /// du masque sont parcourus (le coût est proportionnel à leur nombre).
+    fn for_each_pixel(&self, coupe: &Slice, psf: &Psf, masque: Option<ArrayView2<bool>>, mut f: impl FnMut(usize, usize, &[([usize; 3], f64)], f64)) {
         let (nx, ny) = coupe.dim();
         let lineaire = self.inverse.fixed_view::<3, 3>(0, 0).into_owned();
         let decalages: Vec<Vector3<f64>> = psf.samples().iter().map(|e| lineaire * e.offset).collect();
         let mut coefs: Vec<([usize; 3], f64)> = Vec::with_capacity(8 * decalages.len());
         for j in 0..ny {
             for i in 0..nx {
+                if masque.as_ref().is_some_and(|m| !m[[i, j]]) {
+                    continue; // pixel hors du masque : ni coefficients ni appel de `f`
+                }
                 coefs.clear();
                 let centre = self.voxel_coordinates(&coupe.pixel_to_world(i as f64, j as f64));
                 for (e, d) in psf.samples().iter().zip(&decalages) {
@@ -302,9 +306,23 @@ impl Volume {
     /// une coupe d'un volume constant est constante). Aucun mouvement n'est appliqué : la coupe est à sa pose
     /// d'acquisition ([`Slice::affine`]).
     pub fn simulate_slice(&self, coupe: &Slice, psf: &Psf) -> SimulatedSlice {
+        self.simulate_impl(coupe, psf, None)
+    }
+
+    /// Comme [`Volume::simulate_slice`], mais seuls les pixels de `masque` sont simulés : les autres valent 0 (valeur et couverture).
+    /// Le coût est proportionnel au nombre de pixels du masque.
+    ///
+    /// # Panics
+    /// Si `masque` n'a pas la forme de la coupe.
+    pub fn simulate_slice_masked(&self, coupe: &Slice, psf: &Psf, masque: ArrayView2<bool>) -> SimulatedSlice {
+        assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
+        self.simulate_impl(coupe, psf, Some(masque))
+    }
+
+    fn simulate_impl(&self, coupe: &Slice, psf: &Psf, masque: Option<ArrayView2<bool>>) -> SimulatedSlice {
         let mut values = Array2::<f32>::zeros(coupe.dim());
         let mut coverage = Array2::<f32>::zeros(coupe.dim());
-        self.for_each_pixel(coupe, psf, |i, j, coefs, w| {
+        self.for_each_pixel(coupe, psf, masque, |i, j, coefs, w| {
             if w > 0.0 {
                 let somme: f64 = coefs.iter().map(|(idx, c)| c * f64::from(self.data[*idx])).sum();
                 values[[i, j]] = (somme / w) as f32;
@@ -325,11 +343,84 @@ impl Volume {
     pub fn back_project(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, accumulateur: &mut Array3<f64>) {
         assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
         assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
-        self.for_each_pixel(coupe, psf, |i, j, coefs, w| {
+        self.for_each_pixel(coupe, psf, None, |i, j, coefs, w| {
             if w > 0.0 {
                 let part = f64::from(y[[i, j]]) / w;
                 for (idx, c) in coefs {
                     accumulateur[*idx] += c * part;
+                }
+            }
+        });
+    }
+
+    /// Comme [`Volume::back_project`], mais seuls les pixels de `masque` contribuent (coût proportionnel à leur nombre). C'est
+    /// l'adjoint exact de [`Volume::simulate_slice_masked`].
+    ///
+    /// # Panics
+    /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si `accumulateur` n'a pas la forme de la grille.
+    pub fn back_project_masked(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, masque: ArrayView2<bool>, accumulateur: &mut Array3<f64>) {
+        assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
+        assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
+        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        self.for_each_pixel(coupe, psf, Some(masque), |i, j, coefs, w| {
+            if w > 0.0 {
+                let part = f64::from(y[[i, j]]) / w;
+                for (idx, c) in coefs {
+                    accumulateur[*idx] += c * part;
+                }
+            }
+        });
+    }
+
+    /// **Une passe normale** sur les pixels de `masque` : pour chaque pixel, simule la valeur `A x`, forme le résidu `r = A x − y` (avec
+    /// `y = None`, le résidu vaut `A x`, ce qui donne `H x` sans second membre) et le rétroprojette : `accumulateur += Aᵀ(m ⊙ r)`.
+    /// Rend `½ Σ r²`. Les coefficients de chaque pixel, qui sont le coût dominant, ne sont calculés **qu'une fois** pour l'aller et le
+    /// retour, au lieu de deux avec [`Volume::simulate_slice_masked`] suivi de [`Volume::back_project_masked`] (mêmes résultats).
+    ///
+    /// # Panics
+    /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si `accumulateur` n'a pas la forme de la grille.
+    pub fn normal_pass_masked(&self, coupe: &Slice, psf: &Psf, y: Option<ArrayView2<f32>>, masque: ArrayView2<bool>, accumulateur: &mut Array3<f64>) -> f64 {
+        assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
+        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        if let Some(y) = &y {
+            assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
+        }
+        let mut data = 0.0;
+        self.for_each_pixel(coupe, psf, Some(masque), |i, j, coefs, w| {
+            let pixel = y.as_ref().map_or(0.0, |y| y[[i, j]]);
+            if w > 0.0 {
+                let somme: f64 = coefs.iter().map(|(idx, c)| c * f64::from(self.data[*idx])).sum();
+                let r = (somme / w) as f32 - pixel; // même arrondi en f32 que `simulate_slice`
+                data += 0.5 * f64::from(r) * f64::from(r);
+                let part = f64::from(r) / w;
+                for (idx, c) in coefs {
+                    accumulateur[*idx] += c * part;
+                }
+            } else {
+                // couverture nulle : valeur simulée 0, donc résidu −y, sans rétroprojection
+                data += 0.5 * f64::from(pixel) * f64::from(pixel);
+            }
+        });
+        data
+    }
+
+    /// Deux rétroprojections en **une seule passe** sur les pixels de `masque` : `accumulateur_y += Aᵀ(y ⊙ m)` et
+    /// `accumulateur_poids += Aᵀ m`. Les coefficients de chaque pixel ne sont calculés qu'une fois (c'est le coût dominant) : c'est
+    /// ce que demande l'adjoint normalisé (numérateur et dénominateur).
+    ///
+    /// # Panics
+    /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si un accumulateur n'a pas la forme de la grille.
+    pub fn back_project_with_weight(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, masque: ArrayView2<bool>, accumulateur_y: &mut Array3<f64>, accumulateur_poids: &mut Array3<f64>) {
+        assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
+        assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
+        assert_eq!(accumulateur_y.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        assert_eq!(accumulateur_poids.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        self.for_each_pixel(coupe, psf, Some(masque), |i, j, coefs, w| {
+            if w > 0.0 {
+                let (part_y, part_1) = (f64::from(y[[i, j]]) / w, 1.0 / w);
+                for (idx, c) in coefs {
+                    accumulateur_y[*idx] += c * part_y;
+                    accumulateur_poids[*idx] += c * part_1;
                 }
             }
         });

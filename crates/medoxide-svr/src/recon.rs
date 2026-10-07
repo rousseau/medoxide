@@ -3,7 +3,8 @@
 //! Le volume reconstruit est une grille isotrope **alignée sur les axes du monde** (RAS+), qui ne dépend d'aucun stack. Son
 //! étendue est la boîte englobante de tous les voxels de masque cérébral de tous les stacks, plus une marge.
 
-use ndarray::{Array2, Array3, Axis};
+use ndarray::{Array3, ArrayView2, Axis};
+use rayon::prelude::*;
 use nalgebra::{Matrix4, Vector3};
 
 use crate::{Stack, SvrError, Volume};
@@ -70,6 +71,17 @@ pub fn reconstruction_grid(stacks: &[Stack], resolution_mm: f64, margin_mm: f64)
     Ok(GridSpec { affine, dims: (n(0), n(1), n(2)), resolution_mm })
 }
 
+/// Toutes les coupes de tous les stacks, chacune avec son masque 2D (vue sur le masque du stack). Les stacks doivent avoir un masque.
+fn coupes_avec_masque<'a>(stacks: &'a [Stack]) -> Vec<(ArrayView2<'a, bool>, crate::Slice<'a>)> {
+    stacks
+        .iter()
+        .flat_map(|stack| {
+            let masque = stack.brain_mask().expect("le masque a été vérifié").voxels();
+            stack.slices().map(move |coupe| (masque.index_axis(Axis(2), coupe.index()), coupe))
+        })
+        .collect()
+}
+
 /// Résultat de [`normalized_adjoint`].
 #[derive(Debug, Clone)]
 pub struct NormalizedAdjoint {
@@ -90,18 +102,28 @@ pub struct NormalizedAdjoint {
 /// [`SvrError::NoMask`] si un stack n'a pas de masque attaché.
 pub fn normalized_adjoint(grid: &GridSpec, stacks: &[Stack]) -> Result<NormalizedAdjoint, SvrError> {
     let geometrie = grid.zeros();
-    let mut numerateur = Array3::<f64>::zeros(grid.dims);
-    let mut denominateur = Array3::<f64>::zeros(grid.dims);
     for stack in stacks {
-        let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
-        for coupe in stack.slices() {
-            let m: Array2<f32> = masque.voxels().index_axis(Axis(2), coupe.index()).mapv(|v| f32::from(u8::from(v)));
-            let y: Array2<f32> = &coupe.data() * &m;
-            let psf = coupe.psf();
-            geometrie.back_project(&coupe, &psf, y.view(), &mut numerateur);
-            geometrie.back_project(&coupe, &psf, m.view(), &mut denominateur);
-        }
+        stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
     }
+    let coupes = coupes_avec_masque(stacks);
+    // Les coupes sont indépendantes : chaque tâche accumule dans ses propres volumes (écrire dans un volume partagé serait une course aux
+    // données), puis on additionne les volumes.
+    let (numerateur, denominateur) = coupes
+        .par_iter()
+        .fold(
+            || (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)),
+            |(mut num, mut den), (m, coupe)| {
+                // numérateur et dénominateur en une seule passe, sur les pixels du masque : y n'est lu que là
+                geometrie.back_project_with_weight(coupe, &coupe.psf(), coupe.data(), *m, &mut num, &mut den);
+                (num, den)
+            },
+        )
+        .reduce_with(|(mut n1, mut d1), (n2, d2)| {
+            n1 += &n2;
+            d1 += &d2;
+            (n1, d1)
+        })
+        .unwrap_or_else(|| (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)));
     let mut image = Array3::<f32>::zeros(grid.dims);
     let mut support = Array3::<f32>::zeros(grid.dims);
     for ((idx, &d), s) in denominateur.indexed_iter().zip(support.iter_mut()) {
@@ -190,24 +212,23 @@ impl<'a> ReconstructionProblem<'a> {
             }
         }
         let volume = Volume::new(restreint, self.grid.affine).expect("l'affine d'une grille est inversible");
-        let mut gradient = Array3::<f64>::zeros(self.grid.dims);
-        let mut data = 0.0;
-        for stack in self.stacks {
-            let masque = stack.brain_mask().expect("le masque a été vérifié à la construction");
-            for coupe in stack.slices() {
-                let m = masque.voxels().index_axis(Axis(2), coupe.index());
-                let psf = coupe.psf();
-                let sim = volume.simulate_slice(&coupe, &psf);
-                let mut residu = Array2::<f32>::zeros(coupe.dim());
-                for ((i, j), r) in residu.indexed_iter_mut() {
-                    if m[[i, j]] {
-                        *r = sim.values[[i, j]] - if use_data { coupe.data()[[i, j]] } else { 0.0 };
-                        data += 0.5 * f64::from(*r) * f64::from(*r);
-                    }
-                }
-                volume.back_project(&coupe, &psf, residu.view(), &mut gradient);
-            }
-        }
+        // Une passe normale par coupe, en parallèle ; chaque tâche accumule le gradient dans son propre volume, puis on additionne.
+        let dims = self.grid.dims;
+        let (mut gradient, data) = coupes_avec_masque(self.stacks)
+            .par_iter()
+            .fold(
+                || (Array3::<f64>::zeros(dims), 0.0),
+                |(mut g, d), (m, coupe)| {
+                    let pixels = use_data.then(|| coupe.data());
+                    let terme = volume.normal_pass_masked(coupe, &coupe.psf(), pixels, *m, &mut g);
+                    (g, d + terme)
+                },
+            )
+            .reduce_with(|(mut g1, d1), (g2, d2)| {
+                g1 += &g2;
+                (g1, d1 + d2)
+            })
+            .unwrap_or_else(|| (Array3::<f64>::zeros(dims), 0.0));
         let regularization = regularization(x, &self.domain, self.grid.resolution_mm, self.alpha, &mut gradient);
         for (g, &d) in gradient.iter_mut().zip(self.domain.iter()) {
             if !d {
@@ -477,6 +498,49 @@ mod tests {
         // hors support : 0
         assert!(r.image.iter().zip(r.support.iter()).filter(|(_, &s)| s < SUPPORT_MIN).all(|(&v, _)| v == 0.0));
     }
+    /// L'atlas de Gholipour et trois stacks (axial, coronal, sagittal ; pixels 0,8 mm, épaisseur 3,5 mm, légèrement obliques) simulés
+    /// par l'opérateur de l'étape 2, sans mouvement ni bruit. Les stacks sont mis en **cache** dans `data/atlas/sim/` (hors de Git) : la
+    /// simulation (≈ 1 min en release) n'est refaite que si les fichiers manquent. Le masque d'un pixel est « couvert et tissu (> 150) ».
+    fn stacks_atlas_simules() -> (Volume, Vec<Stack>) {
+        let chemin = format!("{}/data/atlas/gholipour/STA21.nii.gz", racine());
+        let atlas = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
+        let dossier = PathBuf::from(format!("{}/data/atlas/sim", racine()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let demi_tour = std::f64::consts::FRAC_PI_2;
+        let specs = [
+            ("axial", Rotation3::from_euler_angles(0.05, -0.04, 0.03)),
+            ("coronal", Rotation3::from_euler_angles(demi_tour + 0.04, 0.03, -0.05)),
+            ("sagittal", Rotation3::from_euler_angles(0.03, demi_tour - 0.04, 0.05)),
+        ];
+        let dims = (188, 188, 40);
+        let stacks = specs
+            .iter()
+            .map(|(nom, r)| {
+                let (image, masque_chemin) = (dossier.join(format!("{nom}.nii.gz")), dossier.join(format!("{nom}_mask.nii.gz")));
+                if !image.exists() || !masque_chemin.exists() {
+                    let affine = affine_centree(r, [0.8, 0.8, 3.5], [93.5, 93.5, 19.5], [0.0, 0.0, 0.0]);
+                    let t = Temp::new(&format!("atlas_{nom}"));
+                    let modele = stack_avec_masque(&t, "modele", &Array3::zeros(dims), &Array3::from_elem(dims, 1u8), &affine, [0.8, 0.8, 3.5]);
+                    let (mut data, mut masque) = (Array3::<f32>::zeros(dims), Array3::<u8>::zeros(dims));
+                    for coupe in modele.slices() {
+                        let sim = atlas.simulate_slice(&coupe, &coupe.psf());
+                        for ((i, j), &v) in sim.values.indexed_iter() {
+                            data[[i, j, coupe.index()]] = v;
+                            masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0);
+                        }
+                    }
+                    let h = en_tete(&affine, [0.8, 0.8, 3.5]);
+                    WriterOptions::new(&image).reference_header(&h).write_nifti(&data).unwrap();
+                    WriterOptions::new(&masque_chemin).reference_header(&h).write_nifti(&masque).unwrap();
+                }
+                let mut stack = Stack::read(&image).unwrap();
+                stack.set_brain_mask(&masque_chemin).unwrap();
+                stack
+            })
+            .collect();
+        (atlas, stacks)
+    }
+
     fn correlation(a: &[f64], b: &[f64]) -> f64 {
         let n = a.len() as f64;
         let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
@@ -498,33 +562,8 @@ mod tests {
     #[test]
     #[ignore = "données locales ; lent en debug"]
     fn normalized_adjoint_on_stacks_simulated_from_the_atlas() {
-        let t = Temp::new("atlas");
-        let chemin = format!("{}/data/atlas/gholipour/STA21.nii.gz", racine());
-        let atlas = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
-        let demi_tour = std::f64::consts::FRAC_PI_2;
-        let specs = [
-            ("axial", Rotation3::from_euler_angles(0.05, -0.04, 0.03)),
-            ("coronal", Rotation3::from_euler_angles(demi_tour + 0.04, 0.03, -0.05)),
-            ("sagittal", Rotation3::from_euler_angles(0.03, demi_tour - 0.04, 0.05)),
-        ];
-        let dims = (188, 188, 40);
-        let stacks: Vec<Stack> = specs
-            .iter()
-            .map(|(nom, r)| {
-                let affine = affine_centree(r, [0.8, 0.8, 3.5], [93.5, 93.5, 19.5], [0.0, 0.0, 0.0]);
-                // une première lecture fournit la géométrie des coupes ; l'opérateur les simule ensuite depuis l'atlas
-                let modele = stack_avec_masque(&t, &format!("{nom}_modele"), &Array3::zeros(dims), &Array3::from_elem(dims, 1u8), &affine, [0.8, 0.8, 3.5]);
-                let (mut data, mut masque) = (Array3::<f32>::zeros(dims), Array3::<u8>::zeros(dims));
-                for coupe in modele.slices() {
-                    let sim = atlas.simulate_slice(&coupe, &coupe.psf());
-                    for ((i, j), &v) in sim.values.indexed_iter() {
-                        data[[i, j, coupe.index()]] = v;
-                        masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0);
-                    }
-                }
-                stack_avec_masque(&t, nom, &data, &masque, &affine, [0.8, 0.8, 3.5])
-            })
-            .collect();
+        let (atlas, stacks) = stacks_atlas_simules();
+        let specs = ["axial", "coronal", "sagittal"];
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let debut = std::time::Instant::now();
         let r = normalized_adjoint(&grille, &stacks).unwrap();
@@ -559,7 +598,7 @@ mod tests {
         };
         println!("{} voxels de comparaison ; dynamique (p99 de l'atlas) {plage:.0}", verite.len());
         println!("adjoint normalisé : NCC {:.4}, PSNR {:.2} dB", correlation(&x0, &verite), psnr(&x0, &verite, plage));
-        for (nom, b) in specs.iter().map(|s| s.0).zip(&bases) {
+        for (nom, b) in specs.iter().zip(&bases) {
             println!("stack {nom:9} seul (trilinéaire) : NCC {:.4}, PSNR {:.2} dB", correlation(b, &verite), psnr(b, &verite, plage));
         }
         assert!(verite.len() > 100_000, "trop peu de voxels de comparaison");
@@ -863,5 +902,114 @@ mod tests {
         for (idx, &v) in r.x.indexed_iter() {
             assert_eq!(v, if probleme.domain()[idx] { 3.0 } else { 0.0 });
         }
+    }
+    /// Banc d'essai de la reconstruction sur l'atlas (3 stacks, 120 coupes) : temps de l'adjoint normalisé, d'une évaluation (valeur et
+    /// gradient) et d'un produit `H p`. À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure de temps sur données locales"]
+    fn bench_reconstruction_on_the_atlas() {
+        let (_atlas, stacks) = stacks_atlas_simules();
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let pixels: usize = stacks.iter().map(|s| s.brain_mask().unwrap().voxels().iter().filter(|&&v| v).count()).sum();
+        println!("{} coupes, {pixels} pixels de masque sur {} ; grille {:?}", stacks.iter().map(|s| s.dim().2).sum::<usize>(), stacks.iter().map(|s| s.data().len()).sum::<usize>(), grille.dims);
+        let t = std::time::Instant::now();
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.1).unwrap();
+        println!("construction (adjoint normalisé compris) : {:.2} s", t.elapsed().as_secs_f64());
+        let x0 = probleme.initial_guess();
+        let t = std::time::Instant::now();
+        let e = probleme.evaluate(&x0);
+        println!("evaluate : {:.2} s (valeur {:.6e})", t.elapsed().as_secs_f64(), e.value());
+        let t = std::time::Instant::now();
+        let hp = probleme.normal_operator(&x0);
+        println!("H p : {:.2} s (|Hp|² {:.6e})", t.elapsed().as_secs_f64(), dot(&hp, &hp));
+    }
+    // ------------------------------------------------------------------ non-régression de la performance
+
+    /// Référence **séquentielle et non optimisée** de [`ReconstructionProblem::evaluate_with`] : tous les pixels de chaque coupe sont
+    /// simulés, puis rétroprojetés en deux passes (`simulate_slice` suivi de `back_project`), sans `rayon` ni masque dans l'opérateur.
+    fn evaluation_de_reference(probleme: &ReconstructionProblem, x: &Array3<f64>, use_data: bool) -> (f64, f64, Array3<f64>) {
+        let mut restreint = Array3::<f32>::zeros(probleme.grid.dims);
+        for (r, (&v, &d)) in restreint.iter_mut().zip(x.iter().zip(probleme.domain.iter())) {
+            if d {
+                *r = v as f32;
+            }
+        }
+        let volume = Volume::new(restreint, probleme.grid.affine).unwrap();
+        let mut gradient = Array3::<f64>::zeros(probleme.grid.dims);
+        let mut data = 0.0;
+        for stack in probleme.stacks {
+            let masque = stack.brain_mask().unwrap();
+            for coupe in stack.slices() {
+                let m = masque.voxels().index_axis(Axis(2), coupe.index());
+                let sim = volume.simulate_slice(&coupe, &coupe.psf());
+                let mut residu = ndarray::Array2::<f32>::zeros(coupe.dim());
+                for ((i, j), r) in residu.indexed_iter_mut() {
+                    if m[[i, j]] {
+                        *r = sim.values[[i, j]] - if use_data { coupe.data()[[i, j]] } else { 0.0 };
+                        data += 0.5 * f64::from(*r) * f64::from(*r);
+                    }
+                }
+                volume.back_project(&coupe, &coupe.psf(), residu.view(), &mut gradient);
+            }
+        }
+        let reg = regularization(x, &probleme.domain, probleme.grid.resolution_mm, probleme.alpha, &mut gradient);
+        for (g, &d) in gradient.iter_mut().zip(probleme.domain.iter()) {
+            if !d {
+                *g = 0.0;
+            }
+        }
+        (data, reg, gradient)
+    }
+
+    /// Critère 1 de la performance : la version optimisée (pixels du masque, passe fusionnée, `rayon`) égale la référence séquentielle non
+    /// optimisée, pour l'objectif complet et pour `H p` (sans données), à 1e-9 relatif près (seul l'ordre des sommes en `f64` change).
+    #[test]
+    fn optimized_evaluation_matches_the_sequential_reference() {
+        let t = Temp::new("perf_eval");
+        let (grille, stacks) = petit_probleme(&t);
+        let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
+        let mut alea = Alea(31);
+        let x = Array3::from_shape_fn(grille.dims, |_| alea.suivant() * 10.0);
+        for use_data in [true, false] {
+            let (data_ref, reg_ref, grad_ref) = evaluation_de_reference(&probleme, &x, use_data);
+            let e = probleme.evaluate_with(&x, use_data);
+            let norme = grad_ref.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let ecart_grad = e.gradient.iter().zip(grad_ref.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / norme;
+            println!("use_data {use_data} : valeur {:.9} (réf {data_ref:.9}) ; gradient : écart max relatif {ecart_grad:.1e}", e.data);
+            assert!((e.data - data_ref).abs() / data_ref.abs() < 1e-9, "{} contre {data_ref}", e.data);
+            assert!((e.regularization - reg_ref).abs() / reg_ref.abs() < 1e-12);
+            assert!(ecart_grad < 1e-9, "{ecart_grad:.2e}");
+        }
+    }
+
+    /// L'adjoint normalisé fusionné et parallèle égale la version à deux passes non masquées, séquentielle.
+    #[test]
+    fn optimized_normalized_adjoint_matches_the_two_pass_reference() {
+        let t = Temp::new("perf_adjoint");
+        let (grille, stacks) = petit_probleme(&t);
+        let geometrie = grille.zeros();
+        let (mut num, mut den) = (Array3::<f64>::zeros(grille.dims), Array3::<f64>::zeros(grille.dims));
+        for stack in &stacks {
+            let masque = stack.brain_mask().unwrap();
+            for coupe in stack.slices() {
+                let m = masque.voxels().index_axis(Axis(2), coupe.index()).mapv(|v| f32::from(u8::from(v)));
+                let y = &coupe.data() * &m;
+                let psf = coupe.psf();
+                geometrie.back_project(&coupe, &psf, y.view(), &mut num);
+                geometrie.back_project(&coupe, &psf, m.view(), &mut den);
+            }
+        }
+        let r = normalized_adjoint(&grille, &stacks).unwrap();
+        let mut pire = 0.0_f64;
+        for (idx, &s) in r.support.indexed_iter() {
+            assert!((f64::from(s) - den[idx]).abs() <= 1e-6 * den[idx].abs().max(1e-12), "support {s} contre {}", den[idx]);
+            if den[idx] as f32 >= SUPPORT_MIN {
+                pire = pire.max((f64::from(r.image[idx]) - num[idx] / den[idx]).abs() / (num[idx] / den[idx]).abs().max(1e-9));
+            } else {
+                assert_eq!(r.image[idx], 0.0);
+            }
+        }
+        println!("adjoint normalisé : écart relatif max {pire:.1e}");
+        assert!(pire < 1e-6, "{pire:.2e}");
     }
 }

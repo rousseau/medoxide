@@ -7,6 +7,7 @@ edition.workspace = true
 medoxide-core = { path = "../medoxide-core" }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
+rayon = { workspace = true }
 # Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).
 burn = { workspace = true, features = ["autodiff", "optim"] }
 

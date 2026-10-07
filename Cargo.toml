@@ -20,6 +20,8 @@ ureq = "3"
 sha2 = "0.11"
 # Matrices de taille fixe (affines 4x4, rotations) pour la géométrie des coupes du SVR.
 nalgebra = "0.35"
+# Parallélisme de données (boucles sur les coupes) : l'opérateur d'acquisition et son adjoint, écrits à la main sur `ndarray`.
+rayon = "1"
 
 [workspace.package]
 version = "0.1.0"

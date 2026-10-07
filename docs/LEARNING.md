@@ -1058,4 +1058,38 @@ second membre de signe inversé. La septième (pas calculé avec `r` au lieu de 
 
 ---
 
-*(à compléter à la prochaine étape : étape 4a, performance puis évaluation sur l'atlas)*
+## 2026-10-07 — Performance de l'opérateur : masque, passe fusionnée, `rayon` (étape 4a, sous-étape 4)
+
+- **Quoi** : trois changements, mesurés **séparément** sur l'atlas (3 stacks, 120 coupes de 188² pixels, grille de 98 × 111 × 96) en release : (1) l'opérateur ne parcourt que les **pixels du masque** (140 393 sur
+  4 241 280, soit 3,3 %) ; (2) une **passe fusionnée** : le résidu `A x − y` et sa rétroprojection se calculent pendant que les coefficients du pixel sont en mémoire, au lieu de les générer deux fois (aller et retour), et
+  l'adjoint normalisé fait numérateur et dénominateur en une passe ; (3) **`rayon`** répartit les coupes sur les 12 cœurs.
+- **Quoi** : **`rayon`** et la sûreté de Rust. `par_iter()` remplace `iter()` et répartit les éléments sur un pool de fils avec « vol de travail ». Toutes les coupes écrivent dans le même volume, et Rust interdit ces
+  écritures concurrentes sans protection (course aux données, refusée à la compilation). Schéma `fold` puis `reduce_with` : chaque tâche accumule dans **son propre volume**, puis on additionne les volumes (comme les
+  accumulateurs par tâche de SVRTK).
+- **Où** : `Volume::{simulate_slice_masked, back_project_masked, normal_pass_masked, back_project_with_weight}` dans `lib.rs` ; `coupes_avec_masque`, parallélisation de `normalized_adjoint` et de `evaluate_with` dans `recon.rs` ;
+  dépendance `rayon` (workspace et crate `medoxide-svr`).
+
+**Mesures** (release, atlas) :
+
+| | départ | masque + passe fusionnée | + `rayon` | gain total |
+|---|---|---|---|---|
+| adjoint normalisé | 19,05 s | 1,76 s | **0,26 s** | 73× |
+| `evaluate` | 19,43 s | 3,26 s | **0,26 s** | 75× |
+| `H p` | 19,29 s | 3,24 s | **0,29 s** | 66× |
+
+Le critère fixé avant (une application de `H p` en moins de 5 s) est dépassé d'un facteur 17 ; 60 itérations de gradient conjugué coûteraient ≈ 18 s. **Mon estimation a priori était fausse** : j'attendais 30× du masque (96,7 % de pixels en
+moins) et j'ai mesuré 6× ; le coût par pixel est dominé par la génération de ses ≈ 5 000 coefficients, faite deux fois, et la fusion plus `rayon` rattrapent le reste. Les pixels hors du masque étaient bon marché (beaucoup tombaient hors de la
+grille, sans coefficient).
+
+**Non-régression** (critère 1, fixé avant) : l'objectif et le gradient optimisés égalent une **référence séquentielle non optimisée** (tous les pixels, deux passes, sans `rayon`) à **2,2e-15** relatif (objectif complet) et
+**5,1e-15** (`H p`, sans données) ; l'adjoint normalisé égale la version à deux passes à 5,6e-8 (arrondi `f32` de l'image). Sur l'atlas, l'adjoint normalisé rend toujours **NCC 0,8832 et 20,00 dB**, valeurs d'avant
+l'optimisation. Les tests d'avant (algèbre dense à 6e-8, gradient conjugué) passent tous.
+
+**Vérifié par mutation** (6 sur 6 détectées) : réduction de `evaluate` sans le gradient de la deuxième tâche (rayon divise bien le travail même sur un petit problème) ; résidu de la passe fusionnée de signe inversé ; masque inversé dans le
+parcours des pixels ; réduction de l'adjoint normalisé sans le dénominateur ; `H p` calculé avec les données ; passe fusionnée sans masque.
+
+**Reste à faire sur le coût** : à 0,5 mm la grille compte ≈ 4,1 fois plus de voxels (accumulateurs de 84 Mo par tâche pour un vrai sujet) ; la régularisation (boucles sur la grille entière) est encore séquentielle.
+
+---
+
+*(à compléter à la prochaine étape : étape 4a, évaluation sur l'atlas)*
