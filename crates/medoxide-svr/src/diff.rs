@@ -7,7 +7,7 @@
 use burn::module::{Module, Param};
 use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
-use nalgebra::Vector3;
+use nalgebra::{Matrix4, Rotation3, Vector3};
 
 use crate::Volume;
 
@@ -358,6 +358,32 @@ pub fn register_slice_robust(
         }
     }
     meilleur
+}
+
+/// Matrice 4 × 4 d'une pose `params = (φx, φy, φz, tx, ty, tz)` autour de `pivot` : `x ↦ c + R(ω) (x − c) + t` avec `ω = φ / rotation_scale_mm`.
+/// C'est exactement la transformation de [`apply_pose`], en `f64` : elle sert à composer le delta estimé avec la pose courante d'une coupe.
+pub fn pose_to_matrix(params: &[f64; 6], pivot: &Vector3<f64>, rotation_scale_mm: f64) -> Matrix4<f64> {
+    let omega = Vector3::new(params[0], params[1], params[2]) / rotation_scale_mm;
+    let t = Vector3::new(params[3], params[4], params[5]);
+    let r = Rotation3::from_scaled_axis(omega);
+    let mut m = Matrix4::identity();
+    m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+    m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(pivot + t - r * pivot));
+    m
+}
+
+impl RegistrationConfig {
+    /// Réglages par défaut du recalage d'une coupe : pas 0,3 mm, 150 itérations, pas constant, départ en pose nulle (retenus à la sous-étape 5
+    /// de l'étape 3a : les cinq combinaisons essayées donnaient le même minimum).
+    pub const DEFAULT: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0, initial: [0.0; 6] };
+}
+
+impl RobustConfig {
+    /// Recalage robuste par défaut : `RegistrationConfig::DEFAULT`, relance depuis 6 départs dans ±5 mm si la NCC finale est inférieure à
+    /// `suspect_ncc`, graine 8675309 (celle du diagnostic). Le seuil dépend du montage : voir [`RobustConfig::suspect_ncc`].
+    pub fn new(suspect_ncc: f64) -> RobustConfig {
+        RobustConfig { base: RegistrationConfig::DEFAULT, suspect_ncc, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309 }
+    }
 }
 
 /// Constante ajoutée sous la racine de [`ncc`] : une coupe constante ou sans pixel valide a une variance nulle, donc
@@ -1601,5 +1627,35 @@ mod tests {
         println!("simple : TRE {tre_simple:.2} mm, NCC {ncc_simple:.3} ; robuste : TRE {tre_robuste:.2} mm, NCC {ncc_robuste:.3}");
         assert!(tre_simple > 5.0 && ncc_simple < 0.5, "le cas doit être bloqué en recalage simple");
         assert!(tre_robuste <= 0.5 && ncc_robuste > 0.95, "TRE {tre_robuste}, NCC {ncc_robuste}");
+    }
+    /// `pose_to_matrix` (f64) applique la même transformation que `apply_pose` (tenseurs f32) ; et composer deux matrices revient à appliquer les
+    /// poses l'une après l'autre.
+    #[test]
+    fn pose_matrix_matches_apply_pose_and_composes() {
+        let device = device();
+        let mut alea = Alea(5150);
+        let points: Vec<Vector3<f64>> = (0..50).map(|_| Vector3::new(alea.suivant() * 80.0 - 40.0, alea.suivant() * 80.0 - 40.0, alea.suivant() * 80.0 - 40.0)).collect();
+        let pivot = Vector3::new(3.0, -4.0, 7.0);
+        let echelle = 22.0;
+        let params1 = [2.5, -1.5, 3.0, 1.2, -0.8, 2.0];
+        let params2 = [-1.0, 2.0, 0.5, -0.7, 0.4, 1.1];
+        let (m1, m2) = (pose_to_matrix(&params1, &pivot, echelle), pose_to_matrix(&params2, &pivot, echelle));
+        assert!((m1.fixed_view::<3, 3>(0, 0).determinant() - 1.0).abs() < 1e-12, "rotation propre");
+        let tp = tenseur_points(&points, &device);
+        let tc = tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device);
+        let vers_vec = |t: Tensor<2>| t.into_data().try_to_vec::<f32>().unwrap();
+        let sortie = vers_vec(apply_pose(tp, tc, tenseur_1d(&params1, &device), echelle));
+        let mut pire = 0.0_f64;
+        for (i, x) in points.iter().enumerate() {
+            let m = (m1 * x.push(1.0)).xyz();
+            let t = Vector3::new(f64::from(sortie[3 * i]), f64::from(sortie[3 * i + 1]), f64::from(sortie[3 * i + 2]));
+            pire = pire.max((m - t).norm());
+            // composition : m2 après m1
+            let compose = ((m2 * m1) * x.push(1.0)).xyz();
+            let sequentiel = (m2 * m.push(1.0)).xyz();
+            assert!((compose - sequentiel).norm() < 1e-12);
+        }
+        println!("pose_to_matrix contre apply_pose : écart max {pire:.1e} mm");
+        assert!(pire < 1e-3, "{pire:.2e}");
     }
 }

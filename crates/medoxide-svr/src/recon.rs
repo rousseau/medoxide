@@ -1699,4 +1699,282 @@ mod tests {
             }
         }
     }
+    // ------------------------------------------------------------------ recalage de toutes les coupes
+
+    use crate::align;
+    use crate::diff::{RobustConfig, VolumeTensors};
+
+    /// Erreur de pose de chaque coupe : déplacement quadratique moyen, sur les pixels de masque, entre le mouvement estimé et le mouvement vrai
+    /// (appliqués aux positions d'en-tête). Une valeur par coupe, dans l'ordre des stacks puis des coupes.
+    fn erreurs_de_pose(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses) -> Vec<f64> {
+        let mut erreurs = Vec::new();
+        for (si, stack) in stacks.iter().enumerate() {
+            let masque = stack.brain_mask().unwrap().voxels();
+            for coupe in stack.slices() {
+                let k = coupe.index();
+                let (e, v) = (estimees.get(si, k), vraies.get(si, k));
+                let (mut somme, mut n) = (0.0, 0usize);
+                for ((i, j), &dedans) in masque.index_axis(Axis(2), k).indexed_iter() {
+                    if dedans {
+                        let x = coupe.pixel_to_world(i as f64, j as f64).push(1.0);
+                        somme += ((e * x).xyz() - (v * x).xyz()).norm_squared();
+                        n += 1;
+                    }
+                }
+                erreurs.push(if n > 0 { (somme / n as f64).sqrt() } else { f64::NAN });
+            }
+        }
+        erreurs
+    }
+
+    /// Volume analytique de 40³ voxels de 1 mm : trois blobs gaussiens anisotropes et tournés, sur une enveloppe douce (de la structure dans toutes les directions).
+    fn volume_de_blobs() -> Volume {
+        let blobs = [
+            (Vector3::new(0.0, 0.0, 0.0), [6.0, 4.0, 3.0], [0.3, -0.2, 0.5], 900.0),
+            (Vector3::new(6.0, -4.0, 3.0), [3.0, 5.0, 4.0], [-0.4, 0.1, 0.2], 700.0),
+            (Vector3::new(-5.0, 5.0, -4.0), [4.0, 3.0, 5.0], [0.2, 0.4, -0.3], 600.0),
+        ];
+        let data = Array3::from_shape_fn((40, 40, 40), |(i, j, k)| {
+            let p = Vector3::new(i as f64 - 19.5, j as f64 - 19.5, k as f64 - 19.5);
+            let enveloppe = 120.0 * (-0.5 * p.norm_squared() / (14.0 * 14.0)).exp();
+            let somme: f64 = blobs
+                .iter()
+                .map(|(c, sig, rot, a)| {
+                    let r = Rotation3::from_euler_angles(rot[0], rot[1], rot[2]);
+                    let d = r.inverse() * (p - c);
+                    a * (-0.5 * ((d.x / sig[0]).powi(2) + (d.y / sig[1]).powi(2) + (d.z / sig[2]).powi(2))).exp()
+                })
+                .sum();
+            (enveloppe + somme) as f32
+        });
+        let mut a = Matrix4::identity();
+        for r in 0..3 {
+            a[(r, 3)] = -19.5;
+        }
+        Volume::new(data, a).unwrap()
+    }
+
+    /// Les deux stacks (axial et coronal, 3 coupes de 28 × 28 pixels de 1 mm, épaisseur 3 mm) dont on fixe la géométrie d'en-tête (sans données).
+    fn modeles_de_blobs(t: &Temp) -> Vec<Stack> {
+        [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2, 0.0, 0.0))]
+            .iter()
+            .map(|(nom, r)| {
+                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 1.0], [0.0, 0.0, 0.0]);
+                stack_avec_masque(t, &format!("{nom}_modele"), &Array3::zeros((28, 28, 3)), &Array3::from_elem((28, 28, 3), 1u8), &affine, [1.0, 1.0, 3.0])
+            })
+            .collect()
+    }
+
+    /// Simule depuis `volume` les stacks de `modeles` avec le mouvement vrai `vraies` (par coupe) ; les stacks gardent leur affine d'en-tête.
+    /// Masque d'un pixel : couvert et d'intensité > 3 % du maximum (assez bas pour que chaque coupe ait plus de `MIN_MASK_PIXELS` pixels).
+    fn simuler_blobs(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses) -> Vec<Stack> {
+        let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
+        modeles
+            .iter()
+            .enumerate()
+            .map(|(n, modele)| {
+                let (mut data, mut masque) = (Array3::<f32>::zeros((28, 28, 3)), Array3::<u8>::zeros((28, 28, 3)));
+                for coupe in modele.slices() {
+                    let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
+                    let sim = volume.simulate_slice(&posee, &posee.psf());
+                    for ((i, j), &v) in sim.values.indexed_iter() {
+                        data[[i, j, coupe.index()]] = v;
+                        masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
+                    }
+                }
+                stack_avec_masque(t, &format!("blobs{n}"), &data, &masque, modele.affine(), [1.0, 1.0, 3.0])
+            })
+            .collect()
+    }
+
+    /// Les deux stacks de blobs avec un mouvement vrai aléatoire par coupe dans ± `amplitude` ; rend les stacks et ce mouvement.
+    fn stacks_de_blobs(t: &Temp, volume: &Volume, amplitude: f64, graine: u64) -> (Vec<Stack>, SlicePoses) {
+        let modeles = modeles_de_blobs(t);
+        let vraies = poses_aleatoires(&modeles, amplitude, amplitude, graine);
+        (simuler_blobs(t, volume, &modeles, &vraies), vraies)
+    }
+
+    /// Critère 1 (version analytique, sans bruit, ±2°/±2 mm) : le recalage de toutes les coupes contre le volume de référence retrouve leurs poses :
+    /// chaque erreur de pose est ≤ 1 mm et nettement inférieure à l'erreur de départ ; les poses identité de départ sont bien composées (`D · M`).
+    #[test]
+    fn register_slices_recovers_the_poses_of_an_analytic_volume() {
+        let t = Temp::new("align_blobs");
+        let volume = volume_de_blobs();
+        let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let device = burn::tensor::Device::flex().autodiff();
+        let reference = VolumeTensors::new(&volume, &device);
+        let identite = SlicePoses::identity(&stacks);
+        let depart = erreurs_de_pose(&stacks, &identite, &vraies);
+        let rapport = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
+        let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
+        println!("erreur de départ par coupe {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
+        println!("erreur après recalage      {:?}", apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
+        println!("NCC finales : {:?}", rapport.slices.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+        assert_eq!(rapport.slices.len(), 6);
+        assert!(rapport.slices.iter().all(|r| r.registered && r.runs >= 1));
+        for (d, a) in depart.iter().zip(&apres) {
+            assert!(*a <= 1.0, "erreur après recalage {a} (départ {d})");
+            assert!(a < d, "le recalage doit améliorer la pose : {d} → {a}");
+        }
+        // la correction rapportée est cohérente avec l'amélioration : partant de l'identité, elle vaut à peu près l'erreur de départ
+        for (r, d) in rapport.slices.iter().zip(&depart) {
+            assert!((r.correction_rms_mm - d).abs() < 1.0, "correction {} contre erreur de départ {d}", r.correction_rms_mm);
+        }
+    }
+
+    /// Idempotence et composition : en repartant des poses obtenues, le second passage change très peu les poses (déplacement RMS du second delta
+    /// < 0,3 mm) et ne dégrade pas l'erreur ; en partant de poses vraies perturbées, le recalage compose le delta à la pose courante.
+    #[test]
+    fn register_slices_is_idempotent_and_composes_the_deltas() {
+        let t = Temp::new("align_idem");
+        let volume = volume_de_blobs();
+        let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let device = burn::tensor::Device::flex().autodiff();
+        let reference = VolumeTensors::new(&volume, &device);
+        let config = RobustConfig::new(0.9);
+        let premier = align::register_slices(&stacks, &SlicePoses::identity(&stacks), &reference, config, &device).unwrap();
+        let second = align::register_slices(&stacks, &premier.poses, &reference, config, &device).unwrap();
+        let (e1, e2) = (erreurs_de_pose(&stacks, &premier.poses, &vraies), erreurs_de_pose(&stacks, &second.poses, &vraies));
+        let petits: Vec<f64> = second.slices.iter().map(|r| r.correction_rms_mm).collect();
+        println!("corrections du second passage {:?}", petits.iter().map(|e| (e * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+        assert!(petits.iter().all(|&c| c < 0.3), "le second passage doit changer peu les poses : {petits:?}");
+        assert!(e1.iter().zip(&e2).all(|(a, b)| *b <= a + 0.1), "le second passage ne doit pas dégrader : {e1:?} → {e2:?}");
+        // depuis des poses vraies perturbées (±1°, ±1 mm autour du centre de chaque coupe) : la nouvelle pose est D · M, plus proche de la vérité
+        let perturbees = {
+            let mut p = poses_aleatoires(&stacks, 1.0, 1.0, 5);
+            for (si, stack) in stacks.iter().enumerate() {
+                for k in 0..stack.dim().2 {
+                    let m = *p.get(si, k) * *vraies.get(si, k);
+                    p.set(si, k, m);
+                }
+            }
+            p
+        };
+        let depart = erreurs_de_pose(&stacks, &perturbees, &vraies);
+        let rapport = align::register_slices(&stacks, &perturbees, &reference, config, &device).unwrap();
+        let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
+        println!("depuis des vraies poses perturbées : {:?} → {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
+        // Plancher du modèle : la coupe simulée (avec PSF) ne vaut jamais exactement un échantillonnage ponctuel du volume, d'où quelques dixièmes de mm
+        // d'erreur résiduelle ici. Une coupe déjà à ce niveau (0,52 mm au départ) ne peut pas s'améliorer : on exige donc une amélioration stricte
+        // pour celles qui partent de plus de 1 mm, et pour toutes une erreur finale ≤ 0,7 mm.
+        assert!(apres.iter().all(|a| *a <= 0.7), "{depart:?} → {apres:?}");
+        assert!(apres.iter().zip(&depart).all(|(a, d)| *d <= 1.0 || a < d), "{depart:?} → {apres:?}");
+    }
+
+    /// Une coupe de masque trop petit n'est pas recalée : elle garde exactement sa pose et le rapport la signale ; les autres sont recalées.
+    #[test]
+    fn slices_with_a_tiny_mask_are_skipped_and_reported() {
+        let t = Temp::new("align_petit");
+        let volume = volume_de_blobs();
+        let (stacks, _) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        // masque du stack 0 réduit à un petit disque dans la coupe 1 (≈ 100 pixels) : en dessous de MIN_MASK_PIXELS
+        let mut masque = stacks[0].brain_mask().unwrap().voxels().mapv(u8::from);
+        for i in 0..28 {
+            for j in 0..28 {
+                if (i as f64 - 13.5).powi(2) + (j as f64 - 13.5).powi(2) > 36.0 {
+                    masque[[i, j, 1]] = 0;
+                }
+            }
+        }
+        let sp = stacks[0].spacing();
+        let modifie = stack_avec_masque(&t, "petit", stacks[0].data(), &masque, stacks[0].affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32]);
+        let stacks2 = vec![modifie, Stack::read(stacks[1].path()).unwrap()];
+        let mut stacks2 = stacks2;
+        let m1 = t.fichier("blobs1_mask.nii.gz");
+        stacks2[1].set_brain_mask(&m1).unwrap();
+        let depart = poses_aleatoires(&stacks2, 1.0, 1.0, 3);
+        let device = burn::tensor::Device::flex().autodiff();
+        let rapport = align::register_slices(&stacks2, &depart, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let ignorees: Vec<(usize, usize)> = rapport.slices.iter().filter(|r| !r.registered).map(|r| (r.stack, r.slice)).collect();
+        println!("coupes non recalées : {ignorees:?}");
+        assert_eq!(ignorees, vec![(0, 1)]);
+        assert_eq!(rapport.poses.get(0, 1), depart.get(0, 1), "la pose d'une coupe non recalée est inchangée");
+        let r = rapport.slices.iter().find(|r| r.stack == 0 && r.slice == 1).unwrap();
+        assert_eq!((r.runs, r.correction_rms_mm), (0, 0.0));
+        assert_ne!(rapport.poses.get(0, 0), depart.get(0, 0), "une coupe recalée change de pose");
+    }
+
+    #[test]
+    fn register_slices_rejects_poses_of_the_wrong_shape_and_missing_masks() {
+        let t = Temp::new("align_erreurs");
+        let volume = volume_de_blobs();
+        let (stacks, _) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let device = burn::tensor::Device::flex().autodiff();
+        let reference = VolumeTensors::new(&volume, &device);
+        let mauvaises = SlicePoses::identity(&stacks[..1]);
+        assert!(matches!(align::register_slices(&stacks, &mauvaises, &reference, RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
+        let sans_masque = vec![Stack::read(stacks[0].path()).unwrap()];
+        assert!(matches!(align::register_slices(&sans_masque, &SlicePoses::identity(&sans_masque), &reference, RobustConfig::new(0.9), &device), Err(SvrError::NoMask(_))));
+    }
+    /// L'ordre de composition compte quand la pose courante est **grande** : (`D · M` et `M · D` diffèrent d'un commutateur, négligeable pour de petits
+    /// mouvements ; il est borné par `2 sin(θ/2) · |t|`, soit ≈ 1,7 mm pour θ = 20° et |t| ≈ 5 mm). Pose courante `M₀` (±20°, ±3 mm par coupe), vraie pose `D_vrai · M₀` avec un delta (±3°, ±5 mm) :
+    /// le recalage depuis `M₀` doit retrouver `D_vrai · M₀`, ce que seule la composition à gauche permet.
+    #[test]
+    fn register_slices_composes_on_the_left_when_the_current_pose_is_large() {
+        let t = Temp::new("align_grande_pose");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs(&t);
+        let m0 = poses_aleatoires(&modeles, 20.0, 3.0, 11);
+        let delta_vrai = poses_aleatoires(&modeles, 3.0, 5.0, 77);
+        let mut vraies = SlicePoses::identity(&modeles);
+        for (si, stack) in modeles.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                vraies.set(si, k, *delta_vrai.get(si, k) * *m0.get(si, k));
+            }
+        }
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let rapport = align::register_slices(&stacks, &m0, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let (depart, apres) = (erreurs_de_pose(&stacks, &m0, &vraies), erreurs_de_pose(&stacks, &rapport.poses, &vraies));
+        println!("pose courante grande : erreur {:?} → {:?} ; coupes non recalées : {}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), rapport.slices.iter().filter(|r| !r.registered).count());
+        assert!(rapport.slices.iter().all(|r| r.registered), "toutes les coupes doivent avoir assez de masque");
+        // l'erreur de départ (contre la vérité) est celle du petit delta ; ce qui est grand, c'est la pose courante M₀ elle-même
+        let sans_correction = erreurs_de_pose(&stacks, &SlicePoses::identity(&stacks), &vraies);
+        assert!(sans_correction.iter().all(|e| *e > 3.0), "la pose courante doit être grande : {sans_correction:?}");
+        assert!(apres.iter().all(|a| *a <= 1.2), "{depart:?} → {apres:?}");
+    }
+    /// ÉVALUATION de `register_slices` (sous-étape 3) sur STA31 avec un mouvement propre à chaque coupe, **l'atlas lui-même comme référence** (cas
+    /// idéal : la plomberie est éprouvée indépendamment de la qualité de la reconstruction). Un passage depuis les poses d'en-tête, puis un second
+    /// (idempotence). Mesures : erreur de pose par coupe (médiane, p90, max, parts ≤ 0,5 mm et ≤ 1 mm), coupes non recalées, durée.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn evaluate_register_slices_on_sta31_with_the_atlas_as_reference() {
+        let device = burn::tensor::Device::flex().autodiff();
+        for amplitude in [2u32, 4, 6] {
+            let (atlas, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", amplitude, 5);
+            let reference = VolumeTensors::new(&atlas, &device);
+            let identite = SlicePoses::identity(&stacks);
+            let depart = erreurs_de_pose(&stacks, &identite, &vraies);
+            let debut = std::time::Instant::now();
+            let premier = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
+            let duree = debut.elapsed().as_secs_f64();
+            let apres = erreurs_de_pose(&stacks, &premier.poses, &vraies);
+            let second = align::register_slices(&stacks, &premier.poses, &reference, RobustConfig::new(0.9), &device).unwrap();
+            let apres2 = erreurs_de_pose(&stacks, &second.poses, &vraies);
+            let stat = |v: &[f64]| {
+                let mut x: Vec<f64> = v.iter().copied().filter(|e| e.is_finite()).collect();
+                x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let part = |seuil: f64| 100.0 * x.iter().filter(|&&e| e <= seuil).count() as f64 / x.len() as f64;
+                (x[x.len() / 2], x[(x.len() as f64 * 0.9) as usize], x[x.len() - 1], part(0.5), part(1.0))
+            };
+            // statistiques séparées : coupes recalées / coupes ignorées (masque trop petit, pose inchangée)
+            let choisir = |v: &[f64], recalee: bool| -> Vec<f64> { v.iter().zip(&premier.slices).filter(|(_, r)| r.registered == recalee).map(|(e, _)| *e).collect() };
+            let (d, a, a2) = (stat(&choisir(&depart, true)), stat(&choisir(&apres, true)), stat(&choisir(&apres2, true)));
+            let ignorees_apres: Vec<f64> = choisir(&apres, false).into_iter().filter(|e| e.is_finite()).collect();
+            let ignorees = premier.slices.iter().filter(|r| !r.registered).count();
+            let relancees = premier.slices.iter().filter(|r| r.runs > 1).count();
+            let moyenne_second = second.slices.iter().filter(|r| r.registered).map(|r| r.correction_rms_mm).sum::<f64>() / second.slices.iter().filter(|r| r.registered).count() as f64;
+            println!("--- mouvement ±{amplitude}°/±{amplitude} mm : {} coupes, dont {ignorees} non recalées (masque < {} pixels) ; {relancees} relancées ; {duree:.0} s", premier.slices.len(), align::MIN_MASK_PIXELS);
+            println!("  coupes RECALÉES ({}) :", premier.slices.len() - ignorees);
+            println!("  départ      : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", d.0, d.1, d.2, d.3, d.4);
+            println!("  1ᵉʳ passage : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", a.0, a.1, a.2, a.3, a.4);
+            println!("  2ᵉ passage  : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} % ; correction moyenne du 2ᵉ passage {moyenne_second:.3} mm", a2.0, a2.1, a2.2, a2.3, a2.4);
+            if !ignorees_apres.is_empty() {
+                let mut x = ignorees_apres.clone();
+                x.sort_by(|p, q| p.partial_cmp(q).unwrap());
+                println!("  coupes IGNORÉES ({}), pose inchangée : erreur médiane {:.2} mm, max {:.2} mm", x.len(), x[x.len() / 2], x[x.len() - 1]);
+            }
+        }
+    }
 }

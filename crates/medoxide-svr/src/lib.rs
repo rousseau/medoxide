@@ -12,6 +12,7 @@
 //!   gauche » : c'est le cas courant, y compris des 96 stacks du jeu de développement) :
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
+pub mod align;
 pub mod diff;
 pub mod optimizers;
 pub mod recon;

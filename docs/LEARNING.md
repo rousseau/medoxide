@@ -1221,4 +1221,26 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
-*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 3 : recaler toutes les coupes)*
+## 2026-10-07 — Recaler toutes les coupes contre un volume (boucle recalage / reconstruction, sous-étape 3)
+
+- **Quoi** : `register_slices` recale **chaque coupe de chaque stack** contre un volume de référence (`VolumeTensors`) avec le recalage robuste déjà validé, et renvoie un nouveau jeu de poses plus un rapport par coupe (`SliceReport` : NCC avant/après, nombre de départs essayés, correction en mm, coupe recalée ou non).
+- **Composer des deltas** : le recalage d'une coupe donne une correction `D` *relative* à la pose courante `M`. La nouvelle pose absolue est `D · M` (la correction s'applique **après** la pose courante, à gauche). Le calcul se fait donc sur la coupe **déjà déplacée** : ses pixels de masque, son pivot (barycentre 3D du masque, lui aussi déplacé) et son échelle de rotation sont ceux de la coupe posée. Avec la composition dans le mauvais ordre (`M · D`), l'erreur reste faible tant que `M` est petite, car les deux ordres diffèrent par un commutateur de l'ordre de `θ·t` ; il faut une grande pose courante pour que la différence soit visible.
+- **Coupes ignorées** : sous `MIN_MASK_PIXELS = 500` pixels de masque, le recalage n'est pas fiable ; la coupe garde sa pose et le rapport la signale (`registered = false`) au lieu de la recaler à l'aveugle. Ce sont surtout des coupes sans cerveau aux extrémités du volume.
+- **Plancher du modèle** : même avec le vrai volume comme référence, l'erreur ne tombe pas à zéro (≈ 0,3 mm) : le modèle de simulation et celui du recalage diffèrent un peu et le bruit s'ajoute. Un test d'idempotence doit donc affirmer « un second passage corrige peu », pas « corrige à zéro ».
+- **Où** : `align.rs` (`register_slices`, `SliceReport`, `AlignmentReport`) ; `pose_to_matrix` dans `diff.rs` (convertit les 6 paramètres en matrice 4 × 4, égale à `apply_pose` à 7e-6 mm et composable).
+
+**Critères** (fixés avant) et résultats :
+1. **Volume analytique connu** : erreurs de pose ramenées de 1,5–2,6 mm à **0,26–0,58 mm** ; un second passage corrige ≤ 0,002 mm.
+2. **Coupes ignorées** : un masque minuscule laisse la pose inchangée et est signalé ; formes de poses incohérentes ou masques manquants refusés par une erreur.
+3. **Composition à gauche** : avec une pose courante de ±20° / 3 mm et un delta de ±3° / 5 mm, erreurs de 0,23 à 1,10 mm (seuil 1,2 mm) ; l'ordre inversé donne jusqu'à 2,14 mm.
+4. **Atlas STA31, mouvement par coupe, 5 % de bruit** (coupes recalées) : à ±2°/±2 mm, médiane **0,33 mm** et **96 %** des coupes à ≤ 1 mm (critères : ≤ 0,5 mm et ≥ 90 %) ; à ±4°/±4 mm, 0,32 mm et 96 % ; à ±6°/±6 mm, 0,33 mm et 90 %, avec des échecs isolés jusqu'à ~22 mm (minima locaux) et un second passage qui corrige encore 0,58 mm en moyenne : l'idempotence n'est **pas** atteinte à cette amplitude. 7 à 16 s par passage pour 120 coupes.
+
+**Vérifié par mutation** : 5 mutants ; 4 détectés (dont l'ordre de composition, détecté seulement après l'ajout du test à grande pose courante), 1 quasi-équivalent (pivot non transporté avec la coupe : erreurs 0,23–0,96 mm contre 0,23–1,10 mm, différence sous le plancher du modèle).
+
+**Limites** : référence idéale (l'atlas) ; seuil de relance τ = 0,9 réglé dans un autre montage, à recalibrer quand la référence sera une reconstruction.
+
+**Suite** : sous-étape 4 : la boucle complète (reconstruire, recaler, composer, répéter) et son évaluation sur l'atlas.
+
+---
+
+*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 4 : la boucle)*
