@@ -924,4 +924,23 @@ première reconstruction pour boucler recalage et reconstruction.
 
 ---
 
+## 2026-10-07 — Diagnostic des minima locaux sur de vrais stacks (étape 3d, diagnostic A)
+
+- **Quoi** : mesurer, sans vérité terrain, si le recalage à un niveau parti de la pose d'en-tête est **bloqué dans un minimum local**. Chaque coupe réelle
+  est recalée depuis la pose nulle et depuis 6 poses tirées dans ±5 mm ; on compare la NCC finale du départ nul au meilleur départ. Un meilleur minimum du
+  coût existe-t-il ailleurs ? (Pas : est-il plus vrai ?)
+- **Quoi** : `RegistrationConfig` reçoit un champ `initial` (pose de départ). Ownership/Rust : la syntaxe `RegistrationConfig { initial: *depart, ..CONFIG_RECALAGE }`
+  (« struct update ») recopie les autres champs d'une constante.
+- **Où** : `multi_start_diagnostic_on_real_stacks`, `recaler_multi_departs` dans `crates/medoxide-svr/src/diff.rs` ; protocole et lecture dans la fiche locale
+  `docs/svr/etude-05-estimation-mouvement.md` §9 bis.
+
+**Résultats** (416 recalages, 9 sujets, 2 références) : meilleur départ meilleur de plus de 0,02 de NCC pour **14,2 %** des coupes (19,0 % à 0,005, 9,6 % à 0,05) ;
+4,6 % des coupes à correction ≤ 3 mm, 13,3 % de 3 à 6 mm, **36,3 % au-delà de 6 mm** ; presque tout vient de 4 sujets agités (S02, S03, S10, S14), les cinq autres
+sont à 0-1 coupe sur 25. Le meilleur minimum est à **9,2 mm** en médiane de celui du départ nul, et un départ sur 7 seulement l'atteint : bassin étroit.
+
+**Règle fixée avant le calcul** : > 20 % → pyramide ou départs multiples ; < 5 % → inutile. **14,2 % tombe entre les deux** : pas de décision automatique,
+présenté à l'utilisateur. Le diagnostic ne dit pas si une pyramide trouverait ces minima.
+
+---
+
 *(à compléter à la prochaine étape : étape 3a, pyramide multi-résolution)*

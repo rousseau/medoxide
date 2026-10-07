@@ -226,6 +226,8 @@ pub struct RegistrationConfig {
     pub iterations: usize,
     /// Facteur multiplicatif du pas à chaque itération (1 : pas constant).
     pub lr_decay: f64,
+    /// Pose de départ `(φx, φy, φz, tx, ty, tz)` ; `[0.0; 6]` (la pose d'en-tête) dans le cas courant.
+    pub initial: [f64; 6],
 }
 
 /// Résultat de [`register_slice`].
@@ -238,7 +240,7 @@ pub struct RegistrationResult {
 }
 
 /// **Recale une coupe** : cherche la pose (delta autour de la pose d'en-tête, départ en pose nulle) qui maximise la NCC avec
-/// le volume, par Adam (Burn) sur le gradient automatique de [`slice_ncc`].
+/// le volume, par Adam (Burn) sur le gradient automatique de [`slice_ncc`]. Le départ est `config.initial`.
 ///
 /// Les tenseurs doivent être sur un `Device` avec autodiff (`Device::...().autodiff()`). Un niveau de résolution seulement : la
 /// pyramide viendra si la capture mesurée l'exige.
@@ -252,7 +254,8 @@ pub fn register_slice(
     config: RegistrationConfig,
 ) -> RegistrationResult {
     let device = points.device();
-    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::zeros([6], &device)) };
+    let depart: Vec<f32> = config.initial.iter().map(|&v| v as f32).collect();
+    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
     let mut optimiseur = AdamConfig::new().init();
     let evaluer = |pose: Tensor<1>| {
         slice_ncc(volume, points.clone(), pivot.clone(), pose, rotation_scale_mm, intensities.clone(), mask.clone())
@@ -1015,7 +1018,7 @@ mod tests {
         Some((tre(e, &[0.0; 6], &pivot, echelle), tre(e, &resultat.params, &pivot, echelle), *resultat.ncc_history.last().unwrap()))
     }
 
-    const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0 };
+    const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0, initial: [0.0; 6] };
 
     /// Série de poses tirées avec une graine, évaluée par `recaler` : (TRE avant, TRE après, NCC finale) par pose.
     fn serie(volume: &Volume, graine: u64, n: usize, degres: f64, mm: f64, bruit: f64, etiquette: &str) -> Vec<(f64, f64, f64)> {
@@ -1229,5 +1232,110 @@ mod tests {
         }
         println!("M2 amplitude du déplacement estimé (RMS sur le masque) : médiane {:.2}, p90 {:.2}, max {:.2} mm ; {:.1} % des recalages > 6 mm", q(0.5), q(0.9), q(1.0), 100.0 * n_grand as f64 / n_coupes as f64);
         println!("M3 écart entre références / mouvement relatif : {rapport:.2} (critère ≤ 0,5)");
+    }
+    /// Résultat d'un recalage d'une coupe depuis un départ donné.
+    struct Depart {
+        ncc: f64,
+        deplacement_rms: f64, // RMS, sur le masque, de T(x) − x
+        distance_au_premier: f64, // RMS de T(x) − T_premier(x) (le premier départ est la pose nulle)
+    }
+
+    /// Recale chaque coupe retenue depuis chacun des `departs` (le premier doit être la pose nulle) ; une `Vec<Depart>` par coupe.
+    fn recaler_multi_departs(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device, departs: &[[f64; 6]]) -> Vec<Vec<Depart>> {
+        let masque = mobile.brain_mask().unwrap().voxels();
+        retenues
+            .iter()
+            .map(|&k| {
+                let coupe = mobile.slice(k).unwrap();
+                let (nx, ny) = coupe.dim();
+                let donnees = coupe.data();
+                let (mut points, mut intensites) = (Vec::new(), Vec::new());
+                for j in 0..ny {
+                    for i in 0..nx {
+                        if masque[[i, j, k]] {
+                            points.push(coupe.pixel_to_world(i as f64, j as f64));
+                            intensites.push(f64::from(donnees[[i, j]]));
+                        }
+                    }
+                }
+                let pivot = coupe.brain_pivot().unwrap();
+                let echelle = rotation_scale_mm(&points, &pivot).unwrap();
+                let (tp, tc, ti, tm) = (
+                    tenseur_points(&points, device),
+                    tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+                    tenseur_1d(&intensites, device),
+                    tenseur_1d(&vec![1.0; points.len()], device),
+                );
+                let mut poses: Vec<[f64; 6]> = Vec::new();
+                let mut sorties: Vec<Depart> = Vec::new();
+                for depart in departs {
+                    let config = RegistrationConfig { initial: *depart, ..CONFIG_RECALAGE };
+                    let r = register_slice(reference, tp.clone(), tc.clone(), echelle, ti.clone(), tm.clone(), config);
+                    let rms_depuis = |autre: &[f64; 6]| {
+                        (points.iter().map(|x| (deplace(&r.params, x, &pivot, echelle) - deplace(autre, x, &pivot, echelle)).norm_squared()).sum::<f64>() / points.len() as f64).sqrt()
+                    };
+                    sorties.push(Depart {
+                        ncc: *r.ncc_history.last().unwrap(),
+                        deplacement_rms: rms_depuis(&[0.0; 6]),
+                        distance_au_premier: poses.first().map_or(0.0, |p0| rms_depuis(p0)),
+                    });
+                    poses.push(r.params);
+                }
+                sorties
+            })
+            .collect()
+    }
+
+    /// Diagnostic A : les recalages à un niveau, partis de la pose d'en-tête, sont-ils bloqués dans un minimum local ? Chaque coupe est
+    /// recalée depuis la pose nulle et depuis 6 poses tirées dans ±5 mm ; on compare la NCC finale du départ nul au meilleur départ.
+    /// À lancer en `--release --ignored --nocapture` (longue : une dizaine de minutes).
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn multi_start_diagnostic_on_real_stacks() {
+        let device = device().autodiff();
+        let mut alea = Alea(8675309);
+        let mut departs = vec![[0.0; 6]];
+        for _ in 0..6 {
+            departs.push(std::array::from_fn(|_| (alea.suivant() * 2.0 - 1.0) * 5.0));
+        }
+        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        // (rms_depuis_zero, gain_ncc, distance entre la pose du meilleur départ et celle du départ nul, nombre de départs à moins de 0,005 du meilleur)
+        let mut lignes: Vec<(f64, f64, f64, usize)> = Vec::new();
+        for sujet in sujets {
+            let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
+            let mut mobile = Stack::read(&chemin_b).unwrap();
+            mobile.set_brain_mask(&masque_b).unwrap();
+            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let max_aire = *aires.iter().max().unwrap();
+            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            for acq in ["trufiax", "trufisag"] {
+                let (chemin, _) = stack_reel(sujet, acq);
+                let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
+                let resultats = recaler_multi_departs(&mobile, &retenues, &VolumeTensors::new(&volume, &device), &device, &departs);
+                let avant = lignes.len();
+                for r in &resultats {
+                    let meilleur = r.iter().enumerate().max_by(|a, b| a.1.ncc.partial_cmp(&b.1.ncc).unwrap()).unwrap();
+                    let proches = r.iter().filter(|d| d.ncc >= meilleur.1.ncc - 0.005).count();
+                    lignes.push((r[0].deplacement_rms, meilleur.1.ncc - r[0].ncc, if meilleur.0 == 0 { 0.0 } else { meilleur.1.distance_au_premier }, proches));
+                }
+                let gains: Vec<f64> = lignes[avant..].iter().map(|l| l.1).collect();
+                println!("{sujet} {acq} : {} coupes ; gain de NCC du meilleur départ : médiane {:.3}, max {:.3} ; > 0,02 pour {} coupes", gains.len(), mediane(gains.clone()), gains.iter().cloned().fold(0.0, f64::max), gains.iter().filter(|&&g| g > 0.02).count());
+            }
+        }
+        let n = lignes.len() as f64;
+        let part = |seuil: f64| lignes.iter().filter(|l| l.1 > seuil).count() as f64 / n * 100.0;
+        println!("--- {} recalages de coupe (9 sujets, 2 références)", lignes.len());
+        println!("part des coupes dont le meilleur départ gagne plus de 0,005 / 0,02 / 0,05 de NCC : {:.1} % / {:.1} % / {:.1} %", part(0.005), part(0.02), part(0.05));
+        println!("gain de NCC : médiane {:.4}, p90 {:.3}, max {:.3}", mediane(lignes.iter().map(|l| l.1).collect()), { let mut g: Vec<f64> = lignes.iter().map(|l| l.1).collect(); g.sort_by(|a, b| a.partial_cmp(b).unwrap()); g[(g.len() as f64 * 0.9) as usize] }, lignes.iter().map(|l| l.1).fold(0.0, f64::max));
+        for (nom, bas, haut) in [("correction ≤ 3 mm", 0.0, 3.0), ("3 à 6 mm", 3.0, 6.0), ("> 6 mm", 6.0, f64::MAX)] {
+            let groupe: Vec<&(f64, f64, f64, usize)> = lignes.iter().filter(|l| l.0 > bas && l.0 <= haut).collect();
+            if groupe.is_empty() { continue; }
+            let part2 = groupe.iter().filter(|l| l.1 > 0.02).count() as f64 / groupe.len() as f64 * 100.0;
+            println!("  {nom} (départ nul) : {} coupes, {:.1} % avec un gain > 0,02", groupe.len(), part2);
+        }
+        let ameliorees: Vec<&(f64, f64, f64, usize)> = lignes.iter().filter(|l| l.1 > 0.02).collect();
+        if !ameliorees.is_empty() {
+            println!("pour les coupes à gain > 0,02 : le meilleur minimum est à {:.1} mm (médiane) de celui du départ nul ; départs à moins de 0,005 du meilleur : médiane {} sur {}", mediane(ameliorees.iter().map(|l| l.2).collect()), { let mut c: Vec<usize> = ameliorees.iter().map(|l| l.3).collect(); c.sort(); c[c.len() / 2] }, departs.len());
+        }
     }
 }
