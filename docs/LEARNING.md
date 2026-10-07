@@ -958,4 +958,28 @@ présenté à l'utilisateur. Le diagnostic ne dit pas si une pyramide trouverait
 
 ---
 
-*(à compléter à la prochaine étape : étape 3a, pyramide multi-résolution)*
+## 2026-10-07 — Recalage robuste : départs multiples sur les coupes suspectes (étape 3a, voie 2)
+
+- **Quoi** : `register_slice_robust`. Un premier recalage depuis la pose d'en-tête ; si sa NCC finale est **inférieure à τ**, on relance depuis `extra_starts` autres poses (tirage uniforme
+  dans ±5 mm, générateur xorshift **déterministe** de graine fixée) et on garde la pose de **NCC finale la plus haute**. Par construction, la NCC rendue n'est jamais inférieure à celle d'un
+  recalage simple. Les départs sont reproductibles : un test vérifie qu'ils redonnent exactement ceux du diagnostic précédent (graine 8675309).
+- **Où** : `RobustConfig`, `RobustResult`, `register_slice_robust`, `departs_deterministes` dans `crates/medoxide-svr/src/diff.rs`.
+- **Le seuil dépend du montage** : τ = 0,64 pour un stack réel pris comme volume (mesuré), mais **0,9** pour le montage synthétique, où un bon recalage donne une NCC d'environ 0,98 (la
+  PSF rend la coupe différente d'un échantillonnage ponctuel) ; il a été fixé **avant** l'évaluation, sur une graine de réglage distincte (succès de NCC finale ≥ 0,969, échecs ≤ 0,78).
+
+**Validité : la meilleure NCC mène-t-elle à la bonne pose ?** (vérité connue, 30 poses par amplitude, graine 1618) : taux de succès (TRE ≤ 0,5 mm) simple → robuste τ = 0,9 : ±3° /mm
+**97 → 100 %** ; ±6 **67 → 97 %** ; ±10 **23 → 63 %** ; ±15 **10 → 20 %**. Le robuste avec τ = 0,9 donne exactement les mêmes taux que le robuste forcé sur toutes les coupes : la détection n'a
+rien perdu. Coût moyen : 1,2 / 3,0 / 5,6 / 6,4 recalages par coupe (les coupes qui échouent sont nombreuses aux grandes amplitudes). Critères (fixés avant) : taux jamais plus bas ✔ ; plus haut à ±10 ✔.
+Limite : au-delà de ±10, les départs de ±5 mm ne suffisent plus (63 % à ±10, 20 % à ±15) ; une pyramide ou une plage de départs plus large restent à étudier.
+
+**Vraies données** (mêmes 416 recalages que le diagnostic, τ = 0,64, 6 départs) : **74 coupes relancées (17,8 %)**, coût moyen **2,07 recalages** ; **49 coupes bloquées sur 59 récupérées
+(83,1 %)** à 0,005 de NCC de leur meilleur départ (critère ≥ 75 % ✔) ; **90,5 %** du gain de NCC total récupéré ; **0** coupe dont la NCC baisse. **Limites** : τ a été choisi sur ces mêmes données
+(la procédure « un sujet de côté » donnait 0,633 à 0,640, très stable, mais l'évaluation n'est pas indépendante) ; « bloquée » est définie par les 7 départs du diagnostic (une meilleure NCC
+n'est pas une preuve de pose plus vraie sur de vrais stacks : la validité est établie sur le synthétique, pas ici).
+
+**Vérifié par mutation** (3 sur 3 détectées) : seuil inversé ; NCC la plus basse gardée ; départs supplémentaires sans leur pose de départ. Cette dernière n'est attrapée que par un test de
+sauvetage (graine 1618, ±6°, 3ᵉ pose : TRE 10,3 mm en simple, 0,18 mm en robuste), ajouté après avoir constaté que le test rapide initial la laissait passer.
+
+---
+
+*(à compléter à la prochaine étape : plusieurs coupes d'un stack, ou première reconstruction)*

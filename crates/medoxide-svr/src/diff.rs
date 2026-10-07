@@ -277,6 +277,89 @@ pub fn register_slice(
     RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
 }
 
+/// Réglages de [`register_slice_robust`].
+#[derive(Debug, Clone, Copy)]
+pub struct RobustConfig {
+    /// Réglages de chaque recalage (le premier part de `base.initial`).
+    pub base: RegistrationConfig,
+    /// Une coupe dont la NCC finale du premier recalage est **inférieure** à ce seuil est dite suspecte (bloquée dans un minimum local)
+    /// et relancée depuis d'autres poses. Dépend du montage : ≈ 0,64 pour un stack réel pris comme volume (mesuré sur 9 sujets, voir la
+    /// fiche d'étude 05), à recalibrer avec une autre référence.
+    pub suspect_ncc: f64,
+    /// Nombre de poses de départ supplémentaires pour une coupe suspecte.
+    pub extra_starts: usize,
+    /// Amplitude (mm) de chaque paramètre des poses de départ : tirage uniforme dans `±amplitude`.
+    pub start_amplitude_mm: f64,
+    /// Graine du tirage (déterministe : mêmes départs pour la même graine).
+    pub seed: u64,
+}
+
+/// Résultat de [`register_slice_robust`].
+#[derive(Debug, Clone, Copy)]
+pub struct RobustResult {
+    /// Meilleure pose trouvée (NCC finale la plus haute).
+    pub params: [f64; 6],
+    /// NCC finale de cette pose.
+    pub ncc: f64,
+    /// NCC finale du premier recalage (celui qui part de `base.initial`).
+    pub first_ncc: f64,
+    /// Nombre de recalages effectués (1 si la coupe n'était pas suspecte).
+    pub runs: usize,
+}
+
+/// `n` poses de départ déterministes : chaque paramètre tiré uniformément dans `±amplitude_mm` par un générateur xorshift64 (le même
+/// que celui des tests, pour que la graine redonne les mêmes poses).
+fn departs_deterministes(n: usize, amplitude_mm: f64, graine: u64) -> Vec<[f64; 6]> {
+    let mut etat = graine;
+    let mut suivant = || {
+        etat ^= etat << 13;
+        etat ^= etat >> 7;
+        etat ^= etat << 17;
+        (etat >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..n).map(|_| std::array::from_fn(|_| (suivant() * 2.0 - 1.0) * amplitude_mm)).collect()
+}
+
+/// **Recalage robuste d'une coupe** : [`register_slice`] depuis `config.base.initial` ; si la NCC finale est inférieure à
+/// `config.suspect_ncc`, relance depuis `config.extra_starts` autres poses et garde la pose de **NCC finale la plus haute**.
+///
+/// La NCC rendue n'est jamais inférieure à celle d'un recalage simple. Elle prouve qu'un meilleur minimum du coût existe, pas que sa
+/// pose soit plus vraie : cette stratégie est validée sur mouvement synthétique (vérité connue) dans les tests.
+pub fn register_slice_robust(
+    volume: &VolumeTensors,
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    intensities: Tensor<1>,
+    mask: Tensor<1>,
+    config: RobustConfig,
+) -> RobustResult {
+    let finale = |r: &RegistrationResult| *r.ncc_history.last().unwrap();
+    let premier = register_slice(volume, points.clone(), pivot.clone(), rotation_scale_mm, intensities.clone(), mask.clone(), config.base);
+    let first_ncc = finale(&premier);
+    let mut meilleur = RobustResult { params: premier.params, ncc: first_ncc, first_ncc, runs: 1 };
+    if first_ncc >= config.suspect_ncc {
+        return meilleur;
+    }
+    for depart in departs_deterministes(config.extra_starts, config.start_amplitude_mm, config.seed) {
+        let essai = register_slice(
+            volume,
+            points.clone(),
+            pivot.clone(),
+            rotation_scale_mm,
+            intensities.clone(),
+            mask.clone(),
+            RegistrationConfig { initial: depart, ..config.base },
+        );
+        meilleur.runs += 1;
+        if finale(&essai) > meilleur.ncc {
+            meilleur.ncc = finale(&essai);
+            meilleur.params = essai.params;
+        }
+    }
+    meilleur
+}
+
 /// Constante ajoutée sous la racine de [`ncc`] : une coupe constante ou sans pixel valide a une variance nulle, donc
 /// `0/0` et un gradient `NaN` ; avec elle, la corrélation vaut 0 et le gradient reste fini. Négligeable devant des
 /// variances d'intensité normales (≥ 1e-4).
@@ -999,36 +1082,38 @@ mod tests {
 
     /// Recale une expérience et rend (TRE avant, TRE après, NCC finale), ou `None` si la coupe a moins de 500 pixels de masque
     /// (elle est sortie du tissu : le recalage serait sans objet, et c'est le cas que le pipeline devra écarter et signaler).
-    fn recaler(volume: &VolumeTensors, e: &Experience, config: RegistrationConfig, device: &Device) -> Option<(f64, f64, f64)> {
+    fn recaler(volume: &VolumeTensors, e: &Experience, config: RegistrationConfig, robuste: Option<RobustConfig>, device: &Device) -> Option<(f64, f64, f64)> {
         let masques: Vec<Vector3<f64>> = e.points.iter().zip(&e.masque).filter(|(_, &m)| m > 0.0).map(|(x, _)| *x).collect();
         if masques.len() < 500 {
             return None;
         }
         let pivot = masques.iter().sum::<Vector3<f64>>() / masques.len() as f64;
         let echelle = rotation_scale_mm(&masques, &pivot).unwrap();
-        let resultat = register_slice(
-            volume,
-            tenseur_points(&e.points, device),
-            tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
-            echelle,
-            tenseur_1d(&e.intensites, device),
-            tenseur_1d(&e.masque, device),
-            config,
-        );
-        Some((tre(e, &[0.0; 6], &pivot, echelle), tre(e, &resultat.params, &pivot, echelle), *resultat.ncc_history.last().unwrap()))
+        let (points, tp, ti, tm) = (tenseur_points(&e.points, device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], device), tenseur_1d(&e.intensites, device), tenseur_1d(&e.masque, device));
+        let (params, ncc) = match robuste {
+            None => {
+                let r = register_slice(volume, points, tp, echelle, ti, tm, config);
+                (r.params, *r.ncc_history.last().unwrap())
+            }
+            Some(cfg) => {
+                let r = register_slice_robust(volume, points, tp, echelle, ti, tm, RobustConfig { base: config, ..cfg });
+                (r.params, r.ncc)
+            }
+        };
+        Some((tre(e, &[0.0; 6], &pivot, echelle), tre(e, &params, &pivot, echelle), ncc))
     }
 
     const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0, initial: [0.0; 6] };
 
     /// Série de poses tirées avec une graine, évaluée par `recaler` : (TRE avant, TRE après, NCC finale) par pose.
-    fn serie(volume: &Volume, graine: u64, n: usize, degres: f64, mm: f64, bruit: f64, etiquette: &str) -> Vec<(f64, f64, f64)> {
+    fn serie(volume: &Volume, graine: u64, n: usize, degres: f64, mm: f64, bruit: f64, robuste: Option<RobustConfig>, etiquette: &str) -> Vec<(f64, f64, f64)> {
         let device = device().autodiff();
         let vt = VolumeTensors::new(volume, &device);
         let mut alea = Alea(graine);
         (0..n)
             .filter_map(|k| {
                 let (omega, t) = mouvement_aleatoire(&mut alea, degres, mm);
-                recaler(&vt, &experience(volume, &omega, &t, bruit, &format!("{etiquette}{k}")), CONFIG_RECALAGE, &device)
+                recaler(&vt, &experience(volume, &omega, &t, bruit, &format!("{etiquette}{k}")), CONFIG_RECALAGE, robuste, &device)
             })
             .collect()
     }
@@ -1047,7 +1132,7 @@ mod tests {
     #[ignore = "lent en debug : lancer avec --release --ignored"]
     fn registration_recovers_motions_in_the_pyrecon_range() {
         let volume = atlas();
-        let res = serie(&volume, 271828, 20, 3.0, 3.0, 0.0, "eval");
+        let res = serie(&volume, 271828, 20, 3.0, 3.0, 0.0, None, "eval");
         let avant = res.iter().map(|r| r.0).sum::<f64>() / res.len() as f64;
         let (succes, mediane, pire) = resume(&res);
         println!("20 poses : TRE moyenne avant {avant:.2} mm ; après : médiane {mediane:.2}, pire {pire:.2} mm ; succès (≤ 0,5 mm) {:.0} %", succes * 100.0);
@@ -1060,7 +1145,7 @@ mod tests {
     #[test]
     fn registration_smoke_test_recovers_two_poses() {
         let volume = atlas();
-        let res = serie(&volume, 271828, 2, 3.0, 3.0, 0.0, "fumee");
+        let res = serie(&volume, 271828, 2, 3.0, 3.0, 0.0, None, "fumee");
         assert_eq!(res.len(), 2);
         for (avant, apres, ncc) in &res {
             println!("TRE {avant:.2} → {apres:.2} mm, NCC finale {ncc:.4}");
@@ -1077,7 +1162,7 @@ mod tests {
         let volume = atlas();
         for bruit in [0.0, 0.1] {
             for amplitude in [3.0, 6.0, 10.0, 15.0, 20.0] {
-                let res = serie(&volume, 1618, 30, amplitude, amplitude, bruit, "capture");
+                let res = serie(&volume, 1618, 30, amplitude, amplitude, bruit, None, "capture");
                 let avant = res.iter().map(|r| r.0).sum::<f64>() / res.len() as f64;
                 let (succes, mediane, pire) = resume(&res);
                 println!("bruit {bruit} ±{amplitude}°/mm : {} coupes sur 30 avec masque ; TRE avant",res.len());
@@ -1340,5 +1425,181 @@ mod tests {
         if !ameliorees.is_empty() {
             println!("pour les coupes à gain > 0,02 : le meilleur minimum est à {:.1} mm (médiane) de celui du départ nul ; départs à moins de 0,005 du meilleur : médiane {} sur {}", mediane(ameliorees.iter().map(|l| l.2).collect()), { let mut c: Vec<usize> = ameliorees.iter().map(|l| l.3).collect(); c.sort(); c[c.len() / 2] }, departs.len());
         }
+    }
+    // ------------------------------------------------------------------ recalage robuste (départs multiples sur coupes suspectes)
+
+    /// Les départs déterministes sont reproductibles, dans la plage, et identiques à ceux du diagnostic (générateur des tests, graine 8675309).
+    #[test]
+    fn deterministic_starts_match_the_diagnostic_starts() {
+        let departs = departs_deterministes(6, 5.0, 8675309);
+        assert_eq!(departs, departs_deterministes(6, 5.0, 8675309));
+        assert_ne!(departs, departs_deterministes(6, 5.0, 8675310));
+        let mut alea = Alea(8675309);
+        for d in &departs {
+            for &v in d {
+                assert!(v.abs() <= 5.0);
+                assert_eq!(v, (alea.suivant() * 2.0 - 1.0) * 5.0, "doit redonner exactement les départs du diagnostic");
+            }
+        }
+    }
+
+    const ROBUSTE_REEL: RobustConfig = RobustConfig { base: CONFIG_RECALAGE, suspect_ncc: 0.64, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309 };
+
+    /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est
+    /// jamais inférieure à celle du premier recalage.
+    #[test]
+    fn robust_registration_only_restarts_suspect_slices_and_never_worsens() {
+        let volume = atlas();
+        let device = device().autodiff();
+        let vt = VolumeTensors::new(&volume, &device);
+        let mut alea = Alea(271828);
+        let (omega, t) = mouvement_aleatoire(&mut alea, 3.0, 3.0);
+        let e = experience(&volume, &omega, &t, 0.0, "robuste");
+        let masques: Vec<Vector3<f64>> = e.points.iter().zip(&e.masque).filter(|(_, &m)| m > 0.0).map(|(x, _)| *x).collect();
+        let pivot = masques.iter().sum::<Vector3<f64>>() / masques.len() as f64;
+        let echelle = rotation_scale_mm(&masques, &pivot).unwrap();
+        let lancer = |cfg: RobustConfig| {
+            register_slice_robust(&vt, tenseur_points(&e.points, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device), echelle, tenseur_1d(&e.intensites, &device), tenseur_1d(&e.masque, &device), cfg)
+        };
+        let calme = lancer(ROBUSTE_REEL);
+        assert_eq!(calme.runs, 1, "NCC {} ≥ 0,64 : pas de relance", calme.first_ncc);
+        let force = lancer(RobustConfig { suspect_ncc: 1.5, ..ROBUSTE_REEL });
+        assert_eq!(force.runs, 7);
+        assert!(force.ncc >= force.first_ncc - 1e-12, "{} contre {}", force.ncc, force.first_ncc);
+        assert!((force.first_ncc - calme.first_ncc).abs() < 1e-12, "le premier recalage est le même");
+    }
+    /// Évaluation synthétique (vérité connue) de la stratégie robuste, sur les mêmes 30 poses par amplitude que la courbe de capture
+    /// (graine 1618). `tau = 0,9` a été fixé **avant** cette évaluation sur une graine de réglage distincte (99) : succès de NCC finale
+    /// ≥ 0,969, échecs ≤ 0,78. Critères : le taux de succès (TRE ≤ 0,5 mm) ne baisse jamais, et monte à ±10 avec les départs forcés.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "exploration lente en debug"]
+    fn robust_registration_on_synthetic_motion() {
+        let volume = atlas();
+        let robuste = |tau: f64| Some(RobustConfig { suspect_ncc: tau, ..ROBUSTE_REEL });
+        let mut taux = Vec::new();
+        for amplitude in [3.0, 6.0, 10.0, 15.0] {
+            let simple = serie(&volume, 1618, 30, amplitude, amplitude, 0.0, None, "rs");
+            let avec_tau = serie(&volume, 1618, 30, amplitude, amplitude, 0.0, robuste(0.9), "rr");
+            let force = serie(&volume, 1618, 30, amplitude, amplitude, 0.0, robuste(1.5), "rf");
+            let (s_simple, s_tau, s_force) = (resume(&simple).0, resume(&avec_tau).0, resume(&force).0);
+            let marquees = simple.iter().filter(|r| r.2 < 0.9).count() as f64 / simple.len() as f64;
+            println!(
+                "±{amplitude}°/mm : succès simple {:.0} % ; robuste τ=0,9 {:.0} % (coût ≈ {:.1} recalages, {:.0} % de coupes relancées) ; robuste forcé {:.0} % (TRE médiane {:.2} contre {:.2} mm)",
+                s_simple * 100.0,
+                s_tau * 100.0,
+                1.0 + 6.0 * marquees,
+                marquees * 100.0,
+                s_force * 100.0,
+                resume(&force).1,
+                resume(&simple).1
+            );
+            taux.push((amplitude, s_simple, s_tau, s_force));
+        }
+        for (a, simple, tau, force) in &taux {
+            assert!(*tau >= simple - 1e-9 && *force >= simple - 1e-9, "±{a} : le taux de succès ne doit pas baisser ({simple} → {tau} / {force})");
+        }
+        let a10 = taux.iter().find(|t| t.0 == 10.0).unwrap();
+        assert!(a10.3 > a10.1, "à ±10, le robuste forcé doit améliorer le taux de succès ({} → {})", a10.1, a10.3);
+    }
+    /// Recalage robuste des coupes retenues d'un stack réel contre une référence : un `RobustResult` par coupe.
+    fn recaler_stack_robuste(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device) -> Vec<RobustResult> {
+        let masque = mobile.brain_mask().unwrap().voxels();
+        retenues
+            .iter()
+            .map(|&k| {
+                let coupe = mobile.slice(k).unwrap();
+                let (nx, ny) = coupe.dim();
+                let donnees = coupe.data();
+                let (mut points, mut intensites) = (Vec::new(), Vec::new());
+                for j in 0..ny {
+                    for i in 0..nx {
+                        if masque[[i, j, k]] {
+                            points.push(coupe.pixel_to_world(i as f64, j as f64));
+                            intensites.push(f64::from(donnees[[i, j]]));
+                        }
+                    }
+                }
+                let pivot = coupe.brain_pivot().unwrap();
+                let echelle = rotation_scale_mm(&points, &pivot).unwrap();
+                register_slice_robust(
+                    reference,
+                    tenseur_points(&points, device),
+                    tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+                    echelle,
+                    tenseur_1d(&intensites, device),
+                    tenseur_1d(&vec![1.0; points.len()], device),
+                    ROBUSTE_REEL,
+                )
+            })
+            .collect()
+    }
+
+    /// Évaluation sur vrais stacks (mêmes 9 sujets, coupes et références que le diagnostic). Pour chaque coupe : le recalage robuste
+    /// (τ = 0,64, 6 départs) et, comme base de comparaison, les 7 départs du diagnostic. Critères fixés avant : au moins 75 % des
+    /// coupes « bloquées » (gain du meilleur des 7 départs > 0,02) atteignent leur meilleure NCC à 0,005 près ; coût moyen ≤ 2,3
+    /// recalages par coupe ; jamais de NCC inférieure à celle du premier recalage. À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue (≈ 5 min en release)"]
+    fn robust_registration_on_real_stacks() {
+        let device = device().autodiff();
+        let departs: Vec<[f64; 6]> = std::iter::once([0.0; 6]).chain(departs_deterministes(6, 5.0, 8675309)).collect();
+        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        let (mut n, mut relancees, mut recalages, mut bloquees, mut recuperees, mut pires) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut gain_total, mut gain_recupere) = (0.0, 0.0);
+        for sujet in sujets {
+            let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
+            let mut mobile = Stack::read(&chemin_b).unwrap();
+            mobile.set_brain_mask(&masque_b).unwrap();
+            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let max_aire = *aires.iter().max().unwrap();
+            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            for acq in ["trufiax", "trufisag"] {
+                let (chemin, _) = stack_reel(sujet, acq);
+                let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
+                let vt = VolumeTensors::new(&volume, &device);
+                let robustes = recaler_stack_robuste(&mobile, &retenues, &vt, &device);
+                let toutes = recaler_multi_departs(&mobile, &retenues, &vt, &device, &departs);
+                for (r, t) in robustes.iter().zip(&toutes) {
+                    let meilleur = t.iter().map(|d| d.ncc).fold(f64::MIN, f64::max);
+                    let gain = meilleur - t[0].ncc;
+                    n += 1;
+                    recalages += r.runs;
+                    relancees += usize::from(r.runs > 1);
+                    pires += usize::from(r.ncc < r.first_ncc - 1e-9);
+                    gain_total += gain;
+                    gain_recupere += r.ncc - r.first_ncc;
+                    if gain > 0.02 {
+                        bloquees += 1;
+                        recuperees += usize::from(r.ncc >= meilleur - 0.005);
+                    }
+                }
+            }
+        }
+        println!("{n} recalages de coupe ; relancées {relancees} ({:.1} %) ; coût moyen {:.2} recalages", 100.0 * relancees as f64 / n as f64, recalages as f64 / n as f64);
+        println!("bloquées (gain > 0,02 avec le meilleur des 7 départs) : {bloquees} ; récupérées à 0,005 près : {recuperees} ({:.1} %)", 100.0 * recuperees as f64 / bloquees as f64);
+        println!("gain de NCC total récupéré : {:.1} % ; coupes dont la NCC finale est inférieure à celle du premier recalage : {pires}", 100.0 * gain_recupere / gain_total);
+        assert_eq!(pires, 0);
+        assert!(recuperees as f64 >= 0.75 * bloquees as f64, "{recuperees} sur {bloquees}");
+        assert!(recalages as f64 / n as f64 <= 2.3, "coût moyen {}", recalages as f64 / n as f64);
+    }
+    /// Cas connu (graine 1618, ±6°/mm, 3ᵉ pose) : le recalage simple reste bloqué à plus de 10 mm, le robuste retrouve la pose vraie.
+    /// Éprouve la relance elle-même : sans elle (ou avec des départs identiques), la NCC ne progresse pas.
+    #[test]
+    fn robust_registration_rescues_a_blocked_slice() {
+        let volume = atlas();
+        let device = device().autodiff();
+        let vt = VolumeTensors::new(&volume, &device);
+        let mut alea = Alea(1618);
+        let mut pose = mouvement_aleatoire(&mut alea, 6.0, 6.0);
+        for _ in 0..2 {
+            pose = mouvement_aleatoire(&mut alea, 6.0, 6.0);
+        }
+        let e = experience(&volume, &pose.0, &pose.1, 0.0, "sauvee");
+        let (_, tre_simple, ncc_simple) = recaler(&vt, &e, CONFIG_RECALAGE, None, &device).unwrap();
+        let (_, tre_robuste, ncc_robuste) = recaler(&vt, &e, CONFIG_RECALAGE, Some(RobustConfig { suspect_ncc: 0.9, ..ROBUSTE_REEL }), &device).unwrap();
+        println!("simple : TRE {tre_simple:.2} mm, NCC {ncc_simple:.3} ; robuste : TRE {tre_robuste:.2} mm, NCC {ncc_robuste:.3}");
+        assert!(tre_simple > 5.0 && ncc_simple < 0.5, "le cas doit être bloqué en recalage simple");
+        assert!(tre_robuste <= 0.5 && ncc_robuste > 0.95, "TRE {tre_robuste}, NCC {ncc_robuste}");
     }
 }
