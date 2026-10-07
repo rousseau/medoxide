@@ -498,13 +498,13 @@ mod tests {
         // hors support : 0
         assert!(r.image.iter().zip(r.support.iter()).filter(|(_, &s)| s < SUPPORT_MIN).all(|(&v, _)| v == 0.0));
     }
-    /// L'atlas de Gholipour et trois stacks (axial, coronal, sagittal ; pixels 0,8 mm, épaisseur 3,5 mm, légèrement obliques) simulés
-    /// par l'opérateur de l'étape 2, sans mouvement ni bruit. Les stacks sont mis en **cache** dans `data/atlas/sim/` (hors de Git) : la
+    /// Un atlas de Gholipour (`STAxx`, tous centrés en 0) et trois stacks (axial, coronal, sagittal ; pixels 0,8 mm, épaisseur 3,5 mm, légèrement
+    /// obliques) simulés par l'opérateur de l'étape 2, sans mouvement ni bruit. Les stacks sont mis en **cache** dans `data/atlas/sim/<atlas>/` (hors de Git) : la
     /// simulation (≈ 1 min en release) n'est refaite que si les fichiers manquent. Le masque d'un pixel est « couvert et tissu (> 150) ».
-    fn stacks_atlas_simules() -> (Volume, Vec<Stack>) {
-        let chemin = format!("{}/data/atlas/gholipour/STA21.nii.gz", racine());
+    fn stacks_atlas_sans_bruit(nom_atlas: &str) -> (Volume, Vec<Stack>) {
+        let chemin = format!("{}/data/atlas/gholipour/{nom_atlas}.nii.gz", racine());
         let atlas = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
-        let dossier = PathBuf::from(format!("{}/data/atlas/sim", racine()));
+        let dossier = PathBuf::from(format!("{}/data/atlas/sim/{nom_atlas}", racine()));
         std::fs::create_dir_all(&dossier).unwrap();
         let demi_tour = std::f64::consts::FRAC_PI_2;
         let specs = [
@@ -541,6 +541,43 @@ mod tests {
         (atlas, stacks)
     }
 
+    /// Comme [`stacks_atlas_sans_bruit`], avec un bruit gaussien additif sur tous les pixels des stacks, d'écart type `bruit_pct` % de
+    /// l'intensité moyenne des pixels de masque (0 : aucun bruit). Les stacks bruités sont mis en cache dans `data/atlas/sim/<atlas>_b<pct>/`
+    /// (graine fixe par stack : reproductible), le masque est celui du stack sans bruit.
+    fn stacks_atlas_simules(nom_atlas: &str, bruit_pct: u32) -> (Volume, Vec<Stack>) {
+        let (atlas, propres) = stacks_atlas_sans_bruit(nom_atlas);
+        if bruit_pct == 0 {
+            return (atlas, propres);
+        }
+        let dossier = PathBuf::from(format!("{}/data/atlas/sim/{nom_atlas}_b{bruit_pct}", racine()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let stacks = propres
+            .iter()
+            .enumerate()
+            .map(|(n, propre)| {
+                let image = dossier.join(format!("stack{n}.nii.gz"));
+                let masque_chemin = dossier.join(format!("stack{n}_mask.nii.gz"));
+                if !image.exists() || !masque_chemin.exists() {
+                    let masque = propre.brain_mask().unwrap().voxels();
+                    let (somme, n_m) = propre.data().iter().zip(masque.iter()).filter(|(_, &m)| m).fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
+                    let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
+                    let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919);
+                    let bruite = propre.data().mapv(|v| {
+                        let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0; // somme de 12 uniformes - 6 : gaussienne centrée réduite approchée
+                        (f64::from(v) + sigma * gauss) as f32
+                    });
+                    let h = en_tete(propre.affine(), [propre.spacing()[0] as f32, propre.spacing()[1] as f32, propre.spacing()[2] as f32]);
+                    WriterOptions::new(&image).reference_header(&h).write_nifti(&bruite).unwrap();
+                    WriterOptions::new(&masque_chemin).reference_header(&h).write_nifti(&masque.mapv(u8::from)).unwrap();
+                }
+                let mut stack = Stack::read(&image).unwrap();
+                stack.set_brain_mask(&masque_chemin).unwrap();
+                stack
+            })
+            .collect();
+        (atlas, stacks)
+    }
+
     fn correlation(a: &[f64], b: &[f64]) -> f64 {
         let n = a.len() as f64;
         let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
@@ -562,7 +599,7 @@ mod tests {
     #[test]
     #[ignore = "données locales ; lent en debug"]
     fn normalized_adjoint_on_stacks_simulated_from_the_atlas() {
-        let (atlas, stacks) = stacks_atlas_simules();
+        let (atlas, stacks) = stacks_atlas_simules("STA21", 0);
         let specs = ["axial", "coronal", "sagittal"];
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let debut = std::time::Instant::now();
@@ -908,7 +945,7 @@ mod tests {
     #[test]
     #[ignore = "mesure de temps sur données locales"]
     fn bench_reconstruction_on_the_atlas() {
-        let (_atlas, stacks) = stacks_atlas_simules();
+        let (_atlas, stacks) = stacks_atlas_simules("STA21", 0);
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let pixels: usize = stacks.iter().map(|s| s.brain_mask().unwrap().voxels().iter().filter(|&&v| v).count()).sum();
         println!("{} coupes, {pixels} pixels de masque sur {} ; grille {:?}", stacks.iter().map(|s| s.dim().2).sum::<usize>(), stacks.iter().map(|s| s.data().len()).sum::<usize>(), grille.dims);
@@ -1011,5 +1048,220 @@ mod tests {
         }
         println!("adjoint normalisé : écart relatif max {pire:.1e}");
         assert!(pire < 1e-6, "{pire:.2e}");
+    }
+    // ------------------------------------------------------------------ évaluation de la reconstruction sur l'atlas
+
+    /// Jeu de comparaison : les voxels de la grille où le support est suffisant, qui sont du tissu dans l'atlas (> 150) et lisibles dans les
+    /// trois stacks pris seuls (lignes de base trilinéaires).
+    struct Comparaison {
+        voxels: Vec<[usize; 3]>,
+        verite: Vec<f64>,
+        bases: Vec<Vec<f64>>,
+        plage: f64,
+        atlas_grille: Array3<f32>,
+        dans: Array3<bool>,
+    }
+
+    fn construire_comparaison(grille: &GridSpec, support: &Array3<f32>, atlas: &Volume, stacks: &[Stack]) -> Comparaison {
+        let singles: Vec<Volume> = stacks.iter().map(Volume::from_stack).collect();
+        let mut c = Comparaison { voxels: Vec::new(), verite: Vec::new(), bases: vec![Vec::new(); singles.len()], plage: 0.0, atlas_grille: Array3::zeros(grille.dims), dans: Array3::from_elem(grille.dims, false) };
+        for ((i, j, k), &s) in support.indexed_iter() {
+            let monde = (grille.affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+            if let Some(a) = atlas.sample(&monde) {
+                c.atlas_grille[[i, j, k]] = a;
+            }
+            // Le support d'un voxel est la masse de pixels qu'il reçoit : il varie comme son volume. Seuil de 0,5 à 0,8 mm, mis à l'échelle du volume
+            // du voxel pour les autres résolutions (sinon, à 0,5 mm, aucun voxel ne le passerait).
+            if s < 0.5 * (grille.resolution_mm / 0.8).powi(3) as f32 {
+                continue;
+            }
+            let a = match atlas.sample(&monde) {
+                Some(a) if a > 150.0 => f64::from(a),
+                _ => continue,
+            };
+            let valeurs: Vec<Option<f32>> = singles.iter().map(|v| v.sample(&monde)).collect();
+            if valeurs.iter().any(Option::is_none) {
+                continue;
+            }
+            c.voxels.push([i, j, k]);
+            c.verite.push(a);
+            c.dans[[i, j, k]] = true;
+            for (b, v) in c.bases.iter_mut().zip(valeurs) {
+                b.push(f64::from(v.unwrap()));
+            }
+        }
+        let mut v = c.verite.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        c.plage = v[(v.len() as f64 * 0.99) as usize];
+        c
+    }
+
+    /// Norme du gradient (différences centrées, en intensité par voxel) de `a` en `(i, j, k)`.
+    fn norme_gradient(a: &Array3<f32>, i: usize, j: usize, k: usize) -> f64 {
+        let d = |p: [usize; 3], q: [usize; 3]| f64::from(a[p] - a[q]) / 2.0;
+        (d([i + 1, j, k], [i - 1, j, k]).powi(2) + d([i, j + 1, k], [i, j - 1, k]).powi(2) + d([i, j, k + 1], [i, j, k - 1]).powi(2)).sqrt()
+    }
+
+    /// (NCC, PSNR en dB, netteté) d'une image sur la grille par rapport à l'atlas, sur le jeu de comparaison. Netteté = gradient moyen de
+    /// l'image / gradient moyen de l'atlas, sur les voxels de comparaison dont les 6 voisins en font aussi partie (1 : aussi nette que l'atlas).
+    fn qualite(c: &Comparaison, image: &Array3<f64>) -> (f64, f64, f64) {
+        let valeurs: Vec<f64> = c.voxels.iter().map(|v| image[*v]).collect();
+        let image32 = image.mapv(|v| v as f32);
+        let (mut g_image, mut g_atlas, mut n) = (0.0, 0.0, 0usize);
+        for &[i, j, k] in &c.voxels {
+            let (nx, ny, nz) = c.dans.dim();
+            if i == 0 || j == 0 || k == 0 || i + 1 >= nx || j + 1 >= ny || k + 1 >= nz {
+                continue;
+            }
+            let voisins = [[i + 1, j, k], [i - 1, j, k], [i, j + 1, k], [i, j - 1, k], [i, j, k + 1], [i, j, k - 1]];
+            if voisins.iter().all(|v| c.dans[*v]) {
+                g_image += norme_gradient(&image32, i, j, k);
+                g_atlas += norme_gradient(&c.atlas_grille, i, j, k);
+                n += 1;
+            }
+        }
+        assert!(n > 1000);
+        (correlation(&valeurs, &c.verite), psnr(&valeurs, &c.verite, c.plage), g_image / g_atlas)
+    }
+
+    /// Reconstruit par gradient conjugué (depuis l'adjoint normalisé) ; rend l'image, le nombre d'itérations, le résidu relatif final et la durée.
+    fn reconstruire(grille: &GridSpec, stacks: &[Stack], alpha: f64) -> (Array3<f64>, usize, f64, f64) {
+        let debut = std::time::Instant::now();
+        let probleme = ReconstructionProblem::new(grille, stacks, alpha).unwrap();
+        let r = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4);
+        (r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64())
+    }
+
+    /// Poids de régularisation essayés (log-espacés). La première grille (0,01 à 10, données sans bruit) avait son optimum au bord : étendue vers le bas.
+    const ALPHAS_REGLAGE: [f64; 9] = [0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0];
+
+    fn ligne_qualite(nom: &str, c: &Comparaison, image: &Array3<f64>, iterations: usize, residu: f64, duree: f64) -> (f64, f64, f64) {
+        let q = qualite(c, image);
+        println!("{nom:12} : NCC {:.4}, PSNR {:6.2} dB, netteté {:.3} ({iterations} itérations, résidu {residu:.1e}, {duree:.1} s)", q.0, q.1, q.2);
+        q
+    }
+
+    /// RÉGLAGE de α (étape 4a) : sur l'atlas STA21 (le plus petit cerveau), avec un bruit de 5 %. Règle fixée avant : on retient le α qui
+    /// maximise le PSNR, à condition qu'il ne soit pas au bord de la grille. Sans bruit, le meilleur α est le plus petit essayé (la
+    /// régularisation ne peut qu'abîmer) : régler α sur des données sans bruit n'aurait pas de sens.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn tune_alpha_on_sta21() {
+        let (atlas, stacks) = stacks_atlas_simules("STA21", 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let init = normalized_adjoint(&grille, &stacks).unwrap();
+        let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+        println!("STA21 : {} voxels de comparaison, dynamique {:.0}", c.voxels.len(), c.plage);
+        ligne_qualite("init", &c, &init.image.mapv(f64::from), 0, 0.0, 0.0);
+        for (nom, b) in ["axial", "coronal", "sagittal"].iter().zip(&c.bases) {
+            println!("stack {nom:8} : NCC {:.4}, PSNR {:6.2} dB", correlation(b, &c.verite), psnr(b, &c.verite, c.plage));
+        }
+        let mut meilleur = (f64::MIN, 0.0);
+        for alpha in ALPHAS_REGLAGE {
+            let (x, it, res, t) = reconstruire(&grille, &stacks, alpha);
+            let q = ligne_qualite(&format!("α = {alpha}"), &c, &x, it, res, t);
+            if q.1 > meilleur.0 {
+                meilleur = (q.1, alpha);
+            }
+        }
+        println!("α retenu (PSNR maximal) : {} ({:.2} dB){}", meilleur.1, meilleur.0, if meilleur.1 == ALPHAS_REGLAGE[0] || meilleur.1 == ALPHAS_REGLAGE[ALPHAS_REGLAGE.len() - 1] { " : AU BORD DE LA GRILLE, optimum non encadré" } else { "" });
+    }
+    /// α retenu par `tune_alpha_on_sta21` (bruit 5 %, grille de 0,0003 à 3) : PSNR maximal à 0,01 (28,93 dB ; 28,76 dB à 0,03), optimum encadré.
+    const ALPHA_CHOISI: f64 = 0.01;
+
+    /// ÉVALUATION (étape 4a) sur l'atlas STA31, jamais vu pendant le réglage de α : trois stacks simulés avec 5 % de bruit, reconstruction par
+    /// gradient conjugué avec `ALPHA_CHOISI`. Critères (fixés à l'étude 06) : NCC ≥ 0,95 ; au moins 2 dB de PSNR de plus que l'adjoint normalisé ;
+    /// meilleur que le meilleur stack seul en NCC et en PSNR ; résolution en moins de 5 minutes. Sensibilité à α : descriptive.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn evaluate_reconstruction_on_sta31() {
+        let (atlas, stacks) = stacks_atlas_simules("STA31", 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let init = normalized_adjoint(&grille, &stacks).unwrap();
+        let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+        println!("STA31 : grille {:?}, {} voxels de comparaison, dynamique {:.0}", grille.dims, c.voxels.len(), c.plage);
+        let q_init = ligne_qualite("init", &c, &init.image.mapv(f64::from), 0, 0.0, 0.0);
+        let mut meilleur_stack = (f64::MIN, f64::MIN);
+        for (nom, b) in ["axial", "coronal", "sagittal"].iter().zip(&c.bases) {
+            let (n, p) = (correlation(b, &c.verite), psnr(b, &c.verite, c.plage));
+            println!("stack {nom:8} : NCC {n:.4}, PSNR {p:6.2} dB");
+            meilleur_stack = (meilleur_stack.0.max(n), meilleur_stack.1.max(p));
+        }
+        for alpha in ALPHAS_REGLAGE {
+            let (x, it, res, t) = reconstruire(&grille, &stacks, alpha);
+            ligne_qualite(&format!("α = {alpha}"), &c, &x, it, res, t);
+        }
+        let (x, it, res, t) = reconstruire(&grille, &stacks, ALPHA_CHOISI);
+        println!("--- évaluation avec α = {ALPHA_CHOISI}");
+        let q = ligne_qualite("CG", &c, &x, it, res, t);
+        println!("critères : NCC {:.4} ≥ 0,95 ; gain sur l'init {:.2} dB ≥ 2 ; meilleur stack seul NCC {:.4} / PSNR {:.2} dB ; durée {t:.0} s", q.0, q.1 - q_init.1, meilleur_stack.0, meilleur_stack.1);
+        assert!(q.0 >= 0.95, "NCC {}", q.0);
+        assert!(q.1 - q_init.1 >= 2.0, "gain {}", q.1 - q_init.1);
+        assert!(q.0 > meilleur_stack.0 && q.1 > meilleur_stack.1, "doit battre le meilleur stack seul");
+        assert!(t < 300.0, "durée {t}");
+    }
+    /// Copie d'un stack dont l'affine est composée d'un mouvement rigide `T` : rotation de `angle_deg` autour de `axe` (par l'origine, qui est
+    /// le centre de l'atlas), puis translation `decalage` (mm). Les voxels et le masque sont inchangés : la géométrie annoncée est fausse.
+    fn stack_perturbe(t: &Temp, nom: &str, stack: &Stack, angle_deg: f64, axe: Vector3<f64>, decalage: Vector3<f64>) -> Stack {
+        let r = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axe), angle_deg.to_radians());
+        let mut mouvement = Matrix4::identity();
+        mouvement.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+        mouvement.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
+        let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
+        let sp = stack.spacing();
+        stack_avec_masque(t, nom, stack.data(), &masque, &(mouvement * stack.affine()), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+    }
+
+    /// Sensibilité (descriptive, rien n'est forcé) sur STA31 avec `ALPHA_CHOISI` : résolution de la grille (1,0, 0,8 et 0,5 mm), puis stacks
+    /// à pose perturbée (rotation et translation d'un ou de tous les stacks). Pour la perturbation, la reconstruction utilise la géométrie
+    /// (fausse) des stacks perturbés, et la qualité est mesurée sur le jeu de comparaison de la géométrie exacte.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn reconstruction_sensitivity_on_sta31() {
+        let (atlas, stacks) = stacks_atlas_simules("STA31", 5);
+        for resolution in [1.0, 0.8, 0.5] {
+            let grille = reconstruction_grid(&stacks, resolution, 10.0).unwrap();
+            let init = normalized_adjoint(&grille, &stacks).unwrap();
+            let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+            let (x, it, res, t) = reconstruire(&grille, &stacks, ALPHA_CHOISI);
+            println!("résolution {resolution} mm : grille {:?} ({:.1} M voxels), {} voxels de comparaison", grille.dims, (grille.dims.0 * grille.dims.1 * grille.dims.2) as f64 / 1e6, c.voxels.len());
+            ligne_qualite(&format!("  CG {resolution} mm"), &c, &x, it, res, t);
+            let meilleur = c.bases.iter().map(|b| psnr(b, &c.verite, c.plage)).fold(f64::MIN, f64::max);
+            println!("  meilleur stack seul : PSNR {meilleur:.2} dB ; init : PSNR {:.2} dB", qualite(&c, &init.image.mapv(f64::from)).1);
+        }
+        // poses perturbées, à 0,8 mm
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let init = normalized_adjoint(&grille, &stacks).unwrap();
+        let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+        let t = Temp::new("perturbations");
+        let axe = Vector3::new(1.0, 1.0, 0.5);
+        let dec = Vector3::new(1.0, -1.0, 0.5).normalize();
+        let cas: [(&str, f64, f64, Vec<usize>); 5] = [
+            ("aucune perturbation", 0.0, 0.0, vec![]),
+            ("coronal ±1°/1 mm", 1.0, 1.0, vec![1]),
+            ("coronal 3°/3 mm", 3.0, 3.0, vec![1]),
+            ("tous 1°/1 mm", 1.0, 1.0, vec![0, 1, 2]),
+            ("tous 3°/3 mm", 3.0, 3.0, vec![0, 1, 2]),
+        ];
+        for (nom, angle, mm, cibles) in cas {
+            let perturbes: Vec<Stack> = stacks
+                .iter()
+                .enumerate()
+                .map(|(n, s)| {
+                    if cibles.contains(&n) {
+                        // un sens différent par stack, pour que les erreurs ne se compensent pas
+                        let signe = if n % 2 == 0 { 1.0 } else { -1.0 };
+                        stack_perturbe(&t, &format!("{nom}_{n}").replace([' ', '/', '°', '±'], "_"), s, signe * angle, axe, signe * mm * dec)
+                    } else {
+                        stack_perturbe(&t, &format!("{nom}_{n}_id").replace([' ', '/', '°', '±'], "_"), s, 0.0, axe, Vector3::zeros())
+                    }
+                })
+                .collect();
+            let (x, it, res, d) = reconstruire(&grille, &perturbes, ALPHA_CHOISI);
+            ligne_qualite(nom, &c, &x, it, res, d);
+        }
     }
 }

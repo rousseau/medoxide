@@ -1092,4 +1092,41 @@ parcours des pixels ; réduction de l'adjoint normalisé sans le dénominateur ;
 
 ---
 
-*(à compléter à la prochaine étape : étape 4a, évaluation sur l'atlas)*
+## 2026-10-07 — Évaluation de la reconstruction sur l'atlas (étape 4a, sous-étape 5)
+
+- **Quoi** : la qualité de la reconstruction par gradient conjugué (TK1, `α` fixé) mesurée contre l'atlas de Gholipour. Trois stacks (axial, coronal, sagittal ; pixels 0,8 mm, épaisseur 3,5 mm, obliques) sont simulés par l'opérateur
+  de l'étape 2, avec **5 % de bruit gaussien** (écart type = 5 % de l'intensité moyenne du masque, graine fixe, cache dans `data/atlas/sim/`). Mesures : NCC, PSNR et **netteté** (gradient moyen de l'image / gradient moyen de l'atlas)
+  sur les voxels de tissu bien couverts.
+- **Protocole** (fixé avant) : α **réglé sur STA21** (le plus petit cerveau) par la règle « PSNR maximal, pas au bord de la grille » ; **évalué sur STA31**, jamais vu pendant le réglage. Critères de l'étude 06 : NCC ≥ 0,95 ; ≥ +2 dB sur
+  l'initialisation ; meilleur que le meilleur stack seul ; résolution en moins de 5 minutes.
+- **Où** : tests ignorés `tune_alpha_on_sta21`, `evaluate_reconstruction_on_sta31`, `reconstruction_sensitivity_on_sta31` dans `crates/medoxide-svr/src/recon.rs` (aucun code de production nouveau).
+
+**Un défaut de protocole, détecté et corrigé avant d'avoir vu STA31.** Mon premier réglage utilisait des données **sans bruit** (j'avais oublié le bruit de 5 % prévu à l'étude 06). Le PSNR croissait à mesure que α diminuait : à α = 0,01, NCC 0,9936 et 33,5 dB ;
+la règle retenait le plus petit α de la grille, **optimum au bord, non encadré**. Sans bruit la régularisation ne peut qu'abîmer le résultat : régler α là-dessus n'aurait pas de sens pour des données réelles. Protocole corrigé : bruit de 5 % et grille étendue
+vers le bas (0,0003 à 3). Avec le bruit, l'optimum est encadré : PSNR 24,98 dB (α = 0,003), **28,93 dB (α = 0,01)**, 28,76 dB (α = 0,03), 24,40 dB (α = 0,1) ; un α trop petit amplifie le bruit (netteté 2,0 à α = 0,0003). **α = 0,01 retenu.**
+
+**Évaluation sur STA31** (634 816 voxels de comparaison) :
+
+| | NCC | PSNR | netteté |
+|---|---|---|---|
+| adjoint normalisé (initialisation) | 0,880 | 20,88 dB | 0,54 |
+| meilleur stack seul (coronal) | 0,887 | 21,76 dB | |
+| **gradient conjugué, α = 0,01** (38 itérations, 39 s) | **0,974** | **28,31 dB** | 1,16 |
+
+Les quatre critères sont atteints : NCC ≥ 0,95, **+7,43 dB** sur l'initialisation (critère 2 dB), meilleur stack battu en NCC et en PSNR de 6,5 dB, 39 s (critère 300 s). Sensibilité à α sur STA31 (descriptive) : meilleur PSNR à α = 0,03 (28,81 dB, +0,5 dB sur la valeur retenue) :
+le réglage se transfère, avec un optimum légèrement décalé pour un cerveau plus grand.
+
+**Sensibilité** (STA31, α = 0,01, descriptive) :
+- **Résolution** de la grille : 1,0 mm NCC 0,9615 / 26,17 dB (46 it., 45 s) ; 0,8 mm 0,9737 / 28,31 dB ; **0,5 mm** 0,9724 / 27,57 dB, netteté 0,918 (54 it., 82 s, 11,5 M voxels). **Limites** : α n'est pas ré-ajusté (la régularisation dépend de `h`) ; surtout, **l'atlas est lui-même à
+  0,8 mm** : à 0,5 mm la « vérité » n'est qu'une interpolation, ce test ne peut pas montrer un gain de résolution.
+- **Poses perturbées** (reconstruction avec la géométrie fausse, qualité mesurée sur l'atlas ; la rotation est autour du centre du cerveau : 1° déplace la périphérie de ≈ 0,7 mm) : aucune 28,31 dB (NCC 0,974) ; **coronal seul 1°/1 mm 23,12 dB (0,912)** ; coronal seul 3°/3 mm 18,72 dB
+  (0,748) ; **tous 1°/1 mm 19,94 dB (0,812), pire que le meilleur stack seul (21,76 dB)** ; tous 3°/3 mm 12,86 dB (NCC 0,105), reconstruction effondrée. **Une erreur de pose d'environ 1 mm suffit à perdre 8 dB** : cohérent avec le critère de TRE ≤ 0,5 mm de l'étude 05.
+
+**Deuxième défaut de test, corrigé** : à 0,5 mm, le jeu de comparaison était vide (`index out of bounds`), car le seuil de support (0,5) est en unités absolues alors que le support d'un voxel est la masse de pixels qu'il reçoit et varie comme son **volume** : à 0,5 mm il reçoit
+≈ (0,5/0,8)³ ≈ 0,24 fois moins. Seuil mis à l'échelle du volume du voxel (inchangé à 0,8 mm).
+
+**À améliorer** : une itération coûte ≈ 1 s sur la grille de STA31 (2,8 M voxels) contre 0,29 s sur celle de STA21 ; la régularisation (boucles sur la grille entière) et les allocations de tableaux sont séquentielles ; α doit être ré-ajusté à chaque résolution ; l'atlas à 0,8 mm ne permet pas de juger 0,5 mm.
+
+---
+
+*(à compléter à la prochaine étape : comparaison d'optimiseurs, puis boucle recalage / reconstruction)*
