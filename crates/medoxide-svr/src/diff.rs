@@ -1313,7 +1313,10 @@ mod tests {
                 let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
                 let resultats = recaler_multi_departs(&mobile, &retenues, &VolumeTensors::new(&volume, &device), &device, &departs);
                 let avant = lignes.len();
-                for r in &resultats {
+                for (r, k) in resultats.iter().zip(&retenues) {
+                    // une ligne par coupe, lisible par un script d'analyse : sujet, référence, coupe, NCC du départ nul, NCC du meilleur, amplitude
+                    let meilleur_ncc = r.iter().map(|d| d.ncc).fold(f64::MIN, f64::max);
+                    println!("SLICE\t{sujet}\t{acq}\t{k}\t{:.5}\t{:.5}\t{:.3}", r[0].ncc, meilleur_ncc, r[0].deplacement_rms);
                     let meilleur = r.iter().enumerate().max_by(|a, b| a.1.ncc.partial_cmp(&b.1.ncc).unwrap()).unwrap();
                     let proches = r.iter().filter(|d| d.ncc >= meilleur.1.ncc - 0.005).count();
                     lignes.push((r[0].deplacement_rms, meilleur.1.ncc - r[0].ncc, if meilleur.0 == 0 { 0.0 } else { meilleur.1.distance_au_premier }, proches));

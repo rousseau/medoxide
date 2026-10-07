@@ -943,4 +943,19 @@ présenté à l'utilisateur. Le diagnostic ne dit pas si une pyramide trouverait
 
 ---
 
+## 2026-10-07 — Repérer les coupes bloquées par un critère simple (étape 3d, voie 2)
+
+- **Quoi** : avant d'écrire une stratégie de départs multiples, vérifier qu'un indicateur **disponible sans les départs multiples** repère les coupes bloquées. Quatre candidats sont
+  comparés par leur rappel pour une part donnée de coupes marquées ; le seuil est choisi **en laissant un sujet de côté** (choisi sur 8 sujets, évalué sur le 9ᵉ) pour ne pas
+  l'ajuster sur les coupes qu'il doit juger.
+- **Résultat** : la **NCC finale absolue** du recalage depuis la pose d'en-tête est de loin le meilleur indicateur (rappel 84,7 % en marquant 20 % des coupes, 98,3 % pour 35 %), loin devant
+  la NCC relative à la médiane du stack (57,6 / 66,1 %) et l'amplitude de la correction (52,5 / 74,6 %). Médiane de la NCC finale : **0,53 pour les coupes bloquées, 0,81 pour les autres**.
+- **Règle « NCC finale < τ »** avec τ ≈ 0,64 (stable de 0,633 à 0,640 d'un pli à l'autre) : **17,3 %** des coupes marquées, **47 bloquées sur 59 retrouvées (79,7 %)** : le critère
+  fixé avant (≥ 80 %) est **manqué de 0,3 point**, c'est-à-dire d'une coupe ; je ne l'arrondis pas. Coût moyen ≈ 2,1 recalages par coupe (au lieu de 7 pour tout recaler depuis 7 départs).
+- **Limites** : le seuil dépend de ce montage (stack pris comme volume) et sera à recalibrer avec une référence reconstruite ; quatre sujets portent presque toutes les coupes bloquées
+  (4 plis informatifs) ; « bloquée » est définie avec seulement 6 départs aléatoires ; une meilleure NCC n'est pas une preuve de pose plus vraie (à vérifier sur mouvement synthétique).
+- **Où** : le test `multi_start_diagnostic_on_real_stacks` écrit maintenant une ligne `SLICE` par coupe pour l'analyse ; analyse faite en Python (non versionnée), détail dans la fiche locale §9 ter.
+
+---
+
 *(à compléter à la prochaine étape : étape 3a, pyramide multi-résolution)*
