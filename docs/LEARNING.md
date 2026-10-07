@@ -857,4 +857,48 @@ sans l'indicateur « dans le volume » ; pose opposée ; pivot ignoré.
 
 ---
 
-*(à compléter à la prochaine étape : étape 3a, boucle d'optimisation)*
+## 2026-10-07 — Recaler une coupe avec Adam de Burn (étape 3a, sous-étape 5 du SVR)
+
+- **Quoi** : la **boucle d'optimisation**. À chaque itération : NCC à la pose courante, perte = −NCC, `backward()`, mise à jour par
+  **Adam** (moyenne glissante du gradient et de son carré : chaque paramètre avance d'un pas voisin de `lr`, quelle que soit l'échelle
+  de son gradient ; adapté parce que les 6 paramètres ont désormais la même unité, le mm).
+- **Quoi** : les types de Burn qui portent l'optimisation. Un **`Module`** (`#[derive(Module)]`) contient des **`Param`**, tenseurs
+  qui portent un identifiant et auxquels `backward` associe un gradient ; `GradientsParams::from_grads(grads, &module)` extrait les
+  gradients de ce module ; `optimiseur.step(lr, module, grads)` rend le module mis à jour. Choisis plutôt qu'une boucle manuelle parce que
+  l'INR de l'étape 4b en aura besoin avec un vrai réseau (ajout de la fonction `optim` de Burn, qui active déjà l'autodiff).
+- **Quoi** (ownership) : `step` **consomme** le module, alors que `from_grads` l'emprunte : écrire les deux dans le même appel est
+  refusé par le compilateur (« borrow of moved value »). Deux instructions, dans cet ordre, puis on réaffecte `module = …`.
+- **Où** : `PoseModule` (privé), `RegistrationConfig`, `RegistrationResult`, `register_slice` dans `crates/medoxide-svr/src/diff.rs`.
+
+**Protocole, moins circulaire que les sous-étapes précédentes** : la coupe « acquise » est simulée par l'**opérateur complet de l'étape 2**
+(PSF orientée selon la normale **vraie** de la coupe déplacée) à partir de l'atlas de Gholipour (tourné, copie locale), puis le recalage
+**échantillonne le volume ponctuellement** (sans PSF), comme 4 des 6 dépôts. Le mouvement vrai est tiré comme dans pyrecon (angles et
+translations uniformes dans ±amplitude, autour du centre de la coupe) ; TRE = erreur quadratique moyenne sur les pixels du masque entre la
+pose estimée et le mouvement vrai. **Limite assumée** : le volume est le même des deux côtés (aucun bruit de reconstruction).
+
+**Critère** (fixé avant le code) : sur 20 poses jamais vues pendant le réglage, ±3° par axe et ±3 mm (plage de pyrecon), TRE finale ≤ 0,5 mm
+pour au moins 95 % des poses. **Résultat : 20 sur 20**, TRE moyenne **2,83 mm avant**, **médiane 0,14 mm et pire 0,29 mm après**, en 0,1 s par
+coupe en release (123 s en debug : le test complet est `#[ignore]`, un test de fumée à 2 poses reste dans la suite par défaut).
+
+**Réglage** : sur une série de 6 poses distincte (graine différente), cinq combinaisons de pas (0,1 à 1) et d'itérations (150 à 300), avec ou
+sans décroissance, donnent des TRE **identiques à 0,01 mm près** : l'optimiseur atteint le même minimum, et les 0,13 à 0,28 mm restants sont un
+**biais du modèle** (coupe lissée par la PSF contre échantillonnage ponctuel), pas un défaut d'optimisation. Retenu : pas 0,3, 150 itérations,
+pas constant.
+
+**Capture, exploration non forcée** (30 poses par amplitude, graine différente, volume sans bruit) : succès **97 % à ±3°/mm**, **67 % à ±6**,
+**23 % à ±10**, **10 % à ±15**, **0 % à ±20** ; au-delà de ±6, le recalage échoue souvent **en s'éloignant** (TRE médiane après supérieure à celle
+d'avant : minimum local). Avec un bruit gaussien de 10 % de l'intensité du tissu et une échelle d'intensité modifiée (`0,5 v + 100`) : mêmes taux
+(97, 67, 23, 7, 4 %) : la NCC est bien insensible à l'échelle et robuste à ce bruit. À ±20, 4 coupes sur 30 sortent du tissu (masque vide) : le
+pipeline devra les écarter et les signaler. **Un seul niveau de résolution ne suffit donc qu'à de petits mouvements** : la pyramide (flou +
+sous-échantillonnage, comme NeSVoR) est maintenant motivée par une mesure.
+
+**Erreurs de mon propre test, corrigées** : (1) mon test de fumée exigeait une NCC finale > 0,99, seuil posé sans mesure ; la NCC finale vaut
+≈ 0,978 (la PSF rend la coupe différente d'un échantillonnage ponctuel), le seuil est retiré et la NCC seulement rapportée ; (2) mes premières
+mutations ne valaient rien, car le test de base échouait déjà ; refaites après correction ; (3) `unwrap` sur un masque vide dans l'exploration à ±20.
+
+**Vérifié par mutation** (3 sur 3 détectées, test de base vert) : perte `+NCC` (la TRE passe de 3,5 à 5,8 mm) ; pas d'apprentissage nul ; mise à
+jour des paramètres supprimée.
+
+---
+
+*(à compléter à la prochaine étape : étape 3a, pyramide multi-résolution)*

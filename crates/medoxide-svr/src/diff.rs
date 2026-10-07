@@ -4,6 +4,8 @@
 //! Burn choisit son backend à l'exécution par un `Device` : tous les tenseurs d'un calcul vivent sur le
 //! même `Device`.
 
+use burn::module::{Module, Param};
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
 use nalgebra::Vector3;
 
@@ -206,6 +208,70 @@ pub fn slice_ncc(
     let voxels = deplaces.matmul(volume.inverse_linear.clone().transpose()) + volume.inverse_offset.clone().reshape([1, 3]);
     let lecture = trilinear_sample(&volume.data, volume.dims, voxels);
     ncc(intensities.reshape([1, p]), lecture.values.reshape([1, p]), (mask * lecture.inside).reshape([1, p]))
+}
+
+/// Les 6 paramètres de pose, dans un `Module` : c'est ce que les optimiseurs de Burn savent mettre à jour. Un `Param` est un tenseur
+/// qui porte un identifiant, auquel `backward` associe un gradient.
+#[derive(Module, Debug)]
+struct PoseModule {
+    params: Param<Tensor<1>>,
+}
+
+/// Réglages de [`register_slice`].
+#[derive(Debug, Clone, Copy)]
+pub struct RegistrationConfig {
+    /// Pas initial d'Adam, en mm (les 6 paramètres sont en mm : un pas de 1 déplace un point typique d'environ 1 mm).
+    pub learning_rate: f64,
+    /// Nombre d'itérations (une évaluation du coût et un gradient chacune).
+    pub iterations: usize,
+    /// Facteur multiplicatif du pas à chaque itération (1 : pas constant).
+    pub lr_decay: f64,
+}
+
+/// Résultat de [`register_slice`].
+#[derive(Debug, Clone)]
+pub struct RegistrationResult {
+    /// Pose estimée `(φx, φy, φz, tx, ty, tz)`, voir [`apply_pose`].
+    pub params: [f64; 6],
+    /// NCC à chaque itération (avant la mise à jour) puis à la pose finale : `iterations + 1` valeurs.
+    pub ncc_history: Vec<f64>,
+}
+
+/// **Recale une coupe** : cherche la pose (delta autour de la pose d'en-tête, départ en pose nulle) qui maximise la NCC avec
+/// le volume, par Adam (Burn) sur le gradient automatique de [`slice_ncc`].
+///
+/// Les tenseurs doivent être sur un `Device` avec autodiff (`Device::...().autodiff()`). Un niveau de résolution seulement : la
+/// pyramide viendra si la capture mesurée l'exige.
+pub fn register_slice(
+    volume: &VolumeTensors,
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    intensities: Tensor<1>,
+    mask: Tensor<1>,
+    config: RegistrationConfig,
+) -> RegistrationResult {
+    let device = points.device();
+    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::zeros([6], &device)) };
+    let mut optimiseur = AdamConfig::new().init();
+    let evaluer = |pose: Tensor<1>| {
+        slice_ncc(volume, points.clone(), pivot.clone(), pose, rotation_scale_mm, intensities.clone(), mask.clone())
+    };
+    let mut historique = Vec::with_capacity(config.iterations + 1);
+    let mut pas = config.learning_rate;
+    for _ in 0..config.iterations {
+        let ncc = evaluer(module.params.val());
+        historique.push(f64::from(ncc.clone().into_data().try_to_vec::<f32>().unwrap()[0]));
+        let gradients = ncc.neg().sum().backward(); // perte = −NCC
+        // `from_grads` emprunte `module` ; `step` le consomme et rend le module mis à jour : deux instructions, dans cet ordre.
+        let gradients = GradientsParams::from_grads(gradients, &module);
+        module = optimiseur.step(pas, module, gradients);
+        pas *= config.lr_decay;
+    }
+    let finale = module.params.val();
+    historique.push(f64::from(evaluer(finale.clone()).into_data().try_to_vec::<f32>().unwrap()[0]));
+    let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
+    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
 }
 
 /// Constante ajoutée sous la racine de [`ncc`] : une coupe constante ou sans pixel valide a une variance nulle, donc
@@ -821,6 +887,199 @@ mod tests {
             let (plus5, moins5) = ({ let mut p = POSE_VRAIE; p[a] += 5.0; valeur(&p) }, { let mut p = POSE_VRAIE; p[a] -= 5.0; valeur(&p) });
             println!("paramètre {a} : NCC à ±5 : {plus5:.4} / {moins5:.4}");
             assert!(plus5 < a_la_verite - 0.001 && moins5 < a_la_verite - 0.001);
+        }
+    }
+    // ------------------------------------------------------------------ sous-étape 5 : recalage d'une coupe
+
+    use nifti::{writer::WriterOptions, NiftiHeader};
+
+    const N_PIXELS: usize = 64;
+    const PIXEL_MM: f64 = 0.8;
+    const EPAISSEUR_MM: f64 = 3.5;
+
+    /// Affine de la coupe d'en-tête : oblique, pixels de 0,8 mm, épaisseur 3,5 mm, centrée près de (1, −2, 3).
+    fn affine_entete() -> Matrix4<f64> {
+        let r = Rotation3::from_euler_angles(0.5, -0.4, 0.8);
+        let lineaire = r.matrix() * Matrix3::from_diagonal(&Vector3::new(PIXEL_MM, PIXEL_MM, EPAISSEUR_MM));
+        let milieu = (N_PIXELS as f64 - 1.0) / 2.0;
+        let origine = r * Vector3::new(-milieu * PIXEL_MM, -milieu * PIXEL_MM, 0.0) + Vector3::new(1.0, -2.0, 3.0);
+        let mut a = Matrix4::identity();
+        a.fixed_view_mut::<3, 3>(0, 0).copy_from(&lineaire);
+        a.fixed_view_mut::<3, 1>(0, 3).copy_from(&origine);
+        a
+    }
+
+    /// Écrit un stack d'une seule coupe d'affine donnée (des zéros : seuls l'affine et le pas comptent) et le relit.
+    fn stack_une_coupe(affine: &Matrix4<f64>, nom: &str) -> Stack {
+        let chemin = std::env::temp_dir().join(format!("medoxide_diff_{nom}_{}.nii.gz", std::process::id()));
+        let mut h = NiftiHeader::default();
+        h.sform_code = 1;
+        h.srow_x = std::array::from_fn(|c| affine[(0, c)] as f32);
+        h.srow_y = std::array::from_fn(|c| affine[(1, c)] as f32);
+        h.srow_z = std::array::from_fn(|c| affine[(2, c)] as f32);
+        h.pixdim = [1.0, PIXEL_MM as f32, PIXEL_MM as f32, EPAISSEUR_MM as f32, 1.0, 1.0, 1.0, 1.0];
+        WriterOptions::new(&chemin).reference_header(&h).write_nifti(&Array3::<f32>::zeros((N_PIXELS, N_PIXELS, 1))).unwrap();
+        let stack = Stack::read(&chemin).unwrap();
+        let _ = std::fs::remove_file(&chemin);
+        stack
+    }
+
+    /// Mouvement vrai : rotation `omega` (rad) et translation `t` (mm) autour de `centre`, en matrice 4×4.
+    fn mouvement_vrai(omega: &Vector3<f64>, t: &Vector3<f64>, centre: &Vector3<f64>) -> Matrix4<f64> {
+        let r = Rotation3::from_scaled_axis(*omega);
+        let mut m = Matrix4::identity();
+        m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(centre + t - r * centre));
+        m
+    }
+
+    /// Une expérience : la coupe d'en-tête, sa version « acquise » après un mouvement vrai (simulée par l'opérateur complet de
+    /// l'étape 2, PSF orientée selon la normale vraie), et tout ce que le recalage reçoit.
+    struct Experience {
+        points: Vec<Vector3<f64>>,
+        intensites: Vec<f64>,
+        masque: Vec<f64>,
+        verite: Matrix4<f64>,
+    }
+
+    /// `bruit` : écart type du bruit gaussien additif, en fraction de l'intensité moyenne du tissu (0 : aucun) ; l'intensité
+    /// est de plus transformée par `0,5 · v + 100` (échelle et décalage propres à la coupe, que la NCC ignore).
+    fn experience(volume: &Volume, omega: &Vector3<f64>, t: &Vector3<f64>, bruit: f64, nom: &str) -> Experience {
+        let a_h = affine_entete();
+        let points: Vec<Vector3<f64>> = (0..N_PIXELS)
+            .flat_map(|j| (0..N_PIXELS).map(move |i| (i, j)))
+            .map(|(i, j)| (a_h * nalgebra::Vector4::new(i as f64, j as f64, 0.0, 1.0)).xyz())
+            .collect();
+        let centre = points.iter().sum::<Vector3<f64>>() / points.len() as f64; // le patient bouge autour du centre de la coupe
+        let verite = mouvement_vrai(omega, t, &centre);
+        let stack = stack_une_coupe(&(verite * a_h), nom);
+        let coupe = stack.slice(0).unwrap();
+        let sim = volume.simulate_slice(&coupe, &coupe.psf());
+        let (mut intensites, mut masque) = (Vec::new(), Vec::new());
+        for j in 0..N_PIXELS {
+            for i in 0..N_PIXELS {
+                let v = f64::from(sim.values[[i, j]]);
+                intensites.push(v);
+                masque.push(f64::from(u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0)));
+            }
+        }
+        let tissu: Vec<f64> = intensites.iter().zip(&masque).filter(|(_, &m)| m > 0.0).map(|(&v, _)| v).collect();
+        let moyenne = tissu.iter().sum::<f64>() / tissu.len() as f64;
+        let mut alea = Alea(0xBEEF ^ tissu.len() as u64);
+        for v in &mut intensites {
+            // somme de 12 uniformes - 6 : gaussienne centrée réduite approchée
+            let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0;
+            *v = 0.5 * (*v + bruit * moyenne * gauss) + 100.0;
+        }
+        Experience { points, intensites, masque, verite }
+    }
+
+    /// Mouvement tiré comme dans la simulation de pyrecon : chaque angle et chaque translation uniformes dans ±amplitude.
+    fn mouvement_aleatoire(alea: &mut Alea, degres: f64, mm: f64) -> (Vector3<f64>, Vector3<f64>) {
+        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
+        (Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians), Vector3::new(tire(mm), tire(mm), tire(mm)))
+    }
+
+    /// Erreur quadratique moyenne (TRE) sur les points masqués entre la pose estimée et le mouvement vrai.
+    fn tre(e: &Experience, params: &[f64; 6], pivot: &Vector3<f64>, echelle: f64) -> f64 {
+        let (somme, n) = e
+            .points
+            .iter()
+            .zip(&e.masque)
+            .filter(|(_, &m)| m > 0.0)
+            .fold((0.0, 0), |(s, n), (x, _)| {
+                let vrai = (e.verite * x.push(1.0)).xyz();
+                (s + (deplace(params, x, pivot, echelle) - vrai).norm_squared(), n + 1)
+            });
+        (somme / f64::from(n)).sqrt()
+    }
+
+    /// Recale une expérience et rend (TRE avant, TRE après, NCC finale), ou `None` si la coupe a moins de 500 pixels de masque
+    /// (elle est sortie du tissu : le recalage serait sans objet, et c'est le cas que le pipeline devra écarter et signaler).
+    fn recaler(volume: &VolumeTensors, e: &Experience, config: RegistrationConfig, device: &Device) -> Option<(f64, f64, f64)> {
+        let masques: Vec<Vector3<f64>> = e.points.iter().zip(&e.masque).filter(|(_, &m)| m > 0.0).map(|(x, _)| *x).collect();
+        if masques.len() < 500 {
+            return None;
+        }
+        let pivot = masques.iter().sum::<Vector3<f64>>() / masques.len() as f64;
+        let echelle = rotation_scale_mm(&masques, &pivot).unwrap();
+        let resultat = register_slice(
+            volume,
+            tenseur_points(&e.points, device),
+            tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+            echelle,
+            tenseur_1d(&e.intensites, device),
+            tenseur_1d(&e.masque, device),
+            config,
+        );
+        Some((tre(e, &[0.0; 6], &pivot, echelle), tre(e, &resultat.params, &pivot, echelle), *resultat.ncc_history.last().unwrap()))
+    }
+
+    const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0 };
+
+    /// Série de poses tirées avec une graine, évaluée par `recaler` : (TRE avant, TRE après, NCC finale) par pose.
+    fn serie(volume: &Volume, graine: u64, n: usize, degres: f64, mm: f64, bruit: f64, etiquette: &str) -> Vec<(f64, f64, f64)> {
+        let device = device().autodiff();
+        let vt = VolumeTensors::new(volume, &device);
+        let mut alea = Alea(graine);
+        (0..n)
+            .filter_map(|k| {
+                let (omega, t) = mouvement_aleatoire(&mut alea, degres, mm);
+                recaler(&vt, &experience(volume, &omega, &t, bruit, &format!("{etiquette}{k}")), CONFIG_RECALAGE, &device)
+            })
+            .collect()
+    }
+
+    fn resume(res: &[(f64, f64, f64)]) -> (f64, f64, f64) {
+        let mut apres: Vec<f64> = res.iter().map(|r| r.1).collect();
+        apres.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let succes = apres.iter().filter(|&&e| e <= 0.5).count() as f64 / apres.len() as f64;
+        (succes, apres[apres.len() / 2], apres[apres.len() - 1])
+    }
+
+    /// Critère de la sous-étape 5 (fixé avant le code) : sur 20 poses jamais vues pendant le réglage, mouvement dans la plage de
+    /// pyrecon (±3° par axe, ±3 mm), TRE finale ≤ 0,5 mm pour au moins 95 % des poses. À lancer en `--release --ignored` (la
+    /// simulation des coupes est lente en debug : ≈ 2 min) ; `registration_smoke_test_recovers_two_poses` en est la version courte.
+    #[test]
+    #[ignore = "lent en debug : lancer avec --release --ignored"]
+    fn registration_recovers_motions_in_the_pyrecon_range() {
+        let volume = atlas();
+        let res = serie(&volume, 271828, 20, 3.0, 3.0, 0.0, "eval");
+        let avant = res.iter().map(|r| r.0).sum::<f64>() / res.len() as f64;
+        let (succes, mediane, pire) = resume(&res);
+        println!("20 poses : TRE moyenne avant {avant:.2} mm ; après : médiane {mediane:.2}, pire {pire:.2} mm ; succès (≤ 0,5 mm) {:.0} %", succes * 100.0);
+        assert!(succes >= 0.95, "taux de succès {succes}");
+        assert_eq!(res.len(), 20, "toutes les coupes de l'évaluation doivent avoir un masque");
+        assert!(res.iter().all(|r| r.1 < r.0), "le recalage ne doit jamais dégrader la pose");
+    }
+
+    /// Version courte du critère, dans la suite par défaut : les deux premières poses de la série d'évaluation.
+    #[test]
+    fn registration_smoke_test_recovers_two_poses() {
+        let volume = atlas();
+        let res = serie(&volume, 271828, 2, 3.0, 3.0, 0.0, "fumee");
+        assert_eq!(res.len(), 2);
+        for (avant, apres, ncc) in &res {
+            println!("TRE {avant:.2} → {apres:.2} mm, NCC finale {ncc:.4}");
+            // NCC finale rapportée, sans seuil : la coupe simulée avec PSF n'égale jamais un échantillonnage ponctuel (≈ 0,98).
+            assert!(*apres <= 0.5 && apres < avant, "TRE {avant} → {apres} (NCC finale {ncc})");
+        }
+    }
+
+    /// Exploration (à lancer en `--release --ignored --nocapture`) : taux de succès en fonction de l'amplitude du mouvement, sans
+    /// puis avec bruit (10 % de l'intensité moyenne du tissu) ; rien n'est forcé.
+    #[test]
+    #[ignore = "exploration de la capture (lent en debug)"]
+    fn registration_capture_curve() {
+        let volume = atlas();
+        for bruit in [0.0, 0.1] {
+            for amplitude in [3.0, 6.0, 10.0, 15.0, 20.0] {
+                let res = serie(&volume, 1618, 30, amplitude, amplitude, bruit, "capture");
+                let avant = res.iter().map(|r| r.0).sum::<f64>() / res.len() as f64;
+                let (succes, mediane, pire) = resume(&res);
+                println!("bruit {bruit} ±{amplitude}°/mm : {} coupes sur 30 avec masque ; TRE avant",res.len());
+                println!("   TRE avant {avant:.1} → après médiane {mediane:.2}, pire {pire:.2} ; succès {:.0} %", succes * 100.0);
+            }
         }
     }
 }

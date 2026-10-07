@@ -7,11 +7,11 @@ edition.workspace = true
 medoxide-core = { path = "../medoxide-core" }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
-# Tenseurs et (bientôt) différentiation automatique pour le recalage des coupes (étape 3).
-burn = { workspace = true }
+# Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).
+burn = { workspace = true, features = ["autodiff", "optim"] }
 
 [dev-dependencies]
 # Pour écrire des fichiers NIfTI synthétiques dans les tests (cas d'erreur).
 nifti = { workspace = true }
-# Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU ; autodiff pour vérifier les gradients.
-burn = { workspace = true, features = ["flex", "autodiff"] }
+# Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU .
+burn = { workspace = true, features = ["flex"] }
