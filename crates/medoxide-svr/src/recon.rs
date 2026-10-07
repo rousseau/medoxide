@@ -113,6 +113,129 @@ pub fn normalized_adjoint(grid: &GridSpec, stacks: &[Stack]) -> Result<Normalize
     Ok(NormalizedAdjoint { image, support })
 }
 
+/// Évaluation de l'objectif : valeur de chaque terme et gradient.
+#[derive(Debug, Clone)]
+pub struct Evaluation {
+    /// Attache aux données `½ Σ ‖mₖ ⊙ (Aₖ x − yₖ)‖²`.
+    pub data: f64,
+    /// Régularisation `(α/2) ‖G x‖²`.
+    pub regularization: f64,
+    /// Gradient de la somme, sur la grille entière (nul hors du domaine).
+    pub gradient: Array3<f64>,
+}
+
+impl Evaluation {
+    /// Valeur de l'objectif : attache aux données plus régularisation.
+    pub fn value(&self) -> f64 {
+        self.data + self.regularization
+    }
+}
+
+/// Le problème de reconstruction régularisée : `f(x) = ½ Σₖ ‖mₖ ⊙ (Aₖ x − yₖ)‖² + (α/2) ‖G x‖²`.
+///
+/// - `Aₖ` est l'opérateur d'acquisition de la coupe `k` ([`Volume::simulate_slice`]), `yₖ` ses pixels, `mₖ` son masque cérébral (0 ou 1).
+/// - `G` est le gradient discret (différences avant sur chaque axe, divisées par le pas de la grille) ; `α` n'est **pas** normalisé par
+///   un nombre de pixels ou de voxels, pour que les optimiseurs se comparent sur un objectif sans mise à l'échelle cachée.
+/// - Les **inconnues** sont les voxels du *domaine* (support de l'adjoint normalisé ≥ [`SUPPORT_MIN`]). Les autres sont fixés à 0 ;
+///   la régularisation ne lie que des paires de voxels voisins du domaine.
+///
+/// Le gradient est analytique : `Σₖ Aₖᵀ mₖ (Aₖ x − yₖ) + α GᵀG x`, avec l'adjoint exact [`Volume::back_project`].
+pub struct ReconstructionProblem<'a> {
+    grid: GridSpec,
+    stacks: &'a [Stack],
+    alpha: f64,
+    domain: Array3<bool>,
+    initial: Array3<f32>,
+}
+
+impl<'a> ReconstructionProblem<'a> {
+    /// Construit le problème : calcule l'adjoint normalisé, dont le support définit le domaine et l'image le point de départ.
+    ///
+    /// # Erreurs
+    /// [`SvrError::InvalidRegularization`] si `alpha` est négatif ou non fini ; [`SvrError::NoMask`] si un stack n'a pas de masque.
+    pub fn new(grid: &GridSpec, stacks: &'a [Stack], alpha: f64) -> Result<ReconstructionProblem<'a>, SvrError> {
+        // `!(a >= 0.0)` est vrai aussi pour NaN.
+        if !(alpha >= 0.0) || !alpha.is_finite() {
+            return Err(SvrError::InvalidRegularization);
+        }
+        let init = normalized_adjoint(grid, stacks)?;
+        let domain = init.support.mapv(|s| s >= SUPPORT_MIN);
+        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, domain, initial: init.image })
+    }
+
+    /// Voxels inconnus du problème.
+    pub fn domain(&self) -> &Array3<bool> {
+        &self.domain
+    }
+
+    /// Point de départ : l'adjoint normalisé (nul hors du domaine).
+    pub fn initial_guess(&self) -> Array3<f64> {
+        self.initial.mapv(f64::from)
+    }
+
+    /// Valeur de l'objectif et gradient en `x` (grille entière ; les voxels hors du domaine sont ignorés).
+    pub fn evaluate(&self, x: &Array3<f64>) -> Evaluation {
+        assert_eq!(x.dim(), self.grid.dims, "x doit avoir la forme de la grille");
+        // x restreint au domaine, converti en f32 pour l'opérateur (qui accumule en f64)
+        let mut restreint = Array3::<f32>::zeros(self.grid.dims);
+        for (r, (&v, &d)) in restreint.iter_mut().zip(x.iter().zip(self.domain.iter())) {
+            if d {
+                *r = v as f32;
+            }
+        }
+        let volume = Volume::new(restreint, self.grid.affine).expect("l'affine d'une grille est inversible");
+        let mut gradient = Array3::<f64>::zeros(self.grid.dims);
+        let mut data = 0.0;
+        for stack in self.stacks {
+            let masque = stack.brain_mask().expect("le masque a été vérifié à la construction");
+            for coupe in stack.slices() {
+                let m = masque.voxels().index_axis(Axis(2), coupe.index());
+                let psf = coupe.psf();
+                let sim = volume.simulate_slice(&coupe, &psf);
+                let mut residu = Array2::<f32>::zeros(coupe.dim());
+                for ((i, j), r) in residu.indexed_iter_mut() {
+                    if m[[i, j]] {
+                        *r = sim.values[[i, j]] - coupe.data()[[i, j]];
+                        data += 0.5 * f64::from(*r) * f64::from(*r);
+                    }
+                }
+                volume.back_project(&coupe, &psf, residu.view(), &mut gradient);
+            }
+        }
+        let regularization = regularization(x, &self.domain, self.grid.resolution_mm, self.alpha, &mut gradient);
+        for (g, &d) in gradient.iter_mut().zip(self.domain.iter()) {
+            if !d {
+                *g = 0.0;
+            }
+        }
+        Evaluation { data, regularization, gradient }
+    }
+}
+
+/// `(α/2) ‖G x‖²` pour le gradient discret `G` (différences avant divisées par `h`, paires de voxels tous deux dans `domaine`) ;
+/// ajoute son gradient `α GᵀG x` à `gradient`.
+fn regularization(x: &Array3<f64>, domaine: &Array3<bool>, h: f64, alpha: f64, gradient: &mut Array3<f64>) -> f64 {
+    let (nx, ny, nz) = x.dim();
+    let mut valeur = 0.0;
+    for axe in 0..3 {
+        let pas = [usize::from(axe == 0), usize::from(axe == 1), usize::from(axe == 2)];
+        for i in 0..nx.saturating_sub(pas[0]) {
+            for j in 0..ny.saturating_sub(pas[1]) {
+                for k in 0..nz.saturating_sub(pas[2]) {
+                    let (a, b) = ([i, j, k], [i + pas[0], j + pas[1], k + pas[2]]);
+                    if domaine[a] && domaine[b] {
+                        let d = x[b] - x[a];
+                        valeur += 0.5 * alpha * d * d / (h * h);
+                        gradient[b] += alpha * d / (h * h);
+                        gradient[a] -= alpha * d / (h * h);
+                    }
+                }
+            }
+        }
+    }
+    valeur
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +482,184 @@ mod tests {
             println!("stack {nom:9} seul (trilinéaire) : NCC {:.4}, PSNR {:.2} dB", correlation(b, &verite), psnr(b, &verite, plage));
         }
         assert!(verite.len() > 100_000, "trop peu de voxels de comparaison");
+    }
+    // ------------------------------------------------------------------ sous-étape 2 : objectif (valeur, gradient)
+
+    use nalgebra::{DMatrix, DVector};
+
+    /// Générateur pseudo-aléatoire (xorshift64) déterministe, valeurs dans [0, 1[.
+    struct Alea(u64);
+    impl Alea {
+        fn suivant(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// Deux petits stacks (axial et coronal, 6 × 6 × 2 pixels de 3 mm, épaisseur 4 mm, obliques), intensités et masques (≈ 70 %)
+    /// aléatoires, et leur grille de 5 mm avec une marge de 12 mm, assez large pour que des voxels soient **hors du domaine** (sans quoi les vérifications
+    /// « hors du domaine » seraient vides) : un problème assez petit pour construire sa matrice dense.
+    fn petit_probleme(t: &Temp) -> (GridSpec, Vec<Stack>) {
+        let mut alea = Alea(0xDEAD_BEEF_1234_5678);
+        let specs = [
+            ("ax", Rotation3::from_euler_angles(0.1, -0.08, 0.15), [0.0, 0.0, 0.0]),
+            ("cor", Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2 + 0.1, 0.05, -0.08), [1.0, 0.5, -0.5]),
+        ];
+        let stacks: Vec<Stack> = specs
+            .iter()
+            .map(|(nom, r, centre)| {
+                let affine = affine_centree(r, [3.0, 3.0, 4.0], [2.5, 2.5, 0.5], *centre);
+                let data = Array3::from_shape_fn((6, 6, 2), |_| (alea.suivant() * 10.0) as f32);
+                let masque = Array3::from_shape_fn((6, 6, 2), |_| u8::from(alea.suivant() < 0.7));
+                stack_avec_masque(t, nom, &data, &masque, &affine, [3.0, 3.0, 4.0])
+            })
+            .collect();
+        let grille = reconstruction_grid(&stacks, 5.0, 12.0).unwrap();
+        (grille, stacks)
+    }
+
+    /// Critère 1 : valeur et gradient égalent l'algèbre dense. La matrice `A` est construite en appliquant l'opérateur à chaque voxel
+    /// unité du domaine ; `½‖M(Ax − y)‖² + (α/2)‖Gx‖²` et `AᵀM(Ax − y) + α GᵀGx` sont ensuite calculés en matrices denses.
+    #[test]
+    fn objective_matches_dense_linear_algebra() {
+        let t = Temp::new("dense");
+        let (grille, stacks) = petit_probleme(&t);
+        let alpha = 0.7;
+        let probleme = ReconstructionProblem::new(&grille, &stacks, alpha).unwrap();
+        let voxels: Vec<[usize; 3]> = probleme.domain().indexed_iter().filter(|(_, &d)| d).map(|((i, j, k), _)| [i, j, k]).collect();
+        let n = voxels.len();
+        let hors = probleme.domain().iter().filter(|&&d| !d).count();
+        println!("grille {:?}, {n} voxels dans le domaine, {hors} hors du domaine", grille.dims);
+        assert!(n > 40 && n < 600, "taille du problème dense : {n}");
+        assert!(hors > 100, "il faut des voxels hors du domaine pour éprouver leur exclusion : {hors}");
+        // lignes : (stack, coupe, i, j) ; y et masque dans le même ordre
+        let (mut y, mut m) = (Vec::new(), Vec::new());
+        for stack in &stacks {
+            let masque = stack.brain_mask().unwrap().voxels();
+            for coupe in stack.slices() {
+                for i in 0..coupe.dim().0 {
+                    for j in 0..coupe.dim().1 {
+                        y.push(f64::from(coupe.data()[[i, j]]));
+                        m.push(f64::from(u8::from(masque[[i, j, coupe.index()]])));
+                    }
+                }
+            }
+        }
+        let lignes = y.len();
+        let mut a = DMatrix::<f64>::zeros(lignes, n);
+        for (col, v) in voxels.iter().enumerate() {
+            let mut unite = Array3::<f32>::zeros(grille.dims);
+            unite[*v] = 1.0;
+            let volume = Volume::new(unite, grille.affine).unwrap();
+            let mut r = 0;
+            for stack in &stacks {
+                for coupe in stack.slices() {
+                    let sim = volume.simulate_slice(&coupe, &coupe.psf());
+                    for i in 0..coupe.dim().0 {
+                        for j in 0..coupe.dim().1 {
+                            a[(r, col)] = f64::from(sim.values[[i, j]]);
+                            r += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // paires de voisins dont les deux voxels sont dans le domaine
+        let colonne: std::collections::HashMap<[usize; 3], usize> = voxels.iter().enumerate().map(|(c, v)| (*v, c)).collect();
+        let mut paires = Vec::new();
+        for (c, v) in voxels.iter().enumerate() {
+            for axe in 0..3 {
+                let mut w = *v;
+                w[axe] += 1;
+                if let Some(&c2) = colonne.get(&w) {
+                    paires.push((c, c2));
+                }
+            }
+        }
+        let h = grille.resolution_mm;
+        let mut alea = Alea(77);
+        let x_d = DVector::from_fn(n, |_, _| alea.suivant() * 10.0);
+        // x complet : valeurs du domaine, 7,0 ailleurs (doit être ignoré)
+        let mut x_plein = Array3::<f64>::from_elem(grille.dims, 7.0);
+        for (c, v) in voxels.iter().enumerate() {
+            x_plein[*v] = x_d[c];
+        }
+        let masque_ligne = DVector::from_vec(m.clone());
+        let r = (&a * &x_d - DVector::from_vec(y)).component_mul(&masque_ligne);
+        let data = 0.5 * r.norm_squared();
+        let reg: f64 = paires.iter().map(|&(c1, c2)| 0.5 * alpha * (x_d[c2] - x_d[c1]).powi(2) / (h * h)).sum();
+        let mut g = a.transpose() * &r;
+        for &(c1, c2) in &paires {
+            let d = alpha * (x_d[c2] - x_d[c1]) / (h * h);
+            g[c2] += d;
+            g[c1] -= d;
+        }
+        let e = probleme.evaluate(&x_plein);
+        let relatif = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-12);
+        println!("attache {:.6} (dense {data:.6}) ; régularisation {:.6} (dense {reg:.6})", e.data, e.regularization);
+        assert!(relatif(e.data, data) < 1e-5, "{} contre {data}", e.data);
+        assert!(relatif(e.regularization, reg) < 1e-5, "{} contre {reg}", e.regularization);
+        let norme = g.amax();
+        let pire = voxels.iter().enumerate().map(|(c, v)| (e.gradient[*v] - g[c]).abs()).fold(0.0, f64::max) / norme;
+        println!("gradient : écart max relatif {pire:.2e} (|g|max = {norme:.2})");
+        assert!(pire < 1e-5, "{pire:.2e}");
+        // hors du domaine : gradient nul ; changer x hors du domaine ne change rien
+        assert!(e.gradient.indexed_iter().filter(|(idx, _)| !probleme.domain()[*idx]).all(|(_, &v)| v == 0.0));
+        let mut autre = x_plein.clone();
+        for (idx, v) in autre.indexed_iter_mut() {
+            if !probleme.domain()[idx] {
+                *v = -123.0;
+            }
+        }
+        let e2 = probleme.evaluate(&autre);
+        assert_eq!(e2.value(), e.value());
+        assert_eq!(e2.gradient, e.gradient);
+        assert!(e.data > 0.0 && e.regularization > 0.0);
+    }
+
+    /// Critère 2 : une rampe linéaire `x = c · i` le long d'un axe sur un domaine complet.
+    #[test]
+    fn regularization_of_a_linear_ramp() {
+        let (nx, ny, nz) = (5, 3, 2);
+        let domaine = Array3::from_elem((nx, ny, nz), true);
+        let (c, h, alpha) = (1.5, 2.0, 0.4);
+        let x = Array3::from_shape_fn((nx, ny, nz), |(i, _, _)| c * i as f64);
+        let mut g = Array3::<f64>::zeros((nx, ny, nz));
+        let valeur = regularization(&x, &domaine, h, alpha, &mut g);
+        // G = (différence de valeurs entre voisins) / h : la rampe a une pente c/h par mm. Paires selon x : (nx-1)·ny·nz, chacune de valeur
+        // ½ α (c/h)² ; les autres axes : 0.
+        let attendue = 0.5 * alpha * (c / h).powi(2) * ((nx - 1) * ny * nz) as f64;
+        assert!((valeur - attendue).abs() < 1e-12, "{valeur} contre {attendue}");
+        // gradient α GᵀG x : bord bas −α c/h², bord haut +α c/h², intérieur 0 (Laplacien d'une fonction linéaire)
+        for ((i, _, _), &v) in g.indexed_iter() {
+            let theorique = if i == 0 {
+                -alpha * c / (h * h)
+            } else if i == nx - 1 {
+                alpha * c / (h * h)
+            } else {
+                0.0
+            };
+            assert!((v - theorique).abs() < 1e-12, "i = {i} : {v} contre {theorique}");
+        }
+        // domaine troué : une paire dont un voxel est hors du domaine ne compte pas
+        let mut troue = domaine.clone();
+        troue[[2, 1, 0]] = false;
+        let mut g2 = Array3::<f64>::zeros((nx, ny, nz));
+        let v2 = regularization(&x, &troue, h, alpha, &mut g2);
+        // le voxel (2,1,0) a 2 paires selon x (de valeur ½ α (c/h)² chacune) ; ses paires selon y et z ont une différence nulle
+        let retirees_x = 2.0 * 0.5 * alpha * (c / h).powi(2);
+        assert!((v2 - (attendue - retirees_x)).abs() < 1e-12, "{v2}");
+    }
+
+    #[test]
+    fn problem_rejects_invalid_alpha() {
+        let t = Temp::new("alpha");
+        let (grille, stacks) = petit_probleme(&t);
+        for alpha in [-0.1, f64::NAN, f64::INFINITY] {
+            assert!(matches!(ReconstructionProblem::new(&grille, &stacks, alpha), Err(SvrError::InvalidRegularization)), "{alpha}");
+        }
+        assert!(ReconstructionProblem::new(&grille, &stacks, 0.0).is_ok());
     }
 }

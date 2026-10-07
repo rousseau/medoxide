@@ -51,6 +51,8 @@ pub enum SvrError {
     InvalidPsf,
     /// Aucun stack fourni pour construire la grille de reconstruction.
     NoStacks,
+    /// Poids de régularisation `α` négatif ou non fini.
+    InvalidRegularization,
     /// Résolution ou marge de la grille non finie, ou résolution non strictement positive, ou marge négative.
     InvalidGrid,
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
@@ -81,6 +83,7 @@ impl std::fmt::Display for SvrError {
             SvrError::SingularVolumeAffine => write!(f, "affine de volume non inversible ou non finie"),
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
+            SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
             SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(

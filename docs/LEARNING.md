@@ -1008,4 +1008,31 @@ coïncident) ; numérateur sans masque ; coin minimal pris sur le maximum ; dén
 
 ---
 
-*(à compléter à la prochaine étape : étape 4a, objectif (valeur, gradient) et gradient conjugué)*
+## 2026-10-07 — L'objectif de reconstruction : valeur et gradient (étape 4a, sous-étape 2)
+
+- **Quoi** : l'objectif `f(x) = ½ Σₖ ‖mₖ ⊙ (Aₖ x − yₖ)‖² + (α/2) ‖G x‖²` : attache aux données restreinte aux pixels du masque cérébral, plus Tikhonov du gradient (TK1) ; `G` est le gradient
+  discret (différences avant divisées par le pas `h` de la grille). `α` n'est **pas** normalisé par un nombre de pixels ou de voxels : les optimiseurs se comparent ainsi sur un objectif sans mise à
+  l'échelle cachée (`α` en intensité²).
+- **Quoi** : le **gradient analytique** `Σₖ Aₖᵀ mₖ (Aₖ x − yₖ) + α GᵀG x`. Le premier terme réutilise l'adjoint exact de l'étape 2c ; le second est un Laplacien discret : pour chaque paire de voisins,
+  `α (xⱼ − xᵢ)/h²` est ajouté à un voxel et retiré à l'autre.
+- **Quoi** : le **domaine**. Les inconnues sont les voxels dont le support de l'adjoint normalisé atteint 1e-3 ; les autres sont fixés à 0, leur gradient est nul, et la régularisation ne lie que des
+  paires de voisins tous deux dans le domaine (comme SVRTK et NeSVoR, où le lissage n'agit que là où il y a des données).
+- **Où** : `ReconstructionProblem` (`new`, `domain`, `initial_guess`, `evaluate`), `Evaluation` (`data`, `regularization`, `gradient`, `value`) dans `crates/medoxide-svr/src/recon.rs` ; nouvelle erreur `InvalidRegularization`.
+
+**Critères** (fixés avant le code) et résultats :
+- **Équivalence avec l'algèbre dense** : la matrice `A` est construite en appliquant l'opérateur à chaque voxel unité du domaine ; `½‖M(Ax − y)‖² + (α/2)‖Gx‖²` et son gradient sont calculés en
+  matrices denses (nalgebra). Sur un problème de 202 voxels dans le domaine (1 000 voxels de grille, deux stacks obliques, masques à 70 %) : attache 468,663605 contre 468,663602, régularisation identique, gradient à
+  **6,4e-8** relatif (critère 1e-5). Éprouve aussi, au niveau du problème, que l'adjoint est la transposée exacte.
+- **Rampe linéaire** : valeur `½α(c/h)² × nombre de paires`, gradient `±αc/h²` aux bords et 0 à l'intérieur ; paires dont un voxel est hors domaine écartées.
+- **Hors domaine ignoré** : changer `x` hors du domaine (7,0 puis −123) ne change ni la valeur ni le gradient, exactement.
+
+**Deux erreurs de mon test, corrigées après constat** : (1) l'attente de la rampe oubliait le `1/h²` (le code rendait 2,7, l'attente 10,8, soit un facteur `h² = 4`) : `G` divise par `h`, donc une rampe de
+`c` par voxel a une pente `c/h` par mm ; (2) **deux mutations survivaient** (x hors domaine non ignoré, gradient non annulé hors domaine) parce que mon petit problème avait un domaine égal à la grille entière
+(125 voxels sur 125) : les vérifications « hors du domaine » étaient vides. Marge portée à 12 mm : 202 voxels dans le domaine, 798 hors du domaine, vérifiés par une assertion. Test de 30 s en debug.
+
+**Vérifié par mutation** (7 sur 7 détectées après correction) : résidu non masqué ; signe du gradient de régularisation inversé ; x hors domaine non ignoré ; pas de division par `h²` ; paire comptée si un seul
+voxel est dans le domaine ; gradient non annulé hors du domaine ; régularisation sur la grille entière.
+
+---
+
+*(à compléter à la prochaine étape : étape 4a, gradient conjugué)*
