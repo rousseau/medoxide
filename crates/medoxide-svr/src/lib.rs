@@ -13,6 +13,7 @@
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
 pub mod diff;
+pub mod recon;
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +49,10 @@ pub enum SvrError {
     NoMask(PathBuf),
     /// Un écart type de PSF n'est pas strictement positif et fini, ou un axe n'est pas fini.
     InvalidPsf,
+    /// Aucun stack fourni pour construire la grille de reconstruction.
+    NoStacks,
+    /// Résolution ou marge de la grille non finie, ou résolution non strictement positive, ou marge négative.
+    InvalidGrid,
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -76,6 +81,8 @@ impl std::fmt::Display for SvrError {
             SvrError::SingularVolumeAffine => write!(f, "affine de volume non inversible ou non finie"),
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
+            SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
+            SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
                 "{} : pixdim {pixdim:?} incohérent avec les normes de l'affine {columns:?}",

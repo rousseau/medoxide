@@ -982,4 +982,30 @@ sauvetage (graine 1618, ±6°, 3ᵉ pose : TRE 10,3 mm en simple, 0,18 mm en rob
 
 ---
 
-*(à compléter à la prochaine étape : plusieurs coupes d'un stack, ou première reconstruction)*
+## 2026-10-07 — La grille de reconstruction et l'adjoint normalisé (étape 4a, sous-étape 1)
+
+- **Quoi** : la **grille** du volume à estimer. Isotrope, **alignée sur les axes du monde** (elle ne dépend d'aucun stack), de coin minimal = boîte englobante des positions monde de tous les
+  voxels de masque (nettoyés) de tous les stacks, moins une marge ; `n = ⌈(haut − bas) / résolution⌉ + 1` par axe. La résolution est un paramètre (0,8 mm par défaut, jusqu'à 0,5 mm : 2,6 M voxels pour
+  un vrai sujet à 0,8 mm, 10,5 M à 0,5 mm).
+- **Quoi** : l'**adjoint normalisé** `x₀ = Σ Aₖᵀ (mₖ ⊙ yₖ) / Σ Aₖᵀ mₖ`. Rétroprojeter les pixels donne une somme qui dépend du nombre de coupes touchant le voxel ; la diviser par la rétroprojection d'un masque de 1 en
+  fait une **moyenne pondérée des pixels qui le touchent**. Le dénominateur (le **support**) indique aussi où les données couvrent la grille (seuil 1e-3, sinon 0). Notre `back_project` étant la transposée
+  exacte de l'opérateur (étape 2c), la normalisation est cohérente, ce qui n'est pas le cas de NeSVoR ni de SVRTK.
+- **Où** : `GridSpec`, `reconstruction_grid`, `NormalizedAdjoint`, `normalized_adjoint` dans `crates/medoxide-svr/src/recon.rs` ; deux nouvelles erreurs `NoStacks` et `InvalidGrid` ; référence
+  indépendante `scripts/make_reference_grid.py` (nibabel et scipy).
+
+**Critères** (fixés avant le code) et résultats :
+- **Grille** identique à la référence Python sur les trois stacks TRUFI de 3 sujets réels, pour 3 couples résolution / marge (9 grilles : dimensions exactes, coin à 1e-6 mm).
+- **Constante** : des coupes d'un volume constant (masque partiel, 60 % des pixels) donnent exactement la constante (écart 0) partout où le support dépasse 1e-3 (13 172 voxels sur 39 200 couverts).
+- **Qualité sur l'atlas** (descriptif ; trois stacks axial, coronal, sagittal simulés depuis l'atlas de Gholipour, pixels 0,8 mm, épaisseur 3,5 mm, 186 023 voxels de comparaison) : adjoint normalisé
+  **NCC 0,883, PSNR 20,0 dB** ; stacks seuls en trilinéaire : axial 0,853 / 19,8 dB, **coronal 0,900 / 21,2 dB**, sagittal 0,827 / 19,3 dB.
+
+**Lecture honnête** : l'initialisation est meilleure que deux des trois stacks seuls mais **moins bonne que le meilleur** (le coronal). C'est attendu : `Aᵀy` applique la PSF une seconde fois, donc floute encore ; la
+reconstruction demande de la déconvolution, c'est ce que le solveur doit apporter. Repère pour le critère d'ensemble (fixé à l'étude 06) : battre le meilleur stack seul (≥ 0,900 et ≥ 21,2 dB), viser NCC ≥ 0,95 et
+≥ 22 dB (+2 dB sur l'initialisation). Coût : 20 s pour l'adjoint normalisé de 120 coupes de 188² pixels en release (deux rétroprojections par coupe, numérateur et dénominateur : à fusionner en une seule passe).
+
+**Vérifié par mutation** (5 sur 5 détectées) : marge non ajoutée ; `n` au plancher au lieu du plafond (attrapée seulement par la référence réelle : mon cas calculé à la main tombait sur un entier exact, où les deux
+coïncident) ; numérateur sans masque ; coin minimal pris sur le maximum ; dénominateur calculé avec les pixels au lieu du masque.
+
+---
+
+*(à compléter à la prochaine étape : étape 4a, objectif (valeur, gradient) et gradient conjugué)*
