@@ -1259,4 +1259,15 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
-*(à compléter à la prochaine étape : coarse-to-fine du recalage)*
+## 2026-10-08 — Recalage du gros vers le fin (coarse-to-fine)
+
+- **Quoi** : une référence **floutée** a une NCC qui varie plus doucement avec la pose, donc un bassin d'attraction plus large : une coupe très mal placée y descend vers le bon optimum, qu'une seconde passe sur la référence nette affine. `Volume::blurred(σ)` est un flou gaussien **séparable** (trois convolutions 1D, une par axe, noyau normalisé de rayon ⌈3σ⌉, bords prolongés par le voxel le plus proche) ; `register_slices_coarse_to_fine` enchaîne la passe floue puis la passe nette depuis ses poses ; `LoopConfig::coarse_sigma_voxels` l'active dans la boucle (0 : désactivé).
+- **Rust** : `ndarray::lanes_mut` pour parcourir toutes les lignes d'un axe ; une méthode qui rend `Result` avec une nouvelle variante d'erreur (`InvalidBlur`) ; un test de câblage qui compare une fonction composée à la **suite manuelle** de ses appels (égalité à 1e-12) — il attrape une seconde passe qui repartirait de l'identité ou prendrait la mauvaise référence.
+- **Validation du flou** : impulsion = produit des trois noyaux 1D (1e-7), égal à une convolution 3D **directe** écrite autrement (1e-4), volume constant inchangé ; cinq mutants (noyau non normalisé, un axe oublié, rayon trop court, bords à zéro, largeur fausse) tous détectés.
+- **Résultats** : sur une référence **parfaite** (reconstruction aux vraies poses), σ = 2 voxels corrige les échecs de recalage à ±6° (7 % → 1 %) sans rien dégrader, σ = 4 les corrige aussi mais crée des échecs rares sur le contrôle lisse. Intégré dans la **boucle** (référence reconstruite), σ = 2 gagne à ±6° indépendant (15,3 → 18,9 dB) mais **dégrade ±4° lisse** (23,8 → 17,1 dB, stacks cohérents mais décalés les uns des autres) et double la durée : les critères fixés avant ne sont pas atteints. Une expérience sur référence parfaite ne prédit donc pas le comportement dans la boucle. Le coarse-to-fine reste une option, pas le comportement par défaut.
+
+**Suite** : pistes non essayées (recalage de stack entier au départ, flou seulement aux premiers cycles, σ adaptatif).
+
+---
+
+*(à compléter à la prochaine étape)*

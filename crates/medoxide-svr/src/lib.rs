@@ -55,6 +55,8 @@ pub enum SvrError {
     NoStacks,
     /// Poids de régularisation `α` négatif ou non fini.
     InvalidRegularization,
+    /// Écart type de flou invalide (négatif ou non fini).
+    InvalidBlur,
     /// Le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes différent).
     PoseMismatch,
     /// Résolution ou marge de la grille non finie, ou résolution non strictement positive, ou marge négative.
@@ -89,6 +91,7 @@ impl std::fmt::Display for SvrError {
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
             SvrError::PoseMismatch => write!(f, "le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes)"),
             SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
+            SvrError::InvalidBlur => write!(f, "écart type de flou invalide : σ >= 0 et fini requis"),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
             SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
@@ -226,6 +229,36 @@ impl Volume {
     /// Nombre de voxels sur chaque axe.
     pub fn dim(&self) -> (usize, usize, usize) {
         self.data.dim()
+    }
+
+    /// Ce volume **flouté** par une gaussienne isotrope d'écart type `sigma_voxels` (en voxels), calculée comme trois convolutions 1D successives (une par axe)
+    /// avec un noyau normalisé de rayon `⌈3 σ⌉` ; les bords sont prolongés par le voxel le plus proche (un volume constant reste constant). `sigma_voxels = 0` rend une
+    /// copie. Même affine. Sert au recalage du gros vers le fin : une référence floue a une NCC qui varie plus doucement avec la pose, donc un bassin d'attraction plus large.
+    ///
+    /// # Erreurs
+    /// [`SvrError::InvalidBlur`] si `sigma_voxels` est négatif ou non fini.
+    pub fn blurred(&self, sigma_voxels: f64) -> Result<Volume, SvrError> {
+        if !(sigma_voxels >= 0.0) || !sigma_voxels.is_finite() {
+            return Err(SvrError::InvalidBlur);
+        }
+        if sigma_voxels == 0.0 {
+            return Ok(Volume { data: self.data.clone(), affine: self.affine, inverse: self.inverse });
+        }
+        let rayon = (3.0 * sigma_voxels).ceil() as isize;
+        let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma_voxels).powi(2)).exp()).collect();
+        let somme: f64 = noyau.iter().sum();
+        let noyau: Vec<f64> = noyau.iter().map(|w| w / somme).collect();
+        let mut courant = self.data.mapv(f64::from);
+        for axe in 0..3 {
+            for mut ligne in courant.lanes_mut(Axis(axe)) {
+                let n = ligne.len() as isize;
+                let source: Vec<f64> = ligne.iter().copied().collect();
+                for (i, valeur) in ligne.iter_mut().enumerate() {
+                    *valeur = noyau.iter().enumerate().map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize]).sum();
+                }
+            }
+        }
+        Ok(Volume { data: courant.mapv(|v| v as f32), affine: self.affine, inverse: self.inverse })
     }
 
     /// Indices de voxel **continus** `(i, j, k)` d'un point du monde (les centres de voxel sont aux entiers).
@@ -2395,6 +2428,89 @@ mod tests {
             println!("sx = {sx} : {couvert} pixels couverts sur 12 ; écart max des valeurs simulées {pire:.1e}");
             assert!(couvert >= 6, "le cas de test doit couvrir des pixels : {couvert}");
             assert!(pire < 1e-3, "sx = {sx} : {pire}");
+        }
+    }
+
+    // ------------------------------------------------------------------ flou gaussien
+
+    fn volume_aleatoire(forme: (usize, usize, usize), graine: u64) -> Volume {
+        let mut etat = graine;
+        let data = Array3::from_shape_fn(forme, |_| {
+            etat ^= etat << 13;
+            etat ^= etat >> 7;
+            etat ^= etat << 17;
+            (etat % 10_000) as f32 / 100.0
+        });
+        Volume::new(data, Matrix4::new(0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0)).unwrap()
+    }
+
+    /// Noyau gaussien 1D normalisé de rayon ⌈3σ⌉, écrit indépendamment du code de production (formule explicite).
+    fn noyau_gaussien(sigma: f64) -> Vec<f64> {
+        let rayon = (3.0 * sigma).ceil() as i32;
+        let w: Vec<f64> = (-rayon..=rayon).map(|i| (-(i as f64).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
+        let somme: f64 = w.iter().sum();
+        w.iter().map(|v| v / somme).collect()
+    }
+
+    /// Une impulsion au centre d'un volume assez grand donne le produit des trois noyaux 1D (réponse impulsionnelle) à 1e-7 près, de somme 1 ;
+    /// σ = 0 rend le volume tel quel ; l'affine est conservée.
+    #[test]
+    fn blurring_an_impulse_gives_the_product_of_the_three_gaussian_kernels() {
+        let (n, c) = (25usize, 12usize);
+        let mut data = Array3::<f32>::zeros((n, n, n));
+        data[[c, c, c]] = 1.0;
+        let affine = Matrix4::new(0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0);
+        let volume = Volume::new(data, affine).unwrap();
+        for sigma in [0.7, 1.5, 2.0] {
+            let flou = volume.blurred(sigma).unwrap();
+            let k = noyau_gaussien(sigma);
+            let r = (k.len() / 2) as isize;
+            let mut ecart_max = 0.0_f64;
+            for ((i, j, l), &v) in flou.data().indexed_iter() {
+                let (di, dj, dl) = (i as isize - c as isize + r, j as isize - c as isize + r, l as isize - c as isize + r);
+                let attendu = if (0..k.len() as isize).contains(&di) && (0..k.len() as isize).contains(&dj) && (0..k.len() as isize).contains(&dl) { k[di as usize] * k[dj as usize] * k[dl as usize] } else { 0.0 };
+                ecart_max = ecart_max.max((f64::from(v) - attendu).abs());
+            }
+            let total: f64 = flou.data().iter().map(|&v| f64::from(v)).sum();
+            assert!(ecart_max < 1e-7, "σ = {sigma} : écart {ecart_max:e}");
+            assert!((total - 1.0).abs() < 1e-5, "σ = {sigma} : somme {total}");
+            assert_eq!(flou.affine(), volume.affine());
+        }
+        assert_eq!(volume.blurred(0.0).unwrap().data(), volume.data());
+    }
+
+    /// Un volume constant reste constant (bords prolongés, noyau normalisé) ; le flou d'un volume aléatoire égale une convolution 3D DIRECTE (noyau 3D explicite,
+    /// algorithme différent de trois passes séparables) à 1e-4 près, bords compris ; un σ négatif ou non fini est refusé.
+    #[test]
+    fn blurring_matches_a_direct_3d_convolution_and_keeps_constants() {
+        let constant = Volume::new(Array3::from_elem((9, 8, 7), 3.5_f32), Matrix4::identity()).unwrap();
+        assert!(constant.blurred(1.3).unwrap().data().iter().all(|&v| (v - 3.5).abs() < 1e-5));
+        let volume = volume_aleatoire((11, 9, 8), 0x9E3779B97F4A7C15);
+        let sigma = 1.2;
+        let flou = volume.blurred(sigma).unwrap();
+        let k = noyau_gaussien(sigma);
+        let r = (k.len() / 2) as isize;
+        let (nx, ny, nz) = volume.dim();
+        let mut pire = 0.0_f64;
+        for ((i, j, l), &v) in flou.data().indexed_iter() {
+            let mut attendu = 0.0;
+            for (a, wa) in k.iter().enumerate() {
+                for (b, wb) in k.iter().enumerate() {
+                    for (c, wc) in k.iter().enumerate() {
+                        let p = [
+                            (i as isize + a as isize - r).clamp(0, nx as isize - 1) as usize,
+                            (j as isize + b as isize - r).clamp(0, ny as isize - 1) as usize,
+                            (l as isize + c as isize - r).clamp(0, nz as isize - 1) as usize,
+                        ];
+                        attendu += wa * wb * wc * f64::from(volume.data()[p]);
+                    }
+                }
+            }
+            pire = pire.max((f64::from(v) - attendu).abs());
+        }
+        assert!(pire < 1e-4, "écart à la convolution directe : {pire:e}");
+        for mauvais in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(volume.blurred(mauvais), Err(SvrError::InvalidBlur)), "{mauvais}");
         }
     }
 }

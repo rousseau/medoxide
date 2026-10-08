@@ -100,6 +100,31 @@ pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeT
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
 }
 
+/// **Recalage du gros vers le fin** : comme [`register_slices`] contre `reference`, mais en deux passes si `sigma_voxels > 0` : d'abord contre la référence floutée
+/// de `sigma_voxels` voxels ([`Volume::blurred`]), puis contre la référence nette depuis les poses du premier passage (composées à gauche, comme toujours). Une
+/// référence floue a une NCC plus lisse, donc un bassin d'attraction plus large : une coupe très mal placée y descend vers le bon optimum, que le passage net affine.
+/// Avec `sigma_voxels = 0`, un seul passage net (identique à [`register_slices`]).
+///
+/// Le rapport est celui du **dernier** passage (NCC, relances, `correction_rms_mm` : la correction de ce passage seulement, pas la correction totale).
+///
+/// # Erreurs
+/// Celles de [`register_slices`] ; [`SvrError::InvalidBlur`] si `sigma_voxels` est négatif ou non fini.
+pub fn register_slices_coarse_to_fine(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    reference: &Volume,
+    sigma_voxels: f64,
+    config: RobustConfig,
+    device: &Device,
+) -> Result<AlignmentReport, SvrError> {
+    if sigma_voxels == 0.0 {
+        return register_slices(stacks, poses, &VolumeTensors::new(reference, device), config, device);
+    }
+    let floue = reference.blurred(sigma_voxels)?;
+    let premier = register_slices(stacks, poses, &VolumeTensors::new(&floue, device), config, device)?;
+    register_slices(stacks, &premier.poses, &VolumeTensors::new(reference, device), config, device)
+}
+
 /// Réglages de la boucle recalage / reconstruction ([`reconstruct_with_motion_correction`]).
 #[derive(Debug, Clone, Copy)]
 pub struct LoopConfig {
@@ -117,6 +142,10 @@ pub struct LoopConfig {
     /// stacks), pour que ses coupes n'aient pas imprimé leur propre erreur dans la référence ; les cycles suivants recalent contre la reconstruction
     /// complète. Coûte une reconstruction par stack et par cycle concerné ; exige au moins 2 stacks si non nul.
     pub leave_one_stack_out_cycles: usize,
+    /// Écart type (en voxels de la grille) du flou du premier passage de recalage : si non nul, chaque recalage se fait en deux passes, d'abord contre la référence
+    /// **floutée** (bassin d'attraction plus large, voir [`Volume::blurred`]), puis contre la référence nette depuis les poses du premier ([`register_slices_coarse_to_fine`]).
+    /// 0 : un seul passage net. Mesuré sur une référence parfaite : 2 voxels (1,6 mm) corrigent les échecs à ±6° sans rien dégrader, 4 voxels créent des échecs rares.
+    pub coarse_sigma_voxels: f64,
 }
 
 /// Résultat de la boucle.
@@ -166,7 +195,7 @@ pub fn reconstruct_with_motion_correction(
                 recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
             } else {
                 let reference = Volume::new(resultat.x.mapv(|v| v as f32), grid.affine)?;
-                register_slices(stacks, &poses, &VolumeTensors::new(&reference, device), config.robust, device)?
+                register_slices_coarse_to_fine(stacks, &poses, &reference, config.coarse_sigma_voxels, config.robust, device)?
             };
             poses = rapport.poses.clone();
             rapports.push(rapport);
@@ -196,7 +225,7 @@ fn recaler_sans_soi_meme(
         let depart = departs[s].take().unwrap_or_else(|| probleme.initial_guess());
         let x = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance).x;
         let reference = Volume::new(x.mapv(|v| v as f32), grid.affine)?;
-        let rapport = register_slices(std::slice::from_ref(&stacks[s]), &poses.select(&[s]), &VolumeTensors::new(&reference, device), config.robust, device)?;
+        let rapport = register_slices_coarse_to_fine(std::slice::from_ref(&stacks[s]), &poses.select(&[s]), &reference, config.coarse_sigma_voxels, config.robust, device)?;
         for r in rapport.slices {
             nouvelles.set(s, r.slice, *rapport.poses.get(0, r.slice));
             rapports.push(SliceReport { stack: s, ..r });

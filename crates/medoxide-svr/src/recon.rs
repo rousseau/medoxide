@@ -1830,6 +1830,45 @@ mod tests {
         }
     }
 
+    /// Recalage du gros vers le fin, câblage : avec σ = 0 le résultat est celui de `register_slices` (mêmes poses à 1e-12) ; avec σ > 0 il est celui de la suite
+    /// manuelle « passe sur la référence floutée, puis passe nette depuis les poses de la première » (mêmes poses à 1e-12), ce qui exige que la seconde passe reparte des
+    /// poses de la première et utilise la référence nette ; et il retrouve les poses d'un volume analytique (erreur ≤ 1 mm, ±2°/±2 mm) ; σ négatif refusé.
+    #[test]
+    fn coarse_to_fine_registration_is_the_blurred_pass_then_the_sharp_pass() {
+        let t = Temp::new("c2f_cablage");
+        let volume = volume_de_blobs();
+        let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = RobustConfig::new(0.9);
+        let identite = SlicePoses::identity(&stacks);
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            let mut pire = 0.0_f64;
+            for (si, stack) in stacks.iter().enumerate() {
+                for coupe in stack.slices() {
+                    pire = pire.max((a.get(si, coupe.index()) - b.get(si, coupe.index())).abs().max());
+                }
+            }
+            pire
+        };
+        // σ = 0 : un seul passage net
+        let direct = align::register_slices(&stacks, &identite, &VolumeTensors::new(&volume, &device), config, &device).unwrap();
+        let zero = align::register_slices_coarse_to_fine(&stacks, &identite, &volume, 0.0, config, &device).unwrap();
+        assert!(ecart(&direct.poses, &zero.poses) < 1e-12);
+        // σ > 0 : suite manuelle
+        let sigma = 1.5;
+        let floue = volume.blurred(sigma).unwrap();
+        let premier = align::register_slices(&stacks, &identite, &VolumeTensors::new(&floue, &device), config, &device).unwrap();
+        let manuel = align::register_slices(&stacks, &premier.poses, &VolumeTensors::new(&volume, &device), config, &device).unwrap();
+        let c2f = align::register_slices_coarse_to_fine(&stacks, &identite, &volume, sigma, config, &device).unwrap();
+        assert!(ecart(&manuel.poses, &c2f.poses) < 1e-12, "écart à la suite manuelle : {}", ecart(&manuel.poses, &c2f.poses));
+        // la seconde passe compte : sans elle (poses du premier passage seules), le résultat diffère
+        assert!(ecart(&premier.poses, &c2f.poses) > 1e-6, "la passe nette ne change rien : test non discriminant");
+        let (depart, apres) = (erreurs_de_pose(&stacks, &identite, &vraies), erreurs_de_pose(&stacks, &c2f.poses, &vraies));
+        println!("erreur de départ {:?} ; après gros-vers-fin {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
+        assert!(apres.iter().all(|&e| e <= 1.0), "erreurs après gros-vers-fin : {apres:?}");
+        assert!(matches!(align::register_slices_coarse_to_fine(&stacks, &identite, &volume, -1.0, config, &device), Err(SvrError::InvalidBlur)));
+    }
+
     /// Idempotence et composition : en repartant des poses obtenues, le second passage change très peu les poses (déplacement RMS du second delta
     /// < 0,3 mm) et ne dégrade pas l'erreur ; en partant de poses vraies perturbées, le recalage compose le delta à la pose courante.
     #[test]
@@ -2265,6 +2304,71 @@ mod tests {
         }
     }
 
+    /// Flou gaussien séparable d'écart type `sigma` (en voxels), bords prolongés par le voxel le plus proche. `sigma = 0` rend l'image telle quelle.
+    fn flouter(image: &Array3<f32>, sigma: f64) -> Array3<f32> {
+        if sigma <= 0.0 {
+            return image.clone();
+        }
+        let rayon = (3.0 * sigma).ceil() as isize;
+        let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma).powi(2)).exp()).collect();
+        let somme: f64 = noyau.iter().sum();
+        let noyau: Vec<f64> = noyau.iter().map(|w| w / somme).collect();
+        let mut courant = image.mapv(f64::from);
+        for axe in 0..3 {
+            let n = courant.shape()[axe] as isize;
+            let source = courant.clone();
+            for (indice, valeur) in courant.indexed_iter_mut() {
+                let position = [indice.0, indice.1, indice.2];
+                let mut acc = 0.0;
+                for (t, w) in noyau.iter().enumerate() {
+                    let mut p = position;
+                    p[axe] = (position[axe] as isize + t as isize - rayon).clamp(0, n - 1) as usize;
+                    acc += w * source[[p[0], p[1], p[2]]];
+                }
+                *valeur = acc;
+            }
+        }
+        courant.mapv(|v| v as f32)
+    }
+
+    /// EXPÉRIENCE coarse-to-fine (étude 06 §23) : recalage de toutes les coupes depuis les poses d'en-tête contre la reconstruction aux VRAIES poses (référence parfaite),
+    /// avec des passes successives sur la référence floutée de `sigma` voxels (puis nette si le dernier vaut 0), chaque passe repartant des poses de la précédente.
+    /// Schémas : [0] (actuel), [2, 0], [4, 0], [4, 2, 0]. Critères fixés avant : à ±6° indépendant, coupes en échec (> 3 mm) ≤ 2 % et ≤ 1 mm ≥ 97 % ; sans dégrader
+    /// ±2° et ±4° (≥ 99 % à ≤ 1 mm, aucun échec). Mouvement lisse ±6° : contrôle non utilisé pour le choix.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn experiment_coarse_to_fine_on_a_perfect_reference() {
+        let device = burn::tensor::Device::flex().autodiff();
+        for (modele, amplitude) in [("independant", 2u32), ("independant", 4), ("independant", 6), ("lisse", 6)] {
+            let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.to_string(), format!("pyrecon_{modele}")) };
+            let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
+            let source = Stack::read(&PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}/ours_true_poses.nii.gz", racine()))).expect("exporter d'abord");
+            let nette = Volume::from_stack(&source);
+            let identite = SlicePoses::identity(&stacks);
+            println!("--- {modele} ±{amplitude}");
+            for schema in [vec![0.0], vec![2.0, 0.0], vec![4.0, 0.0], vec![4.0, 2.0, 0.0]] {
+                let debut = std::time::Instant::now();
+                let mut poses = identite.clone();
+                let mut registered = Vec::new();
+                for &sigma in &schema {
+                    let reference = if sigma == 0.0 { Volume::from_stack(&source) } else { Volume::new(flouter(nette.data(), sigma), *source.affine()).unwrap() };
+                    let rapport = align::register_slices(&stacks, &poses, &VolumeTensors::new(&reference, &device), RobustConfig::new(0.9), &device).unwrap();
+                    registered = rapport.slices.iter().map(|r| r.registered).collect();
+                    poses = rapport.poses;
+                }
+                let erreurs = erreurs_de_pose(&stacks, &poses, &vraies);
+                let mut e: Vec<f64> = erreurs.iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| *e).collect();
+                e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let part = |s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
+                println!(
+                    "  σ = {schema:?} voxels : {} coupes ; médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 1 mm {:.0} %, > 3 mm {:.0} % ; {:.0} s",
+                    e.len(), e[e.len() / 2], e[(e.len() as f64 * 0.9) as usize], e[e.len() - 1], part(1.0), 100.0 - part(3.0), debut.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
     /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
@@ -2294,7 +2398,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0 };
+        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0 };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -2340,6 +2444,9 @@ mod tests {
     /// Évalue la boucle (voir `evaluate_the_loop_on_sta31`) sur un jeu de stacks simulés depuis `atlas` avec les vraies poses `vraies`.
     fn evaluer_la_boucle(etiquette: &str, slug: &str, atlas: &Volume, stacks: &[Stack], vraies: &SlicePoses, amplitude: u32) {
         let device = burn::tensor::Device::flex().autodiff();
+        // flou du premier passage de recalage (voxels) : variable d'environnement MEDOXIDE_SIGMA ; 0 par défaut (recalage net seul) : à σ = 2 la boucle gagne à ±6° indépendant
+        // mais perd à ±4° lisse (étude 06 §25), donc le gros-vers-fin n'est pas le comportement par défaut
+        let sigma_grossier: f64 = std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap());
         let (atlas, stacks, vraies) = (atlas, stacks, vraies);
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
@@ -2355,7 +2462,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 6 };
+        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 6, coarse_sigma_voxels: sigma_grossier };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();
