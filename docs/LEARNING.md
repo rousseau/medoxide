@@ -1243,4 +1243,20 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
-*(à compléter à la prochaine étape : boucle recalage / reconstruction, sous-étape 4 : la boucle)*
+## 2026-10-08 — La boucle recalage / reconstruction et son évaluation (sous-étape 4)
+
+- **Quoi** : `reconstruct_with_motion_correction` enchaîne « reconstruire, recaler toutes les coupes contre le volume courant, composer les deltas, recommencer ». Chaque reconstruction repart à chaud de la précédente. Un **observateur** (`impl FnMut(cycle, volume, poses)`, une *fermeture* passée en paramètre) est appelé après chaque reconstruction : la boucle ne connaît pas la vérité, c'est l'appelant qui mesure la qualité à chaque cycle.
+- **Rust** : `impl FnMut` comme paramètre (une fermeture qui peut modifier ce qu'elle capture, ici des vecteurs de résultats) ; `#[derive(Clone)]` sur `Stack` et `BrainMask` pour fabriquer « les autres stacks » ; `SlicePoses::select` pour extraire les poses d'un sous-ensemble de stacks.
+- **Auto-biais de la référence** : recaler une coupe contre un volume qu'elle a contribué à construire donne un recalage presque nul (la coupe a déjà imprimé sa propre erreur dans la référence) et une NCC élevée **trompeuse**. D'où l'option `leave_one_stack_out_cycles` : chaque stack est recalé contre la reconstruction faite avec les **autres**. Mesuré : sans elle, 17,1 dB après 3 cycles ; avec, 23,6 dB. Repasser à la référence complète après coup dégrade (23,6 → 22,4 dB) alors que la NCC monte (0,93 → 0,965).
+- **Repère de sortie** : une reconstruction n'est définie qu'à un mouvement rigide global près ; son repère est ancré par les données, pas par la vérité. Comparer à l'atlas **sans** caler fausse les mesures, surtout avec un mouvement lisse (SVRTK à ±2° lisse : 20,2 dB brut, 27,7 dB après calage ; un diagnostic de « la boucle échoue à ±4° » était faux pour cette raison). Les mesures retenues : calage rigide sur l'atlas avant de comparer, et erreur de pose après retrait du meilleur mouvement rigide commun (**Kabsch**, via une décomposition en valeurs singulières).
+- **Benchmark externe** : SVRTK (Docker, `mirtk reconstruct`, paramètres par défaut) sur des données simulées par le simulateur de pyrecon, dont la géométrie a été vérifiée sur des images analytiques (rampe linéaire : 4e-16) ; protocole recoupé avec Rust (mêmes NCC et PSNR à 4 chiffres sur le même ensemble de voxels). Deux erreurs de mon propre contrôle, trouvées en route : un critère d'autocorrélation comparait un estimateur biaisé (séries courtes) à la valeur théorique ; une recherche de convention d'Euler ignorait le signe des angles.
+- **Où** : `align.rs` (`reconstruct_with_motion_correction`, `LoopConfig`, `LoopResult`, recalage sans le stack), `recon.rs` (tests : bornes, boucle, diagnostics), `scripts/make_pyrecon_benchmark.py`, `scripts/compare_reconstructions.py`, `scripts/check_pyrecon_simulator.py`.
+
+**Résultats** (STA31, données simulées par pyrecon, PSNR après calage rigide, tout le tissu ; entre parenthèses l'intérieur à ≥ 5 mm du bord) : mouvement indépendant par coupe ±2° : 24,8 dB (29,7) pour la boucle contre 17,4 (28,1) pour SVRTK, 26,2 (31,6) avec les vraies poses ; ±4° : 23,8 (28,9) contre 13,3 (20,2) ; ±6° : les deux échouent (15,3 et 11,7 dB). Mouvement lisse avec sauts (paramètres choisis a priori) : ±6° : 20,6 (25,5) contre 12,9 (18,1). SVRTK sans mouvement : 22,6 (30,9) contre 26,9 (32,2) pour nous. Notre boucle est nettement plus lente (14 à 25 min contre 52 s).
+**Critères du plan** : à ±2° indépendant, les critères fixés sur la TRE brute échouent (médiane 0,60 mm) ; relus **après coup** sans repère ils sont atteints (médiane 0,39 mm, PSNR à 1,4 dB de la borne haute) ; sur nos propres données simulées ils ne le sont pas (0,65 mm). Réserves : un seul atlas et une graine par amplitude, SVRTK non réglé (décision), mouvement lisse arbitraire, NeSVoR non évalué.
+
+**Suite** : coarse-to-fine pour les coupes dont le départ est hors du bassin d'attraction (à ±6°), après diagnostic (étude 06 §23).
+
+---
+
+*(à compléter à la prochaine étape : coarse-to-fine du recalage)*

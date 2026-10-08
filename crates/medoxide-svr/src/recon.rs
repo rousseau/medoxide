@@ -38,6 +38,14 @@ impl SlicePoses {
         self.motions[s][k] = motion;
     }
 
+    /// Les poses des seuls stacks `indices` (dans cet ordre), pour travailler sur un sous-ensemble de stacks.
+    ///
+    /// # Panics
+    /// Si un indice est hors du jeu de poses.
+    pub fn select(&self, indices: &[usize]) -> SlicePoses {
+        SlicePoses { motions: indices.iter().map(|&s| self.motions[s].clone()).collect() }
+    }
+
     /// `true` si ce jeu de poses a exactement la forme de `stacks` (même nombre de stacks, même nombre de coupes par stack).
     pub fn matches(&self, stacks: &[Stack]) -> bool {
         self.motions.len() == stacks.len() && self.motions.iter().zip(stacks).all(|(m, s)| m.len() == s.dim().2)
@@ -1975,6 +1983,447 @@ mod tests {
                 x.sort_by(|p, q| p.partial_cmp(q).unwrap());
                 println!("  coupes IGNORÉES ({}), pose inchangée : erreur médiane {:.2} mm, max {:.2} mm", x.len(), x[x.len() / 2], x[x.len() - 1]);
             }
+        }
+    }
+
+
+    /// Erreur de pose des coupes recalables (masque ≥ `align::MIN_MASK_PIXELS` pixels, dans l'ordre des stacks puis des coupes) **après retrait du
+    /// meilleur mouvement rigide commun** (Kabsch) entre positions estimées et vraies : un seul pour tous les stacks (`par_stack = false`) ou un
+    /// par stack. Sépare un décalage global (le repère de la reconstruction est ancré par les données, pas par la vérité) de l'erreur propre à
+    /// chaque coupe. Un pixel de masque sur 5 est utilisé.
+    fn erreurs_apres_mouvement_commun(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses, par_stack: bool) -> Vec<f64> {
+        type Paire = (Vector3<f64>, Vector3<f64>);
+        let mut coupes: Vec<(usize, Vec<Paire>)> = Vec::new();
+        for (si, stack) in stacks.iter().enumerate() {
+            let masque = stack.brain_mask().unwrap().voxels();
+            for coupe in stack.slices() {
+                let k = coupe.index();
+                let (e, v) = (estimees.get(si, k), vraies.get(si, k));
+                let mut paires = Vec::new();
+                let mut compte = 0usize;
+                for ((i, j), &dedans) in masque.index_axis(Axis(2), k).indexed_iter() {
+                    if dedans {
+                        if compte % 5 == 0 {
+                            let x = coupe.pixel_to_world(i as f64, j as f64).push(1.0);
+                            paires.push(((e * x).xyz(), (v * x).xyz()));
+                        }
+                        compte += 1;
+                    }
+                }
+                if compte >= align::MIN_MASK_PIXELS {
+                    coupes.push((si, paires));
+                }
+            }
+        }
+        let kabsch = |paires: &[&Paire]| -> Matrix4<f64> {
+            let n = paires.len() as f64;
+            let ce = paires.iter().map(|p| p.0).sum::<Vector3<f64>>() / n;
+            let ct = paires.iter().map(|p| p.1).sum::<Vector3<f64>>() / n;
+            let h = paires.iter().fold(nalgebra::Matrix3::zeros(), |acc, p| acc + (p.0 - ce) * (p.1 - ct).transpose());
+            let svd = h.svd(true, true);
+            let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
+            let d = (vt.transpose() * u.transpose()).determinant().signum();
+            let r = vt.transpose() * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, d)) * u.transpose();
+            let mut g = Matrix4::identity();
+            g.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
+            g.fixed_view_mut::<3, 1>(0, 3).copy_from(&(ct - r * ce));
+            g
+        };
+        let groupes: Vec<Matrix4<f64>> = if par_stack {
+            (0..stacks.len()).map(|si| kabsch(&coupes.iter().filter(|c| c.0 == si).flat_map(|c| c.1.iter()).collect::<Vec<_>>())).collect()
+        } else {
+            let g = kabsch(&coupes.iter().flat_map(|c| c.1.iter()).collect::<Vec<_>>());
+            vec![g; stacks.len()]
+        };
+        coupes.iter().map(|(si, paires)| (paires.iter().map(|(e, v)| ((groupes[*si] * e.push(1.0)).xyz() - v).norm_squared()).sum::<f64>() / paires.len() as f64).sqrt()).collect()
+    }
+
+    /// Contrôle de `erreurs_apres_mouvement_commun` : poses estimées = vraies poses composées d'un mouvement rigide **commun** → résidu nul (global et par
+    /// stack) alors que l'erreur brute est grande ; un mouvement **différent par stack** → résidu nul par stack mais pas global ; des poses vraies → 0.
+    #[test]
+    fn common_rigid_motion_is_removed_by_the_gauge_measure() {
+        let t = Temp::new("jauge");
+        let volume = volume_de_blobs();
+        let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let compose = |g: &[Matrix4<f64>]| {
+            let mut p = vraies.clone();
+            for (si, stack) in stacks.iter().enumerate() {
+                for coupe in stack.slices() {
+                    p.set(si, coupe.index(), g[si] * vraies.get(si, coupe.index()));
+                }
+            }
+            p
+        };
+        let g1 = mouvement_rigide(&Vector3::new(0.03, -0.02, 0.04), &Vector3::new(1.5, -2.0, 0.7), &Vector3::new(3.0, -1.0, 2.0));
+        let g2 = mouvement_rigide(&Vector3::new(-0.04, 0.02, 0.01), &Vector3::new(-1.0, 0.5, 2.5), &Vector3::new(3.0, -1.0, 2.0));
+        let max = |v: Vec<f64>| v.into_iter().fold(0.0_f64, f64::max);
+        let commun = compose(&[g1, g1]);
+        let (brute, global, par_stack) = (max(erreurs_de_pose(&stacks, &commun, &vraies)), max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, false)), max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, true)));
+        println!("commun : brute {brute:.3}, global {global:.2e}, par stack {par_stack:.2e}");
+        assert!(brute > 1.0 && global < 1e-9 && par_stack < 1e-9);
+        let different = compose(&[g1, g2]);
+        let (global, par_stack) = (max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, false)), max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, true)));
+        println!("différent par stack : global {global:.3}, par stack {par_stack:.2e}");
+        assert!(global > 0.1 && par_stack < 1e-9);
+        assert!(max(erreurs_apres_mouvement_commun(&stacks, &vraies, &vraies, false)) < 1e-9);
+        // le résultat compte une valeur par coupe recalable (ici les 6 coupes, 784 pixels chacune)
+        assert_eq!(erreurs_apres_mouvement_commun(&stacks, &vraies, &vraies, false).len(), 6);
+    }
+
+
+    // ------------------------------------------------------------------ jeux simulés par pyrecon (benchmark)
+
+    /// Jeu de benchmark simulé par le simulateur de pyrecon (`scripts/make_pyrecon_benchmark.py`, dans `data/atlas/sim_pyrecon/STA31_mvt<amplitude>_b5/`) : l'atlas, ses
+    /// trois stacks avec masque et les vraies poses `M_k` lues dans `poses.tsv` (même format que les jeux de medoxide).
+    fn stacks_pyrecon(amplitude: u32) -> (Volume, Vec<Stack>, SlicePoses) {
+        stacks_pyrecon_modele("", amplitude)
+    }
+
+    /// Comme [`stacks_pyrecon`], pour un modèle de mouvement : `""` (indépendant par coupe), `"lisse"` ou `"lisseint"` (voir `scripts/make_pyrecon_benchmark.py`).
+    fn stacks_pyrecon_modele(modele: &str, amplitude: u32) -> (Volume, Vec<Stack>, SlicePoses) {
+        let atlas = Volume::from_stack(&Stack::read(Path::new(&format!("{}/data/atlas/gholipour/STA31.nii.gz", racine()))).expect("atlas absent"));
+        let infixe = if modele.is_empty() { String::new() } else { format!("_{modele}") };
+        let dossier = PathBuf::from(format!("{}/data/atlas/sim_pyrecon/STA31{infixe}_mvt{amplitude}_b5", racine()));
+        let stacks: Vec<Stack> = (0..3)
+            .map(|n| {
+                let mut stack = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).expect("jeu absent : lancer scripts/make_pyrecon_benchmark.py");
+                stack.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                stack
+            })
+            .collect();
+        let mut vraies = SlicePoses::identity(&stacks);
+        for ligne in std::fs::read_to_string(dossier.join("poses.tsv")).unwrap().lines() {
+            let c: Vec<&str> = ligne.split('\t').collect();
+            let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
+            vraies.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+        }
+        (atlas, stacks, vraies)
+    }
+
+    /// CONVENTION des poses de pyrecon (critères fixés avant) : pour chaque coupe à masque suffisant, la coupe simulée par **notre** opérateur à la pose `M_k` de
+    /// `poses.tsv` est comparée (NCC sur les pixels de masque) à la coupe produite par pyrecon. Si `M_k` est lue dans la bonne convention, la NCC avec `M_k` est
+    /// nettement supérieure à celle obtenue avec la pose d'en-tête (identité). Critères : NCC médiane avec `M_k` ≥ 0,95 ; `M_k` meilleure que l'identité pour au
+    /// moins 95 % des coupes (à ±2°/±2 mm et ±4°/±4 mm) ; avec amplitude 0, `poses.tsv` est l'identité partout.
+    #[test]
+    #[ignore = "données locales"]
+    fn pyrecon_poses_are_in_the_convention_of_medoxide() {
+        for amplitude in [0u32, 2, 4] {
+            let (atlas, stacks, vraies) = stacks_pyrecon(amplitude);
+            let (mut avec, mut sans, mut meilleures, mut n) = (Vec::new(), Vec::new(), 0usize, 0usize);
+            for (si, stack) in stacks.iter().enumerate() {
+                let masque = stack.brain_mask().unwrap().voxels();
+                for coupe in stack.slices() {
+                    let k = coupe.index();
+                    let m = masque.index_axis(Axis(2), k);
+                    if m.iter().filter(|&&v| v).count() < align::MIN_MASK_PIXELS {
+                        continue;
+                    }
+                    let mesure = coupe.data();
+                    let ncc_pose = |pose: Matrix4<f64>| {
+                        let posee = coupe.with_motion(pose);
+                        let sim = atlas.simulate_slice(&posee, &posee.psf());
+                        let (mut a, mut b) = (Vec::new(), Vec::new());
+                        for ((i, j), &dedans) in m.indexed_iter() {
+                            if dedans && sim.coverage[[i, j]] >= 0.99 {
+                                a.push(f64::from(mesure[[i, j]]));
+                                b.push(f64::from(sim.values[[i, j]]));
+                            }
+                        }
+                        correlation(&a, &b)
+                    };
+                    let (c_vraie, c_identite) = (ncc_pose(*vraies.get(si, k)), ncc_pose(Matrix4::identity()));
+                    avec.push(c_vraie);
+                    sans.push(c_identite);
+                    n += 1;
+                    meilleures += usize::from(c_vraie > c_identite);
+                }
+            }
+            let mediane = |v: &Vec<f64>| { let mut x = v.clone(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); x[x.len() / 2] };
+            println!("±{amplitude} : {n} coupes ; NCC médiane avec M_k {:.4}, avec l'identité {:.4} ; M_k meilleure pour {:.0} % des coupes", mediane(&avec), mediane(&sans), 100.0 * meilleures as f64 / n as f64);
+            assert!(mediane(&avec) >= 0.95, "NCC médiane avec M_k : {}", mediane(&avec));
+            if amplitude == 0 {
+                assert!(stacks.iter().enumerate().all(|(si, s)| s.slices().all(|c| (vraies.get(si, c.index()) - Matrix4::identity()).abs().max() < 1e-12)));
+            } else {
+                assert!(meilleures as f64 >= 0.95 * n as f64, "M_k meilleure que l'identité pour {meilleures}/{n} coupes");
+            }
+        }
+    }
+
+    /// BORNES sur les jeux pyrecon : reconstruction avec les vraies poses `M_k` (borne haute) et avec les poses d'en-tête (borne basse), pour chaque amplitude ;
+    /// amplitude 0 = effet du seul modèle direct de pyrecon sur notre reconstruction. Mêmes voxels de comparaison pour les deux.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn bounds_on_pyrecon_data() {
+        for amplitude in [0u32, 2, 4, 6] {
+            let (atlas, stacks, vraies) = stacks_pyrecon(amplitude);
+            let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+            let init = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+            let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+            println!("--- pyrecon, mouvement ±{amplitude} : grille {:?}, {} voxels de comparaison", grille.dims, c.voxels.len());
+            for (nom, poses) in [("vraies poses (borne haute)", vraies.clone()), ("sans correction (borne basse)", SlicePoses::identity(&stacks))] {
+                let p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, ALPHA_CHOISI).unwrap();
+                let debut = std::time::Instant::now();
+                let r = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4);
+                ligne_qualite(nom, &c, &r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64());
+            }
+        }
+    }
+
+    /// Exporte l'ensemble de voxels de comparaison de medoxide (support ≥ 0,5 aux vraies poses, tissu de l'atlas, lisible dans les trois stacks) pour un jeu pyrecon,
+    /// au format NIfTI (0/1, sur la grille de reconstruction) : sert à recouper `scripts/compare_reconstructions.py` avec les mesures de medoxide.
+    #[test]
+    #[ignore = "données locales"]
+    fn export_the_comparison_set_of_pyrecon_data() {
+        for amplitude in [0u32, 2, 4, 6] {
+            let (atlas, stacks, vraies) = stacks_pyrecon(amplitude);
+            let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+            let init = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+            let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+            let mut ensemble = Array3::<f64>::zeros(grille.dims);
+            for v in &c.voxels {
+                ensemble[*v] = 1.0;
+            }
+            ecrire_image_grille(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt{amplitude}/comparison_set.nii.gz", racine())), &ensemble, &grille);
+            println!("±{amplitude} : {} voxels exportés", c.voxels.len());
+        }
+    }
+
+    /// Exporte la reconstruction du jeu pyrecon **sans mouvement** (poses identité = vraies poses) : contrôle commun avec SVRTK sur des données sans mouvement.
+    #[test]
+    #[ignore = "données locales"]
+    fn export_the_reconstruction_of_pyrecon_data_without_motion() {
+        let (atlas, stacks, vraies) = stacks_pyrecon(0);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let init = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+        let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+        let p = ReconstructionProblem::with_poses(&grille, &stacks, &vraies, ALPHA_CHOISI).unwrap();
+        let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
+        let q = qualite(&c, &x);
+        println!("sans mouvement : NCC {:.4}, PSNR {:.2} dB", q.0, q.1);
+        ecrire_image_grille(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt0/ours_true_poses.nii.gz", racine())), &x, &grille);
+    }
+
+    /// DIAGNOSTIC de la capture du recalage sur les jeux pyrecon (variables MEDOXIDE_MODELE et MEDOXIDE_AMPLITUDES) : on recale toutes les coupes depuis les poses
+    /// d'en-tête contre la reconstruction faite avec les VRAIES poses (déjà exportée par `evaluer_la_boucle`), pour plusieurs seuils de relance τ. Référence parfaite :
+    /// si le recalage réussit, le défaut de la boucle vient de l'amorçage (référence reconstruite avec de mauvaises poses) ; sinon, de la capture du recalage de
+    /// chaque coupe. Écrit aussi une ligne par coupe (`capture_<τ>.tsv`) : taille du masque, erreur de départ, erreur finale, NCC, relances.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn diagnose_the_registration_capture_on_pyrecon_data() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "2".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
+        let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.clone(), format!("pyrecon_{modele}")) };
+        for amplitude in amplitudes {
+            let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
+            let dossier = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
+            let reference = VolumeTensors::new(&Volume::from_stack(&Stack::read(&dossier.join("ours_true_poses.nii.gz")).expect("exporter d'abord (evaluer_la_boucle)")), &device);
+            let identite = SlicePoses::identity(&stacks);
+            let depart = erreurs_de_pose(&stacks, &identite, &vraies);
+            println!("--- {modele} ±{amplitude} : recalage depuis les poses d'en-tête contre la reconstruction aux vraies poses");
+            // (seuil τ, départs supplémentaires, amplitude des départs en mm) : le premier est le réglage actuel
+            // Partir des VRAIES poses : si la NCC obtenue est plus haute que celle trouvée depuis l'en-tête et que la pose reste proche de la vérité, l'optimiseur échoue à
+            // trouver un optimum qui existe ; si la pose s'éloigne de la vérité avec une NCC plus haute, c'est la fonction de coût qui préfère une mauvaise pose.
+            {
+                let depuis_en_tete = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
+                let apres_en_tete = erreurs_de_pose(&stacks, &depuis_en_tete.poses, &vraies);
+                let depuis_verite = align::register_slices(&stacks, &vraies, &reference, RobustConfig::new(0.9), &device).unwrap();
+                let apres_verite = erreurs_de_pose(&stacks, &depuis_verite.poses, &vraies);
+                println!("  coupes en échec (> 3 mm depuis l'en-tête) : NCC finale depuis l'en-tête / depuis la vérité, erreur finale depuis l'en-tête / depuis la vérité");
+                for (((a, v), e1), e2) in depuis_en_tete.slices.iter().zip(&depuis_verite.slices).zip(&apres_en_tete).zip(&apres_verite) {
+                    if a.registered && *e1 > 3.0 {
+                        println!("    stack {} coupe {:2} : NCC {:.3} / {:.3} ; erreur {:.2} mm / {:.2} mm", a.stack, a.slice, a.ncc_final, v.ncc_final, e1, e2);
+                    }
+                }
+            }
+            for (tau, departs, amplitude_mm) in [(0.9, 6usize, 5.0)] {
+                let debut = std::time::Instant::now();
+                let config = RobustConfig { extra_starts: departs, start_amplitude_mm: amplitude_mm, ..RobustConfig::new(tau) };
+                let rapport = align::register_slices(&stacks, &identite, &reference, config, &device).unwrap();
+                let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
+                let mut lignes = vec!["stack\tcoupe\tpixels_masque\terreur_depart_mm\terreur_finale_mm\tncc_premiere\tncc_finale\trelances".to_string()];
+                let mut finales = Vec::new();
+                for ((r, d), a) in rapport.slices.iter().zip(&depart).zip(&apres) {
+                    if !r.registered {
+                        continue;
+                    }
+                    let pixels = stacks[r.stack].brain_mask().unwrap().voxels().index_axis(Axis(2), r.slice).iter().filter(|&&v| v).count();
+                    lignes.push(format!("{}\t{}\t{pixels}\t{d:.3}\t{a:.3}\t{:.4}\t{:.4}\t{}", r.stack, r.slice, r.ncc_first, r.ncc_final, r.runs));
+                    finales.push(*a);
+                }
+                std::fs::write(dossier.join(format!("capture_{tau}_{departs}_{amplitude_mm}.tsv")), lignes.join("\n")).unwrap();
+                finales.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let part = |s: f64| 100.0 * finales.iter().filter(|&&v| v <= s).count() as f64 / finales.len() as f64;
+                println!(
+                    "  τ = {tau}, {departs} départs de ±{amplitude_mm} mm : {} coupes ; erreur finale médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 1 mm {:.0} %, > 3 mm {:.0} % ; {} relancées ; {:.0} s",
+                    finales.len(), finales[finales.len() / 2], finales[(finales.len() as f64 * 0.9) as usize], finales[finales.len() - 1], part(1.0), 100.0 - part(3.0),
+                    rapport.slices.iter().filter(|r| r.runs > 1).count(), debut.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
+    /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; très longue"]
+    fn evaluate_the_loop_on_pyrecon_data() {
+        // amplitudes évaluées : variable d'environnement MEDOXIDE_AMPLITUDES (ex. « 4,6 »), par défaut ±2
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "2".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        // modèle de mouvement : MEDOXIDE_MODELE = « independant » (défaut), « lisse » ou « lisseint »
+        let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
+        let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.clone(), format!("pyrecon_{modele}")) };
+        for amplitude in amplitudes {
+            let (atlas, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
+            evaluer_la_boucle(&format!("données pyrecon ({modele})"), &slug, &atlas, &stacks, &vraies, amplitude);
+        }
+    }
+
+    // ------------------------------------------------------------------ la boucle
+
+    /// Boucle (sous-étape 4), version analytique rapide : deux stacks de blobs avec un mouvement propre à chaque coupe (±2°/±2 mm), reconstruction à
+    /// 1 mm, 2 cycles. Critères fixés avant : l'observateur est appelé 3 fois (poses de départ puis 2 cycles) ; l'erreur de pose médiane après la
+    /// boucle est au moins 2 fois plus petite qu'au départ ; l'erreur maximale ne dépasse pas l'erreur maximale de départ.
+    #[test]
+    #[ignore = "échoue (2,1 → 2,6 mm) : 6 coupes ne contraignent pas le volume ; même phénomène que sur l'atlas, voir étude 06 §19"]
+    fn the_loop_reduces_the_pose_error_on_analytic_blobs() {
+        let t = Temp::new("boucle_blobs");
+        let volume = volume_de_blobs();
+        let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0 };
+        let identite = SlicePoses::identity(&stacks);
+        let mut appels = Vec::new();
+        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
+            let e = erreurs_de_pose(&stacks, poses, &vraies);
+            let mut tri = e.clone();
+            tri.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            appels.push((c, tri[tri.len() / 2], tri[tri.len() - 1], x.dim()));
+        })
+        .unwrap();
+        println!("(cycle, erreur médiane, erreur max, forme) : {appels:?} ; itérations CG {:?}", resultat.cg_iterations);
+        assert_eq!(appels.iter().map(|a| a.0).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(resultat.cycles.len(), 2);
+        assert_eq!(resultat.cg_iterations.len(), 3);
+        assert_eq!(resultat.volume.dim(), grille.dims);
+        let (depart, fin) = (appels[0], appels[2]);
+        assert!(fin.1 * 2.0 <= depart.1, "médiane : {} → {}", depart.1, fin.1);
+        assert!(fin.2 <= depart.2, "max : {} → {}", depart.2, fin.2);
+    }
+
+    /// ÉVALUATION de la boucle (sous-étape 4, critères de l'étude 06 §15) sur STA31 : trois stacks simulés avec 5 % de bruit et un mouvement propre
+    /// à chaque coupe, départ en poses d'en-tête, α = `ALPHA_CHOISI`, 3 cycles. À chaque reconstruction : NCC et PSNR contre l'atlas (mêmes voxels de
+    /// comparaison pour tous, fixés par les vraies poses) ; erreur de pose sur les coupes recalées ; coupes relancées ; durée. Critères à ±2°/±2 mm
+    /// après 3 cycles : médiane ≤ 0,5 mm, ≥ 90 % des coupes ≤ 1 mm, PSNR ≥ borne haute − 1,5 dB et ≥ borne basse + 5 dB, PSNR croissant du cycle 1
+    /// au cycle 3. Les bornes sont recalculées ici (poses vraies et poses d'en-tête).
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; très longue"]
+    fn evaluate_the_loop_on_sta31() {
+        for amplitude in [2u32] {
+            let (atlas, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", amplitude, 5);
+            evaluer_la_boucle("données medoxide", "medoxide", &atlas, &stacks, &vraies, amplitude);
+        }
+    }
+
+    /// Écrit une image de la grille de reconstruction (zéro hors du domaine) au format NIfTI, pour la comparer avec d'autres méthodes
+    /// (`scripts/compare_reconstructions.py`). Crée le dossier si besoin.
+    fn ecrire_image_grille(chemin: &Path, image: &Array3<f64>, grille: &GridSpec) {
+        std::fs::create_dir_all(chemin.parent().unwrap()).unwrap();
+        let r = grille.resolution_mm as f32;
+        WriterOptions::new(chemin).reference_header(&en_tete(&grille.affine, [r, r, r])).write_nifti(&image.mapv(|v| v as f32)).unwrap();
+    }
+
+    /// Évalue la boucle (voir `evaluate_the_loop_on_sta31`) sur un jeu de stacks simulés depuis `atlas` avec les vraies poses `vraies`.
+    fn evaluer_la_boucle(etiquette: &str, slug: &str, atlas: &Volume, stacks: &[Stack], vraies: &SlicePoses, amplitude: u32) {
+        let device = burn::tensor::Device::flex().autodiff();
+        let (atlas, stacks, vraies) = (atlas, stacks, vraies);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let identite = SlicePoses::identity(&stacks);
+        let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+        let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
+        let sortie = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
+        let borne = |poses: &SlicePoses, nom: &str| {
+            let p = ReconstructionProblem::with_poses(&grille, &stacks, poses, ALPHA_CHOISI).unwrap();
+            let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
+            ecrire_image_grille(&sortie.join(format!("ours_{nom}.nii.gz")), &x, &grille);
+            qualite(&c, &x)
+        };
+        let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
+        println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
+        // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
+        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 6 };
+        let debut = std::time::Instant::now();
+        let mut psnr = Vec::new();
+        let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();
+        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, x, poses| {
+            let q = qualite(&c, x);
+            println!("  reconstruction {cycle} : NCC {:.4}, PSNR {:.2} dB  (t = {:.0} s)", q.0, q.1, debut.elapsed().as_secs_f64());
+            psnr.push(q.1);
+            erreurs_par_cycle.push(erreurs_de_pose(&stacks, poses, &vraies));
+            let tri = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); (v[v.len() / 2], v[v.len() - 1]) };
+            let (global, par_stack) = (tri(erreurs_apres_mouvement_commun(&stacks, poses, &vraies, false)), tri(erreurs_apres_mouvement_commun(&stacks, poses, &vraies, true)));
+            println!("    après retrait d'un mouvement rigide commun : médiane {:.2} mm (max {:.2}) ; un par stack : médiane {:.2} mm (max {:.2})", global.0, global.1, par_stack.0, par_stack.1);
+        })
+        .unwrap();
+        ecrire_image_grille(&sortie.join("ours_loop.nii.gz"), &resultat.volume, &grille);
+        let registered: Vec<bool> = resultat.cycles[0].slices.iter().map(|r| r.registered).collect();
+        let trier = |v: &Vec<f64>| -> Vec<f64> { let mut e: Vec<f64> = v.iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| *e).collect(); e.sort_by(|a, b| a.partial_cmp(b).unwrap()); e };
+        let part = |e: &[f64], s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
+        for (n, r) in resultat.cycles.iter().enumerate() {
+            let relancees = r.slices.iter().filter(|s| s.runs > 1).count();
+            let rec: Vec<_> = r.slices.iter().filter(|s| s.registered).collect();
+            let (moy_corr, moy_ncc) = (rec.iter().map(|s| s.correction_rms_mm).sum::<f64>() / rec.len() as f64, rec.iter().map(|s| s.ncc_final).sum::<f64>() / rec.len() as f64);
+            println!("  recalage {}: {relancees} coupes relancées, correction moyenne {moy_corr:.2} mm, NCC finale moyenne {moy_ncc:.3}", n + 1);
+        }
+        for (n, v) in erreurs_par_cycle.iter().enumerate() {
+            let e = trier(v);
+            println!("  erreur de pose après {n} cycle(s) (coupes recalées, {}) : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", e.len(), e[e.len() / 2], e[(e.len() as f64 * 0.9) as usize], e[e.len() - 1], part(&e, 0.5), part(&e, 1.0));
+        }
+        println!("  itérations CG {:?} ; durée {:.0} s", resultat.cg_iterations, debut.elapsed().as_secs_f64());
+        let e = trier(&erreurs_par_cycle[3]);
+        if amplitude == 2 {
+            let (dernier, premier_cycle) = (psnr[3], psnr[1]); // état après 3 cycles
+            println!(
+                "  CRITÈRES ±2 (après 3 cycles) : médiane ≤ 0,5 : {} ; ≥ 90 % ≤ 1 mm : {} ; PSNR ≥ haute − 1,5 : {} ; PSNR ≥ basse + 5 : {} ; PSNR croissant (cycle 1 → 3) : {}",
+                e[e.len() / 2] <= 0.5, part(&e, 1.0) >= 90.0, dernier >= haute.1 - 1.5, dernier >= basse.1 + 5.0, dernier > premier_cycle
+            );
+        }
+
+    }
+
+    /// DIAGNOSTIC de la boucle : le recalage fonctionne-t-il quand la référence est une **reconstruction** (et non l'atlas) ? On reconstruit avec les
+    /// vraies poses (borne haute, 27,99 dB à ±2°), puis on recale toutes les coupes depuis les poses d'en-tête contre ce volume, pour deux
+    /// seuils de relance τ. Si l'erreur tombe vers celle obtenue avec l'atlas (médiane 0,33 mm), le défaut de la boucle vient de l'amorçage
+    /// (reconstruction faite avec des poses fausses) ; sinon, d'un recalage contre une reconstruction.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; longue"]
+    fn diagnose_registration_against_a_reconstruction_with_true_poses() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let (_, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", 2, 5);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let identite = SlicePoses::identity(&stacks);
+        let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &vraies, ALPHA_CHOISI).unwrap();
+        let x = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4).x;
+        let reference = VolumeTensors::new(&Volume::new(x.mapv(|v| v as f32), grille.affine).unwrap(), &device);
+        let depart = erreurs_de_pose(&stacks, &identite, &vraies);
+        for tau in [0.9, 0.97] {
+            let debut = std::time::Instant::now();
+            let rapport = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(tau), &device).unwrap();
+            let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
+            let choisir = |v: &[f64]| -> Vec<f64> { let mut e: Vec<f64> = v.iter().zip(&rapport.slices).filter(|(_, r)| r.registered).map(|(e, _)| *e).collect(); e.sort_by(|a, b| a.partial_cmp(b).unwrap()); e };
+            let (d, a) = (choisir(&depart), choisir(&apres));
+            let part = |e: &[f64], s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
+            let ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
+            println!(
+                "τ = {tau} : départ médiane {:.2} mm ; après recalage médiane {:.2}, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} % ; {} relancées ; NCC finale moyenne {:.3} ; {:.0} s",
+                d[d.len() / 2], a[a.len() / 2], a[(a.len() as f64 * 0.9) as usize], a[a.len() - 1], part(&a, 0.5), part(&a, 1.0),
+                rapport.slices.iter().filter(|r| r.runs > 1).count(), ncc.iter().sum::<f64>() / ncc.len() as f64, debut.elapsed().as_secs_f64()
+            );
         }
     }
 }

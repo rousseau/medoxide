@@ -3,10 +3,11 @@
 
 use burn::prelude::Device;
 use nalgebra::{Matrix4, Vector3};
+use ndarray::Array3;
 
 use crate::diff::{pose_to_matrix, register_slice_robust, rotation_scale_mm, RobustConfig, VolumeTensors};
-use crate::recon::SlicePoses;
-use crate::{Stack, SvrError};
+use crate::recon::{GridSpec, ReconstructionProblem, SlicePoses};
+use crate::{Stack, SvrError, Volume};
 
 /// Nombre minimal de pixels de masque pour recaler une coupe. En deçà, la NCC est trop peu informée (et la mise à l'échelle de la rotation, mal
 /// définie) : la coupe garde sa pose et le rapport la signale.
@@ -95,6 +96,112 @@ pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeT
             nouvelles.set(si, k, delta * courante);
             rapports.push(SliceReport { stack: si, slice: k, registered: true, ncc_first: resultat.first_ncc, ncc_final: resultat.ncc, runs: resultat.runs, correction_rms_mm: correction });
         }
+    }
+    Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// Réglages de la boucle recalage / reconstruction ([`reconstruct_with_motion_correction`]).
+#[derive(Debug, Clone, Copy)]
+pub struct LoopConfig {
+    /// Nombre de cycles « recaler puis reconstruire » après la première reconstruction.
+    pub cycles: usize,
+    /// Poids `α` de la régularisation de la reconstruction (voir [`ReconstructionProblem`]).
+    pub alpha: f64,
+    /// Itérations maximales du gradient conjugué à chaque reconstruction.
+    pub cg_max_iterations: usize,
+    /// Tolérance relative du gradient conjugué.
+    pub cg_tolerance: f64,
+    /// Réglages du recalage de chaque coupe.
+    pub robust: RobustConfig,
+    /// Nombre de premiers cycles où chaque stack est recalé contre une reconstruction faite **sans lui** (avec les poses courantes des autres
+    /// stacks), pour que ses coupes n'aient pas imprimé leur propre erreur dans la référence ; les cycles suivants recalent contre la reconstruction
+    /// complète. Coûte une reconstruction par stack et par cycle concerné ; exige au moins 2 stacks si non nul.
+    pub leave_one_stack_out_cycles: usize,
+}
+
+/// Résultat de la boucle.
+#[derive(Debug, Clone)]
+pub struct LoopResult {
+    /// Poses finales (celles de la dernière reconstruction).
+    pub poses: SlicePoses,
+    /// Dernière reconstruction, sur la grille.
+    pub volume: Array3<f64>,
+    /// Rapport du recalage de chaque cycle (`config.cycles` rapports).
+    pub cycles: Vec<AlignmentReport>,
+    /// Itérations du gradient conjugué de chaque reconstruction (`config.cycles + 1` valeurs).
+    pub cg_iterations: Vec<usize>,
+}
+
+/// **Boucle recalage / reconstruction** : reconstruit le volume avec les poses `initial`, puis répète `config.cycles` fois « recaler toutes les
+/// coupes contre le volume courant ([`register_slices`]), reconstruire avec les nouvelles poses ». Chaque reconstruction repart (démarrage à chaud)
+/// de la précédente, restreinte au nouveau domaine.
+///
+/// `observateur(c, x, poses)` est appelé après chaque reconstruction (`c = 0` : poses de départ ; `c = config.cycles` : reconstruction finale) ;
+/// il sert à mesurer la qualité à chaque cycle sans que la boucle connaisse la vérité.
+///
+/// `device` doit avoir l'autodiff activé.
+///
+/// # Erreurs
+/// Celles de [`ReconstructionProblem::with_poses`] et de [`register_slices`].
+pub fn reconstruct_with_motion_correction(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    initial: &SlicePoses,
+    config: LoopConfig,
+    device: &Device,
+    mut observateur: impl FnMut(usize, &Array3<f64>, &SlicePoses),
+) -> Result<LoopResult, SvrError> {
+    let mut poses = initial.clone();
+    let mut x: Option<Array3<f64>> = None;
+    let mut hors_stack: Vec<Option<Array3<f64>>> = vec![None; stacks.len()]; // démarrage à chaud de chaque reconstruction « sans le stack s »
+    let (mut rapports, mut iterations) = (Vec::new(), Vec::new());
+    for c in 0..=config.cycles {
+        let probleme = ReconstructionProblem::with_poses(grid, stacks, &poses, config.alpha)?;
+        let depart = x.take().unwrap_or_else(|| probleme.initial_guess());
+        let resultat = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance);
+        iterations.push(resultat.iterations);
+        observateur(c, &resultat.x, &poses);
+        if c < config.cycles {
+            let rapport = if c < config.leave_one_stack_out_cycles {
+                recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
+            } else {
+                let reference = Volume::new(resultat.x.mapv(|v| v as f32), grid.affine)?;
+                register_slices(stacks, &poses, &VolumeTensors::new(&reference, device), config.robust, device)?
+            };
+            poses = rapport.poses.clone();
+            rapports.push(rapport);
+        }
+        x = Some(resultat.x);
+    }
+    Ok(LoopResult { poses, volume: x.expect("au moins une reconstruction"), cycles: rapports, cg_iterations: iterations })
+}
+
+/// Un recalage de tous les stacks où chaque stack `s` est recalé contre la reconstruction faite avec **les autres** stacks (poses courantes).
+/// `departs[s]` mémorise la dernière reconstruction « sans `s` » pour repartir à chaud.
+fn recaler_sans_soi_meme(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    config: LoopConfig,
+    device: &Device,
+    departs: &mut [Option<Array3<f64>>],
+) -> Result<AlignmentReport, SvrError> {
+    let mut nouvelles = poses.clone();
+    let mut rapports = Vec::new();
+    for s in 0..stacks.len() {
+        let autres: Vec<usize> = (0..stacks.len()).filter(|&t| t != s).collect();
+        let sous_stacks: Vec<Stack> = autres.iter().map(|&t| stacks[t].clone()).collect();
+        let sous_poses = poses.select(&autres);
+        let probleme = ReconstructionProblem::with_poses(grid, &sous_stacks, &sous_poses, config.alpha)?;
+        let depart = departs[s].take().unwrap_or_else(|| probleme.initial_guess());
+        let x = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance).x;
+        let reference = Volume::new(x.mapv(|v| v as f32), grid.affine)?;
+        let rapport = register_slices(std::slice::from_ref(&stacks[s]), &poses.select(&[s]), &VolumeTensors::new(&reference, device), config.robust, device)?;
+        for r in rapport.slices {
+            nouvelles.set(s, r.slice, *rapport.poses.get(0, r.slice));
+            rapports.push(SliceReport { stack: s, ..r });
+        }
+        departs[s] = Some(x);
     }
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
 }

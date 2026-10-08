@@ -109,7 +109,7 @@ const MASK_AFFINE_TOLERANCE_MM: f64 = 1e-3;
 ///
 /// Les petits îlots parasites (jusqu'à plusieurs % des voxels sur certains stacks) agrandissent les
 /// boîtes englobantes et déplacent les barycentres ; la plus grande composante 3D (26 voisins) les écarte.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BrainMask {
     voxels: Array3<bool>,
     discarded: usize,
@@ -686,7 +686,7 @@ pub fn read_stacks(chemins: &[PathBuf]) -> Result<Vec<Stack>, SvrError> {
 /// Les champs sont privés : un `Stack` ne se construit que par [`Stack::read`], qui vérifie la
 /// géométrie. Tout `Stack` existant a donc une affine finie, de colonnes orthogonales et de
 /// normes cohérentes avec `pixdim`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stack {
     path: PathBuf,
     data: Array3<f32>,
