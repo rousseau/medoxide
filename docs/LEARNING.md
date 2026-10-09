@@ -1282,4 +1282,16 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-09 — Premier essai sur des données réelles, comparé à SVRTK
+
+- **Quoi** : l'algorithme en place (boucle de 6 cycles, référence sans le stack recalé) sur deux sujets réels (3 stacks TRUFI chacun), comparé à SVRTK avec ses réglages par défaut. **Sans vérité terrain**, le juge est une **prédiction hors échantillon** : pour chaque stack mis de côté, on reconstruit avec les deux autres, puis on recale les coupes du stack mis de côté contre ce volume (même machinerie pour toutes les méthodes) ; une NCC plus haute signifie un meilleur volume. Différences **appariées** par coupe, intervalle de confiance par bootstrap.
+- **Rust** : lecture d'un jeu de données par **variables d'environnement** (`std::env::var`) plutôt que dans le code, pour qu'aucun identifiant de sujet n'apparaisse dans le dépôt ; `Stack` rendu `Clone` pour fabriquer des sous-ensembles de stacks.
+- **Résultats** : sur le sujet **calme**, notre boucle est un peu meilleure que « sans correction » (+0,004 de NCC, significatif) et comparable à SVRTK (+0,010, non significatif). Sur le sujet **agité**, elle bat SVRTK et « sans correction » sur deux repliements sur trois (stack coronal : 0,741 contre 0,715 et 0,615) mais **diverge** sur le troisième : avec seulement deux stacks, la référence « sans le stack recalé » se réduit à un seul stack et les corrections augmentent à chaque cycle (8,8 → 14,6 mm). Avec trois stacks la même boucle converge (5,6 → 1,1 mm). SVRTK prédit **moins bien** que « sans correction » sur ce sujet (−0,061, significatif), à ses réglages par défaut et avec notre juge.
+- **Défauts visibles** (figures locales) : texture quadrillée de nos reconstructions réelles (pas d'appariement d'intensité entre stacks, étape non faite) ; bandes parasites hors de la tête, dues à des coupes de bord mal recalées.
+- **Limites** : deux sujets, un jeu, juge qui est notre propre recalage, reconstruction à deux stacks (pas le cas d'usage réel), 21 à 29 coupes par repliement.
+
+**Suite** : référence adaptée quand il n'y a que deux stacks, appariement d'intensité entre stacks, rejet des coupes de bord mal recalées (pondération robuste, plus tard).
+
+---
+
 *(à compléter à la prochaine étape)*

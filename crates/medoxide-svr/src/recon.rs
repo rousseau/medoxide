@@ -2532,6 +2532,108 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------ données réelles (aucun identifiant dans le code : tout passe par des variables d'environnement)
+
+    /// Les trois stacks TRUFI (axial, coronal, sagittal ; run 1) d'un sujet de données réelles, avec leur masque cérébral. Variables d'environnement : `MEDOXIDE_DONNEES_REELLES`
+    /// (racine du jeu BIDS local), `MEDOXIDE_SUJET` (identifiant du sujet) ; les masques sont lus dans `derivatives/medx-fetalbet`. Les données sont celles de patientes :
+    /// rien n'est copié hors de `data/`, aucun identifiant n'apparaît dans le code.
+    fn stacks_reels() -> Vec<Stack> {
+        let racine = PathBuf::from(std::env::var("MEDOXIDE_DONNEES_REELLES").expect("MEDOXIDE_DONNEES_REELLES : racine du jeu BIDS local"));
+        let sujet = std::env::var("MEDOXIDE_SUJET").expect("MEDOXIDE_SUJET : identifiant du sujet");
+        let mut sessions: Vec<PathBuf> = std::fs::read_dir(racine.join(&sujet)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("ses-")).collect();
+        sessions.sort();
+        let session = sessions.into_iter().next().expect("aucune session");
+        ["trufiax", "truficor", "trufisag"]
+            .iter()
+            .map(|plan| {
+                let nom = format!("{sujet}_{}_acq-{plan}_run-1", session.file_name().unwrap().to_string_lossy());
+                let mut stack = Stack::read(&session.join("anat").join(format!("{nom}_T2w.nii.gz"))).expect("stack absent");
+                let masque = racine.join("derivatives/medx-fetalbet").join(&sujet).join(session.file_name().unwrap()).join("anat").join(format!("{nom}_desc-brain_mask.nii.gz"));
+                stack.set_brain_mask(&masque).expect("masque absent");
+                stack
+            })
+            .collect()
+    }
+
+    /// Dossier de sortie local des résultats sur données réelles (`data/svr/results/<sujet>/`).
+    fn sortie_reelle() -> PathBuf {
+        PathBuf::from(format!("{}/data/svr/results/{}", racine(), std::env::var("MEDOXIDE_SUJET").unwrap()))
+    }
+
+    /// Reconstruction par notre algorithme sur un sujet réel (variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET ; optionnelles : MEDOXIDE_STACKS_RETENUS = indices des stacks
+    /// gardés dans {0 axial, 1 coronal, 2 sagittal}, par défaut « 0,1,2 » ; MEDOXIDE_CYCLES, 6 par défaut ; MEDOXIDE_ETIQUETTE, suffixe des fichiers). Écrit dans `data/svr/results/<sujet>/` :
+    /// `ours_loop<étiquette>.nii.gz` (volume final), `ours_header<étiquette>.nii.gz` (reconstruction sans correction, poses d'en-tête) et `poses_loop<étiquette>.tsv` (mouvement estimé par coupe,
+    /// même format que les jeux simulés). Pas de vérité terrain : voir `judge_a_volume_with_a_held_out_stack`.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données réelles locales ; longue"]
+    fn reconstruct_a_real_subject() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let tous = stacks_reels();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| "0,1,2".into()).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
+        let cycles: usize = std::env::var("MEDOXIDE_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
+        let etiquette = std::env::var("MEDOXIDE_ETIQUETTE").unwrap_or_default();
+        let sortie = sortie_reelle();
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let identite = SlicePoses::identity(&stacks);
+        println!("stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles", grille.dims, stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        let debut = std::time::Instant::now();
+        let sans = ReconstructionProblem::with_poses(&grille, &stacks, &identite, ALPHA_CHOISI).unwrap();
+        let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
+        ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
+        println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
+        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles, coarse_sigma_voxels: 0.0 };
+        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, _, _| {
+            println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
+        })
+        .unwrap();
+        for (n, r) in resultat.cycles.iter().enumerate() {
+            let rec: Vec<_> = r.slices.iter().filter(|s| s.registered).collect();
+            println!(
+                "  recalage {} : {} coupes recalées sur {}, {} relancées, correction moyenne {:.2} mm, NCC finale moyenne {:.3}",
+                n + 1, rec.len(), r.slices.len(), rec.iter().filter(|s| s.runs > 1).count(), rec.iter().map(|s| s.correction_rms_mm).sum::<f64>() / rec.len() as f64, rec.iter().map(|s| s.ncc_final).sum::<f64>() / rec.len() as f64
+            );
+        }
+        ecrire_image_grille(&sortie.join(format!("ours_loop{etiquette}.nii.gz")), &resultat.volume, &grille);
+        let mut lignes = Vec::new();
+        for (n, stack) in stacks.iter().enumerate() {
+            for coupe in stack.slices() {
+                let m = resultat.poses.get(n, coupe.index());
+                lignes.push(format!("{}\t{}\t{}", retenus[n], coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+            }
+        }
+        std::fs::write(sortie.join(format!("poses_loop{etiquette}.tsv")), lignes.join("\n")).unwrap();
+        println!("terminé en {:.0} s", debut.elapsed().as_secs_f64());
+    }
+
+    /// JUGE SANS VÉRITÉ TERRAIN, par prédiction hors échantillon : les coupes du stack `MEDOXIDE_STACK_TEST` (0 axial, 1 coronal, 2 sagittal), que le volume `MEDOXIDE_VOLUME` (NIfTI, une
+    /// reconstruction faite SANS ce stack, par n'importe quelle méthode) n'a jamais vues, sont recalées contre ce volume (même machinerie pour toutes les méthodes : `register_slices` robuste,
+    /// depuis les poses d'en-tête, pixels du masque) ; plus le volume prédit bien les coupes inconnues, plus la NCC finale est haute. Rapporte la médiane, la moyenne et le 10ᵉ centile de la
+    /// NCC finale, et la correction moyenne. Variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données réelles locales"]
+    fn judge_a_volume_with_a_held_out_stack() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let chemin = std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME");
+        let teste = stacks_reels().remove(indice);
+        let volume = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("volume illisible"));
+        let un_stack = std::slice::from_ref(&teste);
+        let rapport = align::register_slices(un_stack, &SlicePoses::identity(un_stack), &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        // NCC de chaque coupe, à côté du volume (`<volume>.juge.tsv`), pour des comparaisons appariées entre méthodes
+        let par_coupe: Vec<String> = rapport.slices.iter().filter(|r| r.registered).map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm)).collect();
+        std::fs::write(format!("{chemin}.juge.tsv"), format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n"))).unwrap();
+        let mut ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
+        let correction = rapport.slices.iter().filter(|r| r.registered).map(|r| r.correction_rms_mm).sum::<f64>() / ncc.len() as f64;
+        ncc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "JUGE stack {indice} : {} coupes ; NCC finale médiane {:.4}, moyenne {:.4}, 10e centile {:.4} ; correction moyenne {correction:.2} mm",
+            ncc.len(), ncc[ncc.len() / 2], ncc.iter().sum::<f64>() / ncc.len() as f64, ncc[ncc.len() / 10]
+        );
+    }
+
     /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
