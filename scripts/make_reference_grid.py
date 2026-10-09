@@ -20,7 +20,8 @@ from scipy import ndimage
 
 RACINE = "data/svr/jeu_reel_tru_haste"
 SORTIE = "data/reference/grid"
-SUJETS = ["sub-S01", "sub-S02", "sub-S03"]
+# sujets du jeu réel local : variable d'environnement MEDOXIDE_SUJETS (identifiants séparés par des virgules) ; étiquettes neutres par défaut
+SUJETS = os.environ.get("MEDOXIDE_SUJETS", "sub-S01,sub-S02,sub-S03").split(",")
 CONFIGS = [(0.8, 10.0), (0.5, 10.0), (1.0, 0.0)]  # (résolution, marge) en mm
 os.makedirs(SORTIE, exist_ok=True)
 

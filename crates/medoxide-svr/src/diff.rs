@@ -421,6 +421,14 @@ mod tests {
     use nalgebra::{Matrix4, Vector3, Vector4};
     use ndarray::Array3;
 
+    /// Sujets du jeu réel local utilisés par les tests de données réelles : variable d'environnement `MEDOXIDE_SUJETS` (identifiants séparés par des virgules, par exemple
+    /// `sub-XXXX,sub-YYYY`). Par défaut, des étiquettes neutres : ces tests (ignorés) signalent alors que les données sont absentes. Aucun identifiant réel n'est écrit dans le code.
+    fn sujets_de_test() -> Vec<String> {
+        std::env::var("MEDOXIDE_SUJETS")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"].iter().map(|s| s.to_string()).collect())
+    }
+
     /// Générateur pseudo-aléatoire (xorshift64) déterministe, valeurs dans [0, 1[.
     struct Alea(u64);
     impl Alea {
@@ -1273,11 +1281,11 @@ mod tests {
     #[ignore = "données locales ; lent en debug"]
     fn registration_on_real_stacks_with_two_independent_references() {
         let device = device().autodiff();
-        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        let sujets = sujets_de_test();
         let (mut toutes_ncc, mut tous_rms) = ([Vec::new(), Vec::new()], Vec::new());
         let (mut somme_diff2, mut somme_v2, mut n_v) = (0.0, 0.0, 0usize);
         let (mut n_coupes, mut n_baisse, mut n_grand) = (0usize, [0usize; 2], 0usize);
-        for sujet in sujets {
+        for sujet in &sujets {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
@@ -1409,10 +1417,10 @@ mod tests {
         for _ in 0..6 {
             departs.push(std::array::from_fn(|_| (alea.suivant() * 2.0 - 1.0) * 5.0));
         }
-        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        let sujets = sujets_de_test();
         // (rms_depuis_zero, gain_ncc, distance entre la pose du meilleur départ et celle du départ nul, nombre de départs à moins de 0,005 du meilleur)
         let mut lignes: Vec<(f64, f64, f64, usize)> = Vec::new();
-        for sujet in sujets {
+        for sujet in &sujets {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
@@ -1570,10 +1578,10 @@ mod tests {
     fn robust_registration_on_real_stacks() {
         let device = device().autodiff();
         let departs: Vec<[f64; 6]> = std::iter::once([0.0; 6]).chain(departs_deterministes(6, 5.0, 8675309)).collect();
-        let sujets = ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"];
+        let sujets = sujets_de_test();
         let (mut n, mut relancees, mut recalages, mut bloquees, mut recuperees, mut pires) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         let (mut gain_total, mut gain_recupere) = (0.0, 0.0);
-        for sujet in sujets {
+        for sujet in &sujets {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
