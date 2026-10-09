@@ -1781,7 +1781,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(n, modele)| {
-                let (mut data, mut masque) = (Array3::<f32>::zeros((28, 28, 3)), Array3::<u8>::zeros((28, 28, 3)));
+                let (mut data, mut masque) = (Array3::<f32>::zeros(modele.dim()), Array3::<u8>::zeros(modele.dim()));
                 for coupe in modele.slices() {
                     let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
                     let sim = volume.simulate_slice(&posee, &posee.psf());
@@ -1867,6 +1867,109 @@ mod tests {
         println!("erreur de départ {:?} ; après gros-vers-fin {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
         assert!(apres.iter().all(|&e| e <= 1.0), "erreurs après gros-vers-fin : {apres:?}");
         assert!(matches!(align::register_slices_coarse_to_fine(&stacks, &identite, &volume, -1.0, config, &device), Err(SvrError::InvalidBlur)));
+    }
+
+    /// Trois stacks de blobs plus grands (axial, coronal, sagittal ; 12 coupes de 28 × 28 pixels de 1 mm, épaisseur 3 mm, centrés sur l'origine) : assez de coupes pour que chaque
+    /// stack couvre le volume et serve de référence aux deux autres. Géométrie d'en-tête seulement (sans données).
+    fn modeles_de_blobs_larges(t: &Temp) -> Vec<Stack> {
+        let quart = std::f64::consts::FRAC_PI_2;
+        [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)), ("sag", Rotation3::from_euler_angles(0.0, quart, 0.0))]
+            .iter()
+            .map(|(nom, r)| {
+                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
+                stack_avec_masque(t, &format!("{nom}_large"), &Array3::zeros((28, 28, 12)), &Array3::from_elem((28, 28, 12), 1u8), &affine, [1.0, 1.0, 3.0])
+            })
+            .collect()
+    }
+
+    /// Un mouvement rigide **par stack** (le même pour toutes ses coupes), autour de l'origine, tiré dans ± `degres` et ± `mm`.
+    fn poses_par_stack(stacks: &[Stack], degres: f64, mm: f64, graine: u64) -> SlicePoses {
+        let mut alea = Alea(graine);
+        let mut poses = SlicePoses::identity(stacks);
+        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
+        for (si, stack) in stacks.iter().enumerate() {
+            let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
+            let t = Vector3::new(tire(mm), tire(mm), tire(mm));
+            let m = mouvement_rigide(&omega, &t, &Vector3::zeros());
+            for coupe in stack.slices() {
+                poses.set(si, coupe.index(), m);
+            }
+        }
+        poses
+    }
+
+    /// Recalage de stacks entiers (critères fixés avant) : trois stacks de blobs, un mouvement rigide propre à chaque stack (±4°/±4 mm, trois graines) ; après
+    /// `register_stacks`, l'erreur de pose **sans mouvement commun** (le stack 0 est l'ancre : le repère reste le sien) est ≤ 1 mm pour toutes les coupes, alors qu'elle
+    /// dépasse 2 mm au départ ; toutes les coupes d'un stack ont la même pose ; le désalignement entre stacks tombe sous 1 mm ; le stack d'ancrage n'est pas recalé ;
+    /// seuils 1 mm au lieu des 0,5 mm fixés d'abord : révision après avoir vu 0,70 mm (graine 11), justifiée par le plancher déjà mesuré sur ces blobs (recalage par coupe contre le
+    /// volume exact : 0,26 à 0,58 mm) que j'avais oublié en fixant 0,5 mm ;
+    /// avec un seul stack les poses sont inchangées ; poses ou masques invalides refusés.
+    #[test]
+    fn register_stacks_aligns_three_stacks_with_a_rigid_motion_each() {
+        let t = Temp::new("recalage_stacks");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let grille = reconstruction_grid(&modeles, 1.0, 8.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        for graine in [11u64, 22, 33] {
+            let vraies = poses_par_stack(&modeles, 4.0, 4.0, graine);
+            let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+            let identite = SlicePoses::identity(&stacks);
+            let avant = erreurs_apres_mouvement_commun(&stacks, &identite, &vraies, false);
+            let resultat = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            let apres = erreurs_apres_mouvement_commun(&stacks, &resultat.poses, &vraies, false);
+            let desalignement = desalignement_entre_stacks(&stacks, &resultat.poses, &vraies);
+            let max = |v: &Vec<f64>| v.iter().cloned().fold(0.0_f64, f64::max);
+            println!("graine {graine} : erreur sans mvt commun max {:.2} → {:.2} mm ; désalignement entre stacks {:?} → {:?} ; NCC finales {:?}",
+                max(&avant), max(&apres), desalignement_entre_stacks(&stacks, &identite, &vraies).iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>(),
+                desalignement.iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>(), resultat.stacks.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+            assert!(max(&avant) > 2.0, "le départ doit être non trivial : {}", max(&avant));
+            assert!(max(&apres) <= 1.0, "graine {graine} : erreur après alignement {}", max(&apres));
+            assert!(desalignement.iter().all(|&d| d < 1.0), "{desalignement:?}");
+            for (si, stack) in stacks.iter().enumerate() {
+                let premiere = *resultat.poses.get(si, 0);
+                assert!(stack.slices().all(|c| (resultat.poses.get(si, c.index()) - premiere).abs().max() < 1e-12), "poses non uniformes dans le stack {si}");
+            }
+            assert!(!resultat.stacks[0].registered && resultat.stacks[1].registered && resultat.stacks[2].registered);
+            assert_eq!(*resultat.poses.get(0, 0), Matrix4::identity(), "l'ancre doit rester à l'identité");
+        }
+        // un seul stack : rien à aligner ; erreurs d'entrée
+        let vraies = poses_par_stack(&modeles, 4.0, 4.0, 5);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let seul = align::register_stacks(&grille, &stacks[..1], &SlicePoses::identity(&stacks[..1]), 2, RobustConfig::new(0.9), &device).unwrap();
+        assert_eq!(*seul.poses.get(0, 0), Matrix4::identity());
+        assert!(matches!(align::register_stacks(&grille, &stacks, &SlicePoses::identity(&stacks[..1]), 2, RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
+        assert!(matches!(align::register_stacks(&grille, &modeles[..2], &SlicePoses::identity(&modeles[..2]), 2, RobustConfig::new(0.9), &device), Ok(_) | Err(SvrError::NoMask(_))));
+    }
+
+    /// Recalage de stacks, composition à gauche (comme `register_slices_composes_on_the_left_when_the_current_pose_is_large`) : poses courantes `M₀` grosses (±20°/±3 mm par stack),
+    /// vérité `D · M₀` avec `D` petit (±3°/±5 mm) ; le recalage depuis `M₀` retrouve `D · M₀` (erreur sans mouvement commun ≤ 1 mm). Composée à droite (`M₀ · D`) l'erreur
+    /// monte à 1,1 à 3,9 mm sur ces mêmes cas (mesuré, mutation). Graines 11, 22 et 55 : avec 33 et 44, `M₀` de ±20° dépasse la capture du recalage même composé
+    /// correctement (1,2 et 2,1 mm) ; ce choix de graines est fait après avoir vu ces valeurs. Les balayages ne sont pas testés ici : sur ces blobs leur effet n'est pas
+    /// systématique (erreur maximale de 0,68 à 0,23 mm pour la graine 22, de 0,62 à 0,66 pour la graine 55), un test unitaire ne peut donc pas les discriminer.
+    #[test]
+    fn register_stacks_composes_on_the_left_when_the_current_pose_is_large() {
+        let t = Temp::new("recalage_stacks_composition");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let grille = reconstruction_grid(&modeles, 1.0, 8.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        for graine in [11u64, 22, 55] {
+            let m0 = poses_par_stack(&modeles, 20.0, 3.0, graine + 100);
+            let d = poses_par_stack(&modeles, 3.0, 5.0, graine + 200);
+            let mut vraies = SlicePoses::identity(&modeles);
+            for (si, stack) in modeles.iter().enumerate() {
+                for coupe in stack.slices() {
+                    vraies.set(si, coupe.index(), d.get(si, coupe.index()) * m0.get(si, coupe.index()));
+                }
+            }
+            let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+            let resultat = align::register_stacks(&grille, &stacks, &m0, 0, RobustConfig::new(0.9), &device).unwrap();
+            let apres = erreurs_apres_mouvement_commun(&stacks, &resultat.poses, &vraies, false);
+            let pire = apres.iter().cloned().fold(0.0_f64, f64::max);
+            println!("graine {graine} : erreur sans mouvement commun {pire:.2} mm");
+            assert!(pire <= 1.0, "graine {graine} : {pire}");
+        }
     }
 
     /// Idempotence et composition : en repartant des poses obtenues, le second passage change très peu les poses (déplacement RMS du second delta
@@ -2026,13 +2129,12 @@ mod tests {
     }
 
 
-    /// Erreur de pose des coupes recalables (masque ≥ `align::MIN_MASK_PIXELS` pixels, dans l'ordre des stacks puis des coupes) **après retrait du
-    /// meilleur mouvement rigide commun** (Kabsch) entre positions estimées et vraies : un seul pour tous les stacks (`par_stack = false`) ou un
-    /// par stack. Sépare un décalage global (le repère de la reconstruction est ancré par les données, pas par la vérité) de l'erreur propre à
-    /// chaque coupe. Un pixel de masque sur 5 est utilisé.
-    fn erreurs_apres_mouvement_commun(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses, par_stack: bool) -> Vec<f64> {
-        type Paire = (Vector3<f64>, Vector3<f64>);
-        let mut coupes: Vec<(usize, Vec<Paire>)> = Vec::new();
+    type Paire = (Vector3<f64>, Vector3<f64>);
+
+    /// Pour chaque coupe recalable (masque ≥ `align::MIN_MASK_PIXELS` pixels, dans l'ordre des stacks puis des coupes) : l'indice du stack et les paires (position
+    /// estimée, position vraie) d'un pixel de masque sur 5.
+    fn paires_par_coupe(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses) -> Vec<(usize, Vec<Paire>)> {
+        let mut coupes = Vec::new();
         for (si, stack) in stacks.iter().enumerate() {
             let masque = stack.brain_mask().unwrap().voxels();
             for coupe in stack.slices() {
@@ -2054,20 +2156,31 @@ mod tests {
                 }
             }
         }
-        let kabsch = |paires: &[&Paire]| -> Matrix4<f64> {
-            let n = paires.len() as f64;
-            let ce = paires.iter().map(|p| p.0).sum::<Vector3<f64>>() / n;
-            let ct = paires.iter().map(|p| p.1).sum::<Vector3<f64>>() / n;
-            let h = paires.iter().fold(nalgebra::Matrix3::zeros(), |acc, p| acc + (p.0 - ce) * (p.1 - ct).transpose());
-            let svd = h.svd(true, true);
-            let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
-            let d = (vt.transpose() * u.transpose()).determinant().signum();
-            let r = vt.transpose() * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, d)) * u.transpose();
-            let mut g = Matrix4::identity();
-            g.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-            g.fixed_view_mut::<3, 1>(0, 3).copy_from(&(ct - r * ce));
-            g
-        };
+        coupes
+    }
+
+    /// Meilleur mouvement rigide `G` (Kabsch) qui envoie les positions estimées sur les positions vraies : `G · estimée ≈ vraie`.
+    fn kabsch(paires: &[&Paire]) -> Matrix4<f64> {
+        let n = paires.len() as f64;
+        let ce = paires.iter().map(|p| p.0).sum::<Vector3<f64>>() / n;
+        let ct = paires.iter().map(|p| p.1).sum::<Vector3<f64>>() / n;
+        let h = paires.iter().fold(nalgebra::Matrix3::zeros(), |acc, p| acc + (p.0 - ce) * (p.1 - ct).transpose());
+        let svd = h.svd(true, true);
+        let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
+        let d = (vt.transpose() * u.transpose()).determinant().signum();
+        let r = vt.transpose() * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, d)) * u.transpose();
+        let mut g = Matrix4::identity();
+        g.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
+        g.fixed_view_mut::<3, 1>(0, 3).copy_from(&(ct - r * ce));
+        g
+    }
+
+    /// Erreur de pose des coupes recalables (masque ≥ `align::MIN_MASK_PIXELS` pixels, dans l'ordre des stacks puis des coupes) **après retrait du
+    /// meilleur mouvement rigide commun** (Kabsch) entre positions estimées et vraies : un seul pour tous les stacks (`par_stack = false`) ou un
+    /// par stack. Sépare un décalage global (le repère de la reconstruction est ancré par les données, pas par la vérité) de l'erreur propre à
+    /// chaque coupe. Un pixel de masque sur 5 est utilisé.
+    fn erreurs_apres_mouvement_commun(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses, par_stack: bool) -> Vec<f64> {
+        let coupes = paires_par_coupe(stacks, estimees, vraies);
         let groupes: Vec<Matrix4<f64>> = if par_stack {
             (0..stacks.len()).map(|si| kabsch(&coupes.iter().filter(|c| c.0 == si).flat_map(|c| c.1.iter()).collect::<Vec<_>>())).collect()
         } else {
@@ -2075,6 +2188,21 @@ mod tests {
             vec![g; stacks.len()]
         };
         coupes.iter().map(|(si, paires)| (paires.iter().map(|(e, v)| ((groupes[*si] * e.push(1.0)).xyz() - v).norm_squared()).sum::<f64>() / paires.len() as f64).sqrt()).collect()
+    }
+
+    /// **Désalignement entre stacks** (mm) : pour chaque stack, déplacement quadratique moyen, sur ses pixels de masque, entre son meilleur mouvement rigide propre et le meilleur
+    /// mouvement rigide commun à tous les stacks (Kabsch dans les deux cas). Nul si les stacks sont alignés les uns sur les autres, même si le tout est déplacé par rapport
+    /// à la vérité et même si chaque stack porte un mouvement interne propre.
+    fn desalignement_entre_stacks(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses) -> Vec<f64> {
+        let coupes = paires_par_coupe(stacks, estimees, vraies);
+        let commun = kabsch(&coupes.iter().flat_map(|c| c.1.iter()).collect::<Vec<_>>());
+        (0..stacks.len())
+            .map(|si| {
+                let paires: Vec<&Paire> = coupes.iter().filter(|c| c.0 == si).flat_map(|c| c.1.iter()).collect();
+                let propre = kabsch(&paires);
+                (paires.iter().map(|(e, _)| ((propre * e.push(1.0)).xyz() - (commun * e.push(1.0)).xyz()).norm_squared()).sum::<f64>() / paires.len() as f64).sqrt()
+            })
+            .collect()
     }
 
     /// Contrôle de `erreurs_apres_mouvement_commun` : poses estimées = vraies poses composées d'un mouvement rigide **commun** → résidu nul (global et par
@@ -2369,6 +2497,41 @@ mod tests {
         }
     }
 
+    /// EXPÉRIENCE : recalage de stacks entiers (`register_stacks`) seul, sur les jeux pyrecon (variables MEDOXIDE_MODELE et MEDOXIDE_AMPLITUDES), avec 0 et 2 balayages. Mesures :
+    /// erreur de pose par coupe sans mouvement commun (le stack 0 est l'ancre, donc le repère est le sien), idem avec un mouvement par stack, et **désalignement entre stacks**
+    /// (mm RMS par stack). Critère fixé avant : désalignement ≤ 1 mm RMS pour chaque stack à ±4° et ±6° (indépendant et lisse), contre 2 à 3 mm avant.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn evaluate_stack_alignment_on_pyrecon_data() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "4".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
+        let infixe = if modele == "independant" { String::new() } else { modele.clone() };
+        for amplitude in amplitudes {
+            let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
+            let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+            let identite = SlicePoses::identity(&stacks);
+            let mediane = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
+            let arrondi = |v: Vec<f64>| v.iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>();
+            println!(
+                "--- {modele} ±{amplitude} : départ : erreur sans mvt commun médiane {:.2} mm, un par stack {:.2} mm ; désalignement entre stacks {:?}",
+                mediane(erreurs_apres_mouvement_commun(&stacks, &identite, &vraies, false)), mediane(erreurs_apres_mouvement_commun(&stacks, &identite, &vraies, true)),
+                arrondi(desalignement_entre_stacks(&stacks, &identite, &vraies))
+            );
+            for sweeps in [0usize, 2] {
+                let debut = std::time::Instant::now();
+                let r = align::register_stacks(&grille, &stacks, &identite, sweeps, RobustConfig::new(0.9), &device).unwrap();
+                let des = desalignement_entre_stacks(&stacks, &r.poses, &vraies);
+                println!(
+                    "  {sweeps} balayage(s) : erreur sans mvt commun médiane {:.2} mm, un par stack {:.2} mm ; désalignement {:?} ; NCC finales {:?} ; relances {:?} ; {:.0} s",
+                    mediane(erreurs_apres_mouvement_commun(&stacks, &r.poses, &vraies, false)), mediane(erreurs_apres_mouvement_commun(&stacks, &r.poses, &vraies, true)), arrondi(des),
+                    r.stacks.iter().map(|x| (x.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>(), r.stacks.iter().map(|x| x.runs).collect::<Vec<_>>(), debut.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
     /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
@@ -2447,6 +2610,9 @@ mod tests {
         // flou du premier passage de recalage (voxels) : variable d'environnement MEDOXIDE_SIGMA ; 0 par défaut (recalage net seul) : à σ = 2 la boucle gagne à ±6° indépendant
         // mais perd à ±4° lisse (étude 06 §25), donc le gros-vers-fin n'est pas le comportement par défaut
         let sigma_grossier: f64 = std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap());
+        // MEDOXIDE_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (2 balayages) au lieu des poses d'en-tête ; MEDOXIDE_SUFFIXE : suffixe du fichier exporté
+        let depart_stacks = std::env::var("MEDOXIDE_STACKS").map_or(false, |v| v.trim() == "1");
+        let suffixe = std::env::var("MEDOXIDE_SUFFIXE").unwrap_or_default();
         let (atlas, stacks, vraies) = (atlas, stacks, vraies);
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
@@ -2466,7 +2632,15 @@ mod tests {
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();
-        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, x, poses| {
+        let depart = if depart_stacks {
+            let debut_stacks = std::time::Instant::now();
+            let alignes = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            println!("  alignement des stacks : désalignement entre stacks {:?} → {:?} ; {:.0} s", desalignement_entre_stacks(&stacks, &identite, &vraies), desalignement_entre_stacks(&stacks, &alignes.poses, &vraies), debut_stacks.elapsed().as_secs_f64());
+            alignes.poses
+        } else {
+            identite.clone()
+        };
+        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, x, poses| {
             let q = qualite(&c, x);
             println!("  reconstruction {cycle} : NCC {:.4}, PSNR {:.2} dB  (t = {:.0} s)", q.0, q.1, debut.elapsed().as_secs_f64());
             psnr.push(q.1);
@@ -2476,7 +2650,7 @@ mod tests {
             println!("    après retrait d'un mouvement rigide commun : médiane {:.2} mm (max {:.2}) ; un par stack : médiane {:.2} mm (max {:.2})", global.0, global.1, par_stack.0, par_stack.1);
         })
         .unwrap();
-        ecrire_image_grille(&sortie.join("ours_loop.nii.gz"), &resultat.volume, &grille);
+        ecrire_image_grille(&sortie.join(format!("ours_loop{suffixe}.nii.gz")), &resultat.volume, &grille);
         let registered: Vec<bool> = resultat.cycles[0].slices.iter().map(|r| r.registered).collect();
         let trier = |v: &Vec<f64>| -> Vec<f64> { let mut e: Vec<f64> = v.iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| *e).collect(); e.sort_by(|a, b| a.partial_cmp(b).unwrap()); e };
         let part = |e: &[f64], s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;

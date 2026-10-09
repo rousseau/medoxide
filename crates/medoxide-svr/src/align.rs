@@ -6,7 +6,7 @@ use nalgebra::{Matrix4, Vector3};
 use ndarray::Array3;
 
 use crate::diff::{pose_to_matrix, register_slice_robust, rotation_scale_mm, RobustConfig, VolumeTensors};
-use crate::recon::{GridSpec, ReconstructionProblem, SlicePoses};
+use crate::recon::{normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses};
 use crate::{Stack, SvrError, Volume};
 
 /// Nombre minimal de pixels de masque pour recaler une coupe. En deçà, la NCC est trop peu informée (et la mise à l'échelle de la rotation, mal
@@ -98,6 +98,123 @@ pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeT
         }
     }
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// Nombre maximal de pixels de masque utilisés pour recaler un stack entier (sous-échantillonnage régulier au-delà) : le coût de la NCC croît avec ce nombre.
+const MAX_STACK_POINTS: usize = 100_000;
+
+/// Rapport du recalage d'un stack entier ([`register_stacks`]) : dernière visite de ce stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackReport {
+    /// Indice du stack.
+    pub stack: usize,
+    /// `false` si le stack n'a jamais été recalé (le stack d'ancrage, ou trop peu de pixels de masque).
+    pub registered: bool,
+    /// NCC finale du premier recalage (celui qui part de la pose courante).
+    pub ncc_first: f64,
+    /// NCC finale de la pose retenue (après les relances éventuelles).
+    pub ncc_final: f64,
+    /// Nombre de recalages effectués (1 si le stack n'était pas suspect).
+    pub runs: usize,
+    /// Amplitude de la dernière correction : déplacement quadratique moyen des pixels du masque du stack (mm).
+    pub correction_rms_mm: f64,
+}
+
+/// Résultat de [`register_stacks`].
+#[derive(Debug, Clone)]
+pub struct StackAlignment {
+    /// Poses après alignement : toutes les coupes d'un stack ont reçu la même correction, composée à gauche de leur pose d'origine.
+    pub poses: SlicePoses,
+    /// Un rapport par stack (le stack d'ancrage, d'indice 0, n'est pas recalé).
+    pub stacks: Vec<StackReport>,
+}
+
+/// **Recalage de stacks entiers** : estime, pour chaque stack, UN mouvement rigide partagé par toutes ses coupes (6 paramètres au lieu de 6 par coupe), de façon à
+/// aligner les stacks les uns sur les autres. Il retire la partie *cohérente* du mouvement (le décalage entre stacks) avant le recalage par coupe de la boucle.
+///
+/// Le stack 0 est l'**ancre** : il ne bouge pas et définit le repère. Chaque autre stack est recalé (même NCC et même recalage robuste que par coupe, sur tous ses
+/// pixels de masque, sous-échantillonnés à [`MAX_STACK_POINTS`] ; pivot = barycentre de ces pixels) contre la référence `adjoint normalisé des autres stacks`
+/// ([`normalized_adjoint_with_poses`], sur la grille `grid`, sans gradient conjugué). D'abord une passe d'ancrage (le stack `s` contre les stacks `0..s` déjà alignés),
+/// puis `sweeps` balayages où chaque stack non ancre est recalé contre **tous** les autres. La correction `D` d'un stack est composée à gauche : pose `D · M` pour chaque
+/// coupe de pose `M`.
+///
+/// Avec un seul stack, les poses sont rendues inchangées.
+///
+/// # Erreurs
+/// [`SvrError::NoMask`], [`SvrError::PoseMismatch`] (comme [`register_slices`]) ; celles de [`normalized_adjoint_with_poses`].
+pub fn register_stacks(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    sweeps: usize,
+    config: RobustConfig,
+    device: &Device,
+) -> Result<StackAlignment, SvrError> {
+    if !poses.matches(stacks) {
+        return Err(SvrError::PoseMismatch);
+    }
+    for stack in stacks {
+        stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
+    }
+    let n = stacks.len();
+    let mut nouvelles = poses.clone();
+    let mut rapports: Vec<StackReport> = (0..n).map(|stack| StackReport { stack, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }).collect();
+    let mut visites: Vec<(usize, Vec<usize>)> = (1..n).map(|s| (s, (0..s).collect())).collect();
+    for _ in 0..sweeps {
+        visites.extend((1..n).map(|s| (s, (0..n).filter(|&t| t != s).collect())));
+    }
+    for (s, references) in visites {
+        let sous_stacks: Vec<Stack> = references.iter().map(|&t| stacks[t].clone()).collect();
+        let image = normalized_adjoint_with_poses(grid, &sous_stacks, &nouvelles.select(&references))?.image;
+        let reference = Volume::new(image, grid.affine)?;
+        if let Some(rapport) = recaler_un_stack(&stacks[s], s, &mut nouvelles, &reference, config, device) {
+            rapports[s] = rapport;
+        }
+    }
+    Ok(StackAlignment { poses: nouvelles, stacks: rapports })
+}
+
+/// Recale le stack `s` contre `reference` et compose la correction à gauche des poses de toutes ses coupes. `None` si le stack a trop peu de pixels de masque.
+fn recaler_un_stack(stack: &Stack, s: usize, poses: &mut SlicePoses, reference: &Volume, config: RobustConfig, device: &Device) -> Option<StackReport> {
+    let masque = stack.brain_mask().expect("vérifié").voxels();
+    let (mut points, mut intensites) = (Vec::new(), Vec::new());
+    for coupe in stack.slices() {
+        let k = coupe.index();
+        let posee = coupe.with_motion(*poses.get(s, k));
+        let donnees = posee.data();
+        let (nx, ny) = posee.dim();
+        for j in 0..ny {
+            for i in 0..nx {
+                if masque[[i, j, k]] {
+                    points.push(posee.pixel_to_world(i as f64, j as f64));
+                    intensites.push(f64::from(donnees[[i, j]]));
+                }
+            }
+        }
+    }
+    if points.len() < MIN_MASK_PIXELS {
+        return None;
+    }
+    let pas = points.len().div_ceil(MAX_STACK_POINTS);
+    let (points, intensites): (Vec<Vector3<f64>>, Vec<f64>) = points.into_iter().zip(intensites).step_by(pas).unzip();
+    let pivot = points.iter().sum::<Vector3<f64>>() / points.len() as f64;
+    let echelle = rotation_scale_mm(&points, &pivot)?;
+    let resultat = register_slice_robust(
+        &VolumeTensors::new(reference, device),
+        vecteurs_vers_tenseur(&points, device),
+        tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+        echelle,
+        tenseur_1d(&intensites, device),
+        tenseur_1d(&vec![1.0; points.len()], device),
+        config,
+    );
+    let delta: Matrix4<f64> = pose_to_matrix(&resultat.params, &pivot, echelle);
+    for k in 0..stack.dim().2 {
+        let courante = *poses.get(s, k);
+        poses.set(s, k, delta * courante);
+    }
+    let correction = (points.iter().map(|x| ((delta * x.push(1.0)).xyz() - x).norm_squared()).sum::<f64>() / points.len() as f64).sqrt();
+    Some(StackReport { stack: s, registered: true, ncc_first: resultat.first_ncc, ncc_final: resultat.ncc, runs: resultat.runs, correction_rms_mm: correction })
 }
 
 /// **Recalage du gros vers le fin** : comme [`register_slices`] contre `reference`, mais en deux passes si `sigma_voxels > 0` : d'abord contre la référence floutée

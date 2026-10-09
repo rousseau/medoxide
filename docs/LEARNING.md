@@ -1270,4 +1270,16 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-09 — Recalage de stacks entiers
+
+- **Quoi** : un **seul** mouvement rigide partagé par toutes les coupes d'un stack (6 paramètres au lieu de 6 par coupe), pour retirer la partie *cohérente* du mouvement (le décalage entre stacks) avant le recalage par coupe. `register_stacks` : le stack 0 est l'ancre (il définit le repère) ; chaque autre stack est recalé, sur ses pixels de masque (≤ 100 000, pivot = barycentre), contre l'adjoint normalisé des autres stacks ; une passe d'ancrage, puis des balayages où chaque stack est recalé contre **tous** les autres ; la correction est composée à gauche, la même pour toutes les coupes.
+- **Rust** : `Vec::step_by` et `unzip` pour sous-échantillonner des pixels et leurs intensités ensemble ; `div_ceil` pour le pas ; une fonction qui modifie des poses par référence mutable (`&mut SlicePoses`) et rend un `Option` de rapport.
+- **Outils de mesure** : l'ajustement de **Kabsch** (meilleur mouvement rigide entre deux nuages de points, par décomposition en valeurs singulières) sert à deux mesures : l'erreur de pose sans mouvement commun, et le **désalignement entre stacks** (écart du meilleur mouvement rigide propre à chaque stack à l'ajustement commun). Sorti en fonctions réutilisables lors d'un remaniement de mes tests (un remplacement trop large y avait supprimé 327 lignes de tests : détecté en comptant les tests, restauré depuis le dernier commit).
+- **Résultats** : sur des stacks de blobs avec un mouvement rigide propre à chaque stack (±4°), l'erreur tombe de 2,9–4,3 mm à 0,27–0,70 mm (seuil révisé à 1 mm après coup, voir l'étude 06 §26). **Sur l'atlas le décalage entre stacks n'est pas résolu** : avec un mouvement indépendant par coupe, le désalignement entre stacks est déjà petit au départ (0,6 à 1,6 mm) et le recalage de stacks l'aggrave (1,4 à 2,9 mm) ; avec un mouvement lisse il le réduit en partie sans passer sous 1 mm. Les NCC de stack sont de 0,13 à 0,34 (0,99 sur les blobs) : un stack dont chaque coupe bouge de 4 à 7 mm n'est pas un objet rigide. La boucle partant des stacks alignés n'atteint pas ses critères (±6° indépendant : 17,5 dB pour une cible de 22,2 ; ±4° lisse : −0,70 dB).
+- **Mutants** : 3 sur 6 détectés ; les trois autres survivent parce que leur effet n'est pas systématique sur ces blobs (balayages) ou parce qu'ils ne changent que le conditionnement (pivot).
+
+**Suite** : pistes non essayées (pondération robuste des coupes, reconstruction grossière aux premiers cycles).
+
+---
+
 *(à compléter à la prochaine étape)*
