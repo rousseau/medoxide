@@ -1316,4 +1316,15 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-12 — Comparer des estimations de mouvement sans reconstruction : concordance aux intersections
+
+- **Quoi** : mesurer la qualité d'un jeu de poses par coupe **sans volume**. Deux plans non parallèles se croisent le long d'une droite ; si les poses de deux coupes de stacks différents sont justes, leurs intensités le long de cette droite concordent. Pour chaque paire : droite d'intersection des deux plans (direction `n₁ × n₂`, point `((h₁ n₂ − h₂ n₁) × d) / |d|²`), échantillonnage tous les 0,5 mm dans chaque coupe, corrélation des deux profils. C'est le critère de pyrecon, ici utilisé comme **mesure neutre** entre méthodes (elle n'utilise ni le volume de l'une ni l'information mutuelle de l'autre).
+- **Validation** : dose-réponse sur des poses vraies connues (0,93 → 0,89 → 0,78 → 0,53 → 0,23 → 0,07 pour des perturbations de 0, 0,5, 1, 2, 4 et 8 mm).
+- **Lire les poses d'une autre méthode** : le format de SVRTK (`.dof`) se lit par son propre outil dans Docker ; **la convention (sens de la transformation) se détermine par une mesure**, pas par la lecture du code : la bonne est celle qui maximise la corrélation entre les pixels de la coupe et le volume échantillonné aux positions transformées (0,83 contre 0,63 pour l'identité et 0,43 pour l'inverse) ; l'identification coupe ↔ indice se fait par l'origine du pixel (0,0), qui doit tomber sur des indices **entiers** d'un seul stack. Piège rencontré : SVRTK écrit ses fichiers de debug dans le répertoire **courant**.
+- **Résultats** : sur deux sujets réels, la boucle actuelle est au niveau de SVRTK (calme : 0,853 contre 0,830) ou au-dessus (agité : 0,760 contre 0,678), l'identité étant à 0,59 et 0,44. Limite : une cohérence entre coupes n'est pas la vérité.
+
+**Suite** : analyse du calcul sur six sujets ; coupes sombres (HASTE) ; mise à l'échelle par coupe.
+
+---
+
 *(à compléter à la prochaine étape)*

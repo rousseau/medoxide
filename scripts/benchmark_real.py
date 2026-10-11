@@ -7,7 +7,10 @@ Pour chacun des trois stacks (0 axial, 1 coronal, 2 sagittal) mis de côté tour
      le volume prédit des coupes qu'il n'a jamais vues.
 Aucun identifiant ni donnée de patiente n'est écrit dans le code : le sujet et la racine du jeu sont passés en arguments ; tous les fichiers restent dans data/svr/results/<sujet>/.
 
-Usage : python scripts/benchmark_real.py --racine data/svr/jeu_reel_tru_haste --sujet sub-XXXX
+Option --loso : ajoute la référence « sans la coupe elle-même » (MEDOXIDE_LOSO_CYCLES = 6). Variable d'environnement MEDOXIDE_TEST_BIN : binaire de test déjà compilé, utilisé à la place de
+`cargo test` (isole une longue série des modifications du code source en cours de route).
+
+Usage : python scripts/benchmark_real.py --racine data/svr/jeu_reel_tru_haste --sujet sub-XXXX [--loso]
 """
 
 import argparse
@@ -18,6 +21,7 @@ import subprocess
 parser = argparse.ArgumentParser()
 parser.add_argument("--racine", required=True)
 parser.add_argument("--sujet", required=True)
+parser.add_argument("--loso", action="store_true")
 args = parser.parse_args()
 
 racine = os.path.abspath(args.racine)
@@ -38,7 +42,9 @@ def chemins(plan):
 
 def cargo(test, **env):
     e = {**os.environ, "MEDOXIDE_DONNEES_REELLES": racine, "MEDOXIDE_SUJET": args.sujet, **{k: str(v) for k, v in env.items()}}
-    r = subprocess.run(["cargo", "test", "--release", "-p", "medoxide-svr", test, "--", "--ignored", "--nocapture"], capture_output=True, text=True, env=e)
+    binaire = os.environ.get("MEDOXIDE_TEST_BIN")
+    commande = [binaire, test, "--ignored", "--nocapture"] if binaire else ["cargo", "test", "--release", "-p", "medoxide-svr", test, "--", "--ignored", "--nocapture"]
+    r = subprocess.run(commande, capture_output=True, text=True, env=e)
     return r.stdout + r.stderr
 
 
@@ -49,12 +55,18 @@ for h in range(3):
     print(f"=== stack {h} mis de côté : reconstruction avec les stacks {gardes}", flush=True)
     sortie_ours = cargo("reconstruct_a_real_subject", MEDOXIDE_STACKS_RETENUS=",".join(map(str, gardes)), MEDOXIDE_ETIQUETTE=etiquette)
     print([l for l in sortie_ours.splitlines() if l.startswith("terminé") or "panicked" in l], flush=True)
+    if args.loso:
+        sortie_loso = cargo("reconstruct_a_real_subject", MEDOXIDE_STACKS_RETENUS=",".join(map(str, gardes)), MEDOXIDE_ETIQUETTE=f"_loso{etiquette}", MEDOXIDE_LOSO_CYCLES=6)
+        print([l for l in sortie_loso.splitlines() if l.startswith("terminé") or "panicked" in l], flush=True)
     s0 = chemins(plans[gardes[0]])
     subprocess.run(
         ["python3", "scripts/run_svrtk.py", "--stacks", *[chemins(plans[i])[0] for i in gardes], "--mask", s0[1], "--sortie", sortie, "--nom", f"svrtk{etiquette}.nii.gz"],
         check=True, capture_output=True,
     )
-    for nom, fichier in (("medoxide_boucle", f"ours_loop{etiquette}.nii.gz"), ("medoxide_sans_correction", f"ours_header{etiquette}.nii.gz"), ("SVRTK", f"svrtk{etiquette}.nii.gz")):
+    volumes = [("medoxide_boucle", f"ours_loop{etiquette}.nii.gz"), ("medoxide_sans_correction", f"ours_header{etiquette}.nii.gz"), ("SVRTK", f"svrtk{etiquette}.nii.gz")]
+    if args.loso:
+        volumes.append(("medoxide_sans_la_coupe", f"ours_loop_loso{etiquette}.nii.gz"))
+    for nom, fichier in volumes:
         sortie_juge = cargo("judge_a_volume_with_a_held_out_stack", MEDOXIDE_STACK_TEST=h, MEDOXIDE_VOLUME=f"{sortie}/{fichier}")
         m = re.search(r"JUGE stack \d+ : (\d+) coupes ; NCC finale médiane ([\d.]+), moyenne ([\d.]+), 10e centile ([\d.]+) ; correction moyenne ([\d.]+) mm", sortie_juge)
         if not m:

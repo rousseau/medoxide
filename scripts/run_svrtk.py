@@ -26,6 +26,7 @@ parser.add_argument("--nom", default="svrtk.nii.gz")
 parser.add_argument("--resolution", type=float, default=0.8)
 parser.add_argument("--image", default="fetalsvrtk/svrtk:general_auto_arm")
 parser.add_argument("--plateforme", default="linux/arm64")
+parser.add_argument("--debug", action="store_true", help="mode debug de SVRTK : écrit les transformations par coupe (transformationN.dof), les coupes et leurs poids dans le dossier de sortie (centaines de fichiers : prévoir un sous-dossier)")
 args = parser.parse_args()
 
 os.makedirs(args.sortie, exist_ok=True)
@@ -36,12 +37,10 @@ with tempfile.TemporaryDirectory(dir=args.sortie, prefix="entree_") as entree:
         noms.append(f"/in/stack{n}.nii.gz")
     shutil.copy(args.mask, f"{entree}/masque.nii.gz")
     epaisseurs = [str(round(float(nib.load(c).header.get_zooms()[2]), 4)) for c in args.stacks]
-    commande = [
-        "docker", "run", "--rm", "--platform", args.plateforme,
-        "-v", f"{os.path.abspath(entree)}:/in:ro", "-v", f"{os.path.abspath(args.sortie)}:/out",
-        args.image, "mirtk", "reconstruct", f"/out/{args.nom}", str(len(noms)), *noms,
-        "--mask", "/in/masque.nii.gz", "--thickness", *epaisseurs, "--resolution", str(args.resolution),
-    ]
+    options = ["--mask", "/in/masque.nii.gz", "--thickness", *epaisseurs, "--resolution", str(args.resolution)] + (["--debug"] if args.debug else [])
+    reconstruction = " ".join(["mirtk", "reconstruct", f"/out/{args.nom}", str(len(noms)), *noms, *options])
+    # SVRTK écrit ses fichiers de debug dans le répertoire COURANT : on se place dans le dossier de sortie monté
+    commande = ["docker", "run", "--rm", "--platform", args.plateforme, "-v", f"{os.path.abspath(entree)}:/in:ro", "-v", f"{os.path.abspath(args.sortie)}:/out", args.image, "bash", "-lc", f"cd /out && {reconstruction}"]
     debut = time.time()
     resultat = subprocess.run(commande, capture_output=True, text=True)
     journal = [ligne for ligne in resultat.stdout.splitlines() if not ligne.startswith("Time for")]
