@@ -16,6 +16,7 @@ pub mod align;
 pub mod diff;
 pub mod optimizers;
 pub mod recon;
+pub mod s2s;
 
 use std::path::{Path, PathBuf};
 
