@@ -1294,4 +1294,15 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-11 — Référence sans la coupe elle-même (leave-one-slice-out)
+
+- **Quoi** : recaler chaque coupe contre une référence qui **ne la contient pas**, sans la contrepartie de la référence « sans le stack » (trop pauvre à deux stacks). L'adjoint normalisé est une fraction `x₀ = N / D` de deux sommes sur les coupes ; la contribution `(nₖ, dₖ)` d'une coupe se **retire exactement** : référence `(N − nₖ) / (D − dₖ)`. On obtient, pour un coût faible, toutes les autres coupes comme référence.
+- **Rust** : `pub(crate)` pour partager des fonctions entre modules du même crate sans les exposer ; refactor d'une longue fonction en trois (`verifier_entrees`, `preparer_coupe`, `recaler_preparee`) avec les tests existants comme filet (95 réussis avant et après) ; `Option::then_some` ; une option de la boucle ajoutée en dernier champ de `LoopConfig`, désactivée par défaut.
+- **Tests** : l'exactitude est vérifiée contre une **somme directe** sur toutes les autres coupes (écart sous l'arrondi `f32`), et l'aveuglement par une expérience : modifier les pixels d'une coupe ne change pas sa propre référence, mais change celle de sa voisine. Mutants : numérateur ou dénominateur non corrigé détectés ; « pose courante ignorée dans la boucle » **non détecté** (le test appelle la contribution directement). Un test de recalage sur blobs échoue (médiane 2,93 mm pour un départ de 2,20) et est laissé ignoré, raison à l'appui.
+- **Résultats** : sur les données **réelles** (2 sujets, 6 repliements hors échantillon, NCC moyenne) la méthode est meilleure que « sans correction » sur les 6, que l'ancienne boucle sur les 6 et que SVRTK sur 5 ; sujet agité : 0,8025 contre 0,7296 (sans correction), 0,6685 (SVRTK) ; sujet calme : 0,8561 contre 0,8193 et 0,8132. Elle supprime la divergence à deux stacks. **Mais** sur les données **synthétiques** elle échoue : à deux stacks et surtout avec un mouvement lisse (15,6 dB contre 23,8). Les critères fixés avant ne sont donc pas tous atteints : l'option reste désactivée par défaut. **Hypothèse non testée** : avec un mouvement lisse, les coupes voisines d'un même stack partagent leur erreur et tirent la coupe vers leur position fausse.
+
+**Suite** : exclure de la référence les voisines immédiates de la coupe dans son stack, pour tester cette hypothèse.
+
+---
+
 *(à compléter à la prochaine étape)*

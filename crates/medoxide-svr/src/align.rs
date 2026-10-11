@@ -3,10 +3,10 @@
 
 use burn::prelude::Device;
 use nalgebra::{Matrix4, Vector3};
-use ndarray::Array3;
+use ndarray::{Array3, ArrayView2, Axis};
 
 use crate::diff::{pose_to_matrix, register_slice_robust, rotation_scale_mm, RobustConfig, VolumeTensors};
-use crate::recon::{normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses};
+use crate::recon::{adjoint_sums, normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses, SUPPORT_MIN};
 use crate::{Stack, SvrError, Volume};
 
 /// Nombre minimal de pixels de masque pour recaler une coupe. En deçà, la NCC est trop peu informée (et la mise à l'échelle de la rotation, mal
@@ -51,12 +51,95 @@ pub struct AlignmentReport {
 /// # Erreurs
 /// [`SvrError::NoMask`] si un stack n'a pas de masque ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
 pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeTensors, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    verifier_entrees(stacks, poses)?;
+    let mut nouvelles = poses.clone();
+    let mut rapports = Vec::new();
+    for (si, stack) in stacks.iter().enumerate() {
+        for coupe in stack.slices() {
+            let k = coupe.index();
+            let courante = *poses.get(si, k);
+            match preparer_coupe(stack, k, courante) {
+                None => rapports.push(SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }),
+                Some(preparee) => {
+                    let (delta, rapport) = recaler_preparee(&preparee, si, k, reference, config, device);
+                    nouvelles.set(si, k, delta * courante);
+                    rapports.push(rapport);
+                }
+            }
+        }
+    }
+    Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// Vérifie que `poses` a la forme de `stacks` et que chaque stack a un masque.
+fn verifier_entrees(stacks: &[Stack], poses: &SlicePoses) -> Result<(), SvrError> {
     if !poses.matches(stacks) {
         return Err(SvrError::PoseMismatch);
     }
     for stack in stacks {
         stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
     }
+    Ok(())
+}
+
+/// Ce qu'il faut pour recaler une coupe : positions monde (à sa pose courante) et intensités de ses pixels de masque, pivot P3 et échelle de rotation.
+struct CoupePreparee {
+    points: Vec<Vector3<f64>>,
+    intensites: Vec<f64>,
+    pivot: Vector3<f64>,
+    echelle: f64,
+}
+
+/// Prépare la coupe `k` d'un stack à la pose `courante` ; `None` si elle a moins de [`MIN_MASK_PIXELS`] pixels de masque ou si son pivot ou son échelle sont indéfinis.
+fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) -> Option<CoupePreparee> {
+    let masque = stack.brain_mask().expect("vérifié").voxels();
+    let coupe = stack.slices().nth(k).expect("coupe existante");
+    let posee = coupe.with_motion(courante);
+    let (nx, ny) = posee.dim();
+    let donnees = posee.data();
+    let (mut points, mut intensites) = (Vec::new(), Vec::new());
+    for j in 0..ny {
+        for i in 0..nx {
+            if masque[[i, j, k]] {
+                points.push(posee.pixel_to_world(i as f64, j as f64));
+                intensites.push(f64::from(donnees[[i, j]]));
+            }
+        }
+    }
+    let pivot = posee.brain_pivot()?;
+    let echelle = rotation_scale_mm(&points, &pivot)?;
+    (points.len() >= MIN_MASK_PIXELS).then_some(CoupePreparee { points, intensites, pivot, echelle })
+}
+
+/// Recale une coupe préparée contre `reference` ; rend le delta (à composer à gauche de la pose courante) et le rapport.
+fn recaler_preparee(p: &CoupePreparee, si: usize, k: usize, reference: &VolumeTensors, config: RobustConfig, device: &Device) -> (Matrix4<f64>, SliceReport) {
+    let resultat = register_slice_robust(
+        reference,
+        vecteurs_vers_tenseur(&p.points, device),
+        tenseur_1d(&[p.pivot.x, p.pivot.y, p.pivot.z], device),
+        p.echelle,
+        tenseur_1d(&p.intensites, device),
+        tenseur_1d(&vec![1.0; p.points.len()], device),
+        config,
+    );
+    let delta: Matrix4<f64> = pose_to_matrix(&resultat.params, &p.pivot, p.echelle);
+    let correction = (p.points.iter().map(|x| ((delta * x.push(1.0)).xyz() - x).norm_squared()).sum::<f64>() / p.points.len() as f64).sqrt();
+    (delta, SliceReport { stack: si, slice: k, registered: true, ncc_first: resultat.first_ncc, ncc_final: resultat.ncc, runs: resultat.runs, correction_rms_mm: correction })
+}
+
+/// **Recalage de chaque coupe contre une référence qui ne la contient pas** (« leave-one-slice-out ») : la référence de la coupe `k` est l'adjoint normalisé de TOUTES les autres
+/// coupes de TOUS les stacks, `(N − nₖ) / (D − dₖ)`, où `N = Σ Aₖᵀ(mₖ yₖ)` et `D = Σ Aₖᵀ mₖ` sont les sommes de l'adjoint normalisé et `nₖ`, `dₖ` la contribution de la coupe `k`
+/// (retirée exactement, sans refaire la somme). Elle est riche (les deux autres stacks et les autres coupes du sien) et sans auto-biais (la coupe n'y est plus). Là où le support
+/// restant `D − dₖ` est inférieur à [`SUPPORT_MIN`], la référence vaut 0, comme [`normalized_adjoint_with_poses`].
+///
+/// Même sortie et mêmes conventions que [`register_slices`] (delta composé à gauche, coupes de moins de [`MIN_MASK_PIXELS`] pixels ignorées).
+///
+/// # Erreurs
+/// Celles de [`register_slices`].
+pub fn register_slices_leave_slice_out(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    verifier_entrees(stacks, poses)?;
+    let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
+    let geometrie = grid.zeros();
     let mut nouvelles = poses.clone();
     let mut rapports = Vec::new();
     for (si, stack) in stacks.iter().enumerate() {
@@ -64,40 +147,44 @@ pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeT
         for coupe in stack.slices() {
             let k = coupe.index();
             let courante = *poses.get(si, k);
-            let posee = coupe.with_motion(courante);
-            let (nx, ny) = posee.dim();
-            let donnees = posee.data();
-            let (mut points, mut intensites) = (Vec::new(), Vec::new());
-            for j in 0..ny {
-                for i in 0..nx {
-                    if masque[[i, j, k]] {
-                        points.push(posee.pixel_to_world(i as f64, j as f64));
-                        intensites.push(f64::from(donnees[[i, j]]));
-                    }
-                }
-            }
-            let pivot = posee.brain_pivot();
-            let echelle = pivot.and_then(|c| rotation_scale_mm(&points, &c));
-            let (Some(pivot), Some(echelle), true) = (pivot, echelle, points.len() >= MIN_MASK_PIXELS) else {
+            let Some(preparee) = preparer_coupe(stack, k, courante) else {
                 rapports.push(SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 });
                 continue;
             };
-            let resultat = register_slice_robust(
-                reference,
-                vecteurs_vers_tenseur(&points, device),
-                tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
-                echelle,
-                tenseur_1d(&intensites, device),
-                tenseur_1d(&vec![1.0; points.len()], device),
-                config,
-            );
-            let delta: Matrix4<f64> = pose_to_matrix(&resultat.params, &pivot, echelle);
-            let correction = (points.iter().map(|x| ((delta * x.push(1.0)).xyz() - x).norm_squared()).sum::<f64>() / points.len() as f64).sqrt();
+            let (num_k, den_k) = contribution_de_la_coupe(&geometrie, &coupe.with_motion(courante), masque.index_axis(Axis(2), k));
+            let image = reference_sans_la_coupe(&numerateur, &denominateur, &num_k, &den_k);
+            let reference = Volume::new(image, grid.affine)?;
+            let (delta, rapport) = recaler_preparee(&preparee, si, k, &VolumeTensors::new(&reference, device), config, device);
             nouvelles.set(si, k, delta * courante);
-            rapports.push(SliceReport { stack: si, slice: k, registered: true, ncc_first: resultat.first_ncc, ncc_final: resultat.ncc, runs: resultat.runs, correction_rms_mm: correction });
+            rapports.push(rapport);
         }
     }
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// L'adjoint normalisé de TOUTES les coupes (celle qu'on recale comprise) comme volume : la référence « complète » à laquelle comparer [`register_slices_leave_slice_out`].
+pub(crate) fn normalized_reference_volume(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<Volume, SvrError> {
+    Volume::new(normalized_adjoint_with_poses(grid, stacks, poses)?.image, grid.affine)
+}
+
+/// Contribution `(nₖ, dₖ) = (Aₖᵀ(mₖ yₖ), Aₖᵀ mₖ)` d'une coupe (déjà à sa pose) à l'adjoint normalisé, sur la grille de `geometrie`.
+pub(crate) fn contribution_de_la_coupe(geometrie: &Volume, coupe: &crate::Slice, masque: ArrayView2<bool>) -> (Array3<f64>, Array3<f64>) {
+    let dims = geometrie.dim();
+    let (mut num, mut den) = (Array3::<f64>::zeros(dims), Array3::<f64>::zeros(dims));
+    geometrie.back_project_with_weight(coupe, &coupe.psf(), coupe.data(), masque, &mut num, &mut den);
+    (num, den)
+}
+
+/// `(N − nₖ) / (D − dₖ)` en `f32`, 0 là où `D − dₖ < SUPPORT_MIN`.
+pub(crate) fn reference_sans_la_coupe(n: &Array3<f64>, d: &Array3<f64>, n_k: &Array3<f64>, d_k: &Array3<f64>) -> Array3<f32> {
+    let mut image = Array3::<f32>::zeros(n.dim());
+    for (idx, v) in image.indexed_iter_mut() {
+        let reste = d[idx] - d_k[idx];
+        if reste >= f64::from(SUPPORT_MIN) {
+            *v = ((n[idx] - n_k[idx]) / reste) as f32;
+        }
+    }
+    image
 }
 
 /// Nombre maximal de pixels de masque utilisés pour recaler un stack entier (sous-échantillonnage régulier au-delà) : le coût de la NCC croît avec ce nombre.
@@ -263,6 +350,9 @@ pub struct LoopConfig {
     /// **floutée** (bassin d'attraction plus large, voir [`Volume::blurred`]), puis contre la référence nette depuis les poses du premier ([`register_slices_coarse_to_fine`]).
     /// 0 : un seul passage net. Mesuré sur une référence parfaite : 2 voxels (1,6 mm) corrigent les échecs à ±6° sans rien dégrader, 4 voxels créent des échecs rares.
     pub coarse_sigma_voxels: f64,
+    /// Nombre de premiers cycles où chaque coupe est recalée contre une référence qui ne la contient pas, l'adjoint normalisé de toutes les AUTRES coupes
+    /// ([`register_slices_leave_slice_out`]) ; prioritaire sur `leave_one_stack_out_cycles`. 0 : désactivé. Voir l'étude 06 §30 : option expérimentale.
+    pub leave_one_slice_out_cycles: usize,
 }
 
 /// Résultat de la boucle.
@@ -308,7 +398,9 @@ pub fn reconstruct_with_motion_correction(
         iterations.push(resultat.iterations);
         observateur(c, &resultat.x, &poses);
         if c < config.cycles {
-            let rapport = if c < config.leave_one_stack_out_cycles {
+            let rapport = if c < config.leave_one_slice_out_cycles {
+                register_slices_leave_slice_out(grid, stacks, &poses, config.robust, device)?
+            } else if c < config.leave_one_stack_out_cycles {
                 recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
             } else {
                 let reference = Volume::new(resultat.x.mapv(|v| v as f32), grid.affine)?;

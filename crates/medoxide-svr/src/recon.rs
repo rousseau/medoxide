@@ -149,11 +149,11 @@ pub fn normalized_adjoint(grid: &GridSpec, stacks: &[Stack]) -> Result<Normalize
     normalized_adjoint_with_poses(grid, stacks, &SlicePoses::identity(stacks))
 }
 
-/// Comme [`normalized_adjoint`], avec le mouvement `poses` de chaque coupe (la PSF tourne avec elle).
+/// Les deux sommes de l'adjoint normalisé sur la grille : numérateur `N = Σ Aₖᵀ(mₖ yₖ)` et dénominateur `D = Σ Aₖᵀ mₖ` (toutes les coupes de tous les `stacks`, à leurs poses), `x₀ = N / D`.
 ///
 /// # Erreurs
 /// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-pub fn normalized_adjoint_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<NormalizedAdjoint, SvrError> {
+pub(crate) fn adjoint_sums(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<(Array3<f64>, Array3<f64>), SvrError> {
     if !poses.matches(stacks) {
         return Err(SvrError::PoseMismatch);
     }
@@ -180,6 +180,15 @@ pub fn normalized_adjoint_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &
             (n1, d1)
         })
         .unwrap_or_else(|| (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)));
+    Ok((numerateur, denominateur))
+}
+
+/// Comme [`normalized_adjoint`], avec le mouvement `poses` de chaque coupe (la PSF tourne avec elle).
+///
+/// # Erreurs
+/// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+pub fn normalized_adjoint_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<NormalizedAdjoint, SvrError> {
+    let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let mut image = Array3::<f32>::zeros(grid.dims);
     let mut support = Array3::<f32>::zeros(grid.dims);
     for ((idx, &d), s) in denominateur.indexed_iter().zip(support.iter_mut()) {
@@ -1972,6 +1981,169 @@ mod tests {
         }
     }
 
+    /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
+    fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
+        let mut data = stack.data().clone();
+        data.index_axis_mut(Axis(2), k).mapv_inplace(|v| v + ajout);
+        let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
+        let sp = stack.spacing();
+        stack_avec_masque(t, nom, &data, &masque, stack.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+    }
+
+    /// Référence « sans la coupe » : (1) égale à l'adjoint normalisé de toutes les AUTRES coupes calculé directement (somme sur les autres coupes seulement, à 1e-4 de la dynamique) ;
+    /// (2) strictement aveugle à la coupe : modifier les pixels de la coupe `k` ne change pas sa référence (écart < 1e-9 de la dynamique) mais change celle d'une coupe voisine (> 1 % de la
+    /// dynamique), de sorte que le test n'est pas trivial ; (3) la référence complète (qui contient la coupe) diffère de la référence sans la coupe de plus de 1 % de la dynamique.
+    #[test]
+    fn the_leave_one_slice_out_reference_is_exact_and_blind_to_the_slice() {
+        let t = Temp::new("loso_reference");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let poses = poses_aleatoires(&stacks, 1.0, 1.0, 17); // poses courantes non triviales, différentes des vraies
+        let (num, den) = adjoint_sums(&grille, &stacks, &poses).unwrap();
+        let geometrie = grille.zeros();
+        let reference_de = |stacks: &[Stack], si: usize, k: usize| {
+            let (num, den) = adjoint_sums(&grille, stacks, &poses).unwrap();
+            let coupe = stacks[si].slices().nth(k).unwrap().with_motion(*poses.get(si, k));
+            let (nk, dk) = align::contribution_de_la_coupe(&geometrie, &coupe, stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k));
+            align::reference_sans_la_coupe(&num, &den, &nk, &dk)
+        };
+        let dynamique = stacks[0].data().iter().cloned().fold(0.0_f32, f32::max);
+        for (si, k) in [(0usize, 5usize), (1, 0), (2, 11)] {
+            // (1) somme directe sur toutes les autres coupes
+            let (mut n_dir, mut d_dir) = (Array3::<f64>::zeros(grille.dims), Array3::<f64>::zeros(grille.dims));
+            for (sj, stack) in stacks.iter().enumerate() {
+                let masque = stack.brain_mask().unwrap().voxels();
+                for coupe in stack.slices() {
+                    if (sj, coupe.index()) != (si, k) {
+                        let posee = coupe.with_motion(*poses.get(sj, coupe.index()));
+                        geometrie.back_project_with_weight(&posee, &posee.psf(), posee.data(), masque.index_axis(Axis(2), coupe.index()), &mut n_dir, &mut d_dir);
+                    }
+                }
+            }
+            let mut attendue = Array3::<f32>::zeros(grille.dims);
+            for (idx, v) in attendue.indexed_iter_mut() {
+                if d_dir[idx] >= f64::from(SUPPORT_MIN) {
+                    *v = (n_dir[idx] / d_dir[idx]) as f32;
+                }
+            }
+            let obtenue = reference_de(&stacks, si, k);
+            let ecart = obtenue.iter().zip(attendue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(ecart < 1e-4 * dynamique, "stack {si} coupe {k} : écart à la somme directe {ecart}");
+            // (2) aveugle à la coupe
+            let modifie: Vec<Stack> = stacks.iter().enumerate().map(|(sj, s)| if sj == si { stack_avec_coupe_modifiee(&t, s, k, 500.0, &format!("mod{sj}")) } else { s.clone() }).collect();
+            let apres = reference_de(&modifie, si, k);
+            let diff_propre = apres.iter().zip(obtenue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(diff_propre < 1e-9 * dynamique + 1e-6, "la référence de la coupe lit la coupe : {diff_propre}");
+            let voisine = if k + 1 < stacks[si].dim().2 { k + 1 } else { k - 1 };
+            let (v_avant, v_apres) = (reference_de(&stacks, si, voisine), reference_de(&modifie, si, voisine));
+            let diff_voisine = v_apres.iter().zip(v_avant.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(diff_voisine > 0.01 * dynamique, "la modification n'atteint pas la coupe voisine : test non discriminant ({diff_voisine})");
+            // (3) la référence complète est différente
+            let mut complete = Array3::<f32>::zeros(grille.dims);
+            for (idx, v) in complete.indexed_iter_mut() {
+                if den[idx] >= f64::from(SUPPORT_MIN) {
+                    *v = (num[idx] / den[idx]) as f32;
+                }
+            }
+            let diff_complete = complete.iter().zip(obtenue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(diff_complete > 0.01 * dynamique, "la référence complète ne diffère pas : {diff_complete}");
+            println!("stack {si} coupe {k} : écart à la somme directe {:.1e}, aveugle {:.1e}, voisine {:.2}, complète {:.2} (dynamique {dynamique:.0})", ecart / dynamique, diff_propre / dynamique, diff_voisine / dynamique, diff_complete / dynamique);
+        }
+    }
+
+    /// Recalage contre une référence sans la coupe (critères fixés avant) : trois stacks de blobs de 12 coupes avec un mouvement propre à chaque coupe (±2°/±2 mm), un passage depuis
+    /// l'identité : erreur de pose médiane ≤ 1 mm et amélioration pour au moins 90 % des coupes ; avec la référence COMPLÈTE (contenant la coupe) le même passage doit échouer à ce critère
+    /// (auto-biais), ce qui rend le test discriminant ; poses ou masques invalides refusés.
+    #[test]
+    #[ignore = "critère NON atteint (médiane 2,93 mm depuis un départ de 2,20 ; les passes répétées divergent) : voir étude 06 §30 ; garde la trace du résultat négatif"]
+    fn register_slices_leave_slice_out_corrects_what_the_full_reference_cannot() {
+        let t = Temp::new("loso_recalage");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let identite = SlicePoses::identity(&stacks);
+        let rapport = align::register_slices_leave_slice_out(&grille, &stacks, &identite, RobustConfig::new(0.9), &device).unwrap();
+        // statistiques sur les coupes recalées (masque assez grand) : les coupes hors des blobs ont un masque vide
+        let registered: Vec<bool> = rapport.slices.iter().map(|r| r.registered).collect();
+        let choisir = |v: Vec<f64>| -> Vec<f64> { v.into_iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| e).collect() };
+        let mediane = |v: &Vec<f64>| { let mut x = v.clone(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); x[x.len() / 2] };
+        let depart = choisir(erreurs_de_pose(&stacks, &identite, &vraies));
+        let apres = choisir(erreurs_de_pose(&stacks, &rapport.poses, &vraies));
+        let ameliorees = apres.iter().zip(&depart).filter(|(a, d)| a < d).count();
+        println!("{} coupes recalées sur {} ; départ médiane {:.2} mm ; sans la coupe : médiane {:.2} mm, {ameliorees} améliorées", depart.len(), registered.len(), mediane(&depart), mediane(&apres));
+        assert!(depart.len() >= 20, "trop peu de coupes recalées : {}", depart.len());
+        assert!(mediane(&depart) > 1.5, "départ non trivial : {}", mediane(&depart));
+        assert!(mediane(&apres) <= 1.0, "médiane après recalage : {}", mediane(&apres));
+        assert!(ameliorees as f64 >= 0.9 * depart.len() as f64, "{ameliorees}/{}", depart.len());
+        // référence complète : auto-biais
+        let complete = align::normalized_reference_volume(&grille, &stacks, &identite).unwrap();
+        let rapport_complet = align::register_slices(&stacks, &identite, &VolumeTensors::new(&complete, &device), RobustConfig::new(0.9), &device).unwrap();
+        let apres_complet = choisir(erreurs_de_pose(&stacks, &rapport_complet.poses, &vraies));
+        println!("référence complète : médiane {:.2} mm", mediane(&apres_complet));
+        assert!(mediane(&apres_complet) > mediane(&apres), "la référence complète ne devrait pas faire mieux : {} contre {}", mediane(&apres_complet), mediane(&apres));
+        // entrées invalides
+        assert!(matches!(align::register_slices_leave_slice_out(&grille, &stacks, &SlicePoses::identity(&stacks[..1]), RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
+    }
+
+    /// MESURE (temporaire) : où la référence sans la coupe échoue-t-elle ?
+    #[test]
+    #[ignore = "mesure temporaire"]
+    fn measure_leave_slice_out_diagnostics() {
+        let t = Temp::new("loso_mesure");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let identite = SlicePoses::identity(&stacks);
+        let mediane = |v: Vec<f64>| { let mut x: Vec<f64> = v.into_iter().filter(|e| e.is_finite()).collect(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); (x[x.len() / 2], x[x.len() * 9 / 10], x.len()) };
+        // A : passes répétées depuis l'identité
+        let mut poses = identite.clone();
+        for passe in 1..=5 {
+            poses = align::register_slices_leave_slice_out(&grille, &stacks, &poses, RobustConfig::new(0.9), &device).unwrap().poses;
+            let m = mediane(erreurs_de_pose(&stacks, &poses, &vraies));
+            println!("A passe {passe} depuis l'identité : médiane {:.2}, p90 {:.2} ({} coupes)", m.0, m.1, m.2);
+        }
+        // B : les AUTRES coupes aux vraies poses (référence idéale), la coupe elle-même à l'identité
+        let mut hybride = vraies.clone();
+        for (si, stack) in stacks.iter().enumerate() {
+            for c in stack.slices() { hybride.set(si, c.index(), Matrix4::identity()); }
+        }
+        // on recale chaque coupe contre la référence sans elle, calculée avec les vraies poses pour toutes les autres : on utilise les vraies poses partout et on part de l'identité
+        let rapport = {
+            let (num, den) = adjoint_sums(&grille, &stacks, &vraies).unwrap();
+            let geometrie = grille.zeros();
+            let mut nouvelles = identite.clone();
+            for (si, stack) in stacks.iter().enumerate() {
+                let masque = stack.brain_mask().unwrap().voxels();
+                for coupe in stack.slices() {
+                    let k = coupe.index();
+                    let (nk, dk) = align::contribution_de_la_coupe(&geometrie, &coupe.with_motion(*vraies.get(si, k)), masque.index_axis(Axis(2), k));
+                    let reference = Volume::new(align::reference_sans_la_coupe(&num, &den, &nk, &dk), grille.affine).unwrap();
+                    let un = align::register_slices(std::slice::from_ref(stack), &identite.select(&[si]), &VolumeTensors::new(&reference, &device), RobustConfig::new(0.9), &device).unwrap();
+                    nouvelles.set(si, k, *un.poses.get(0, k));
+                }
+            }
+            nouvelles
+        };
+        let m = mediane(erreurs_de_pose(&stacks, &rapport, &vraies));
+        println!("B autres coupes aux vraies poses, départ identité : médiane {:.2}, p90 {:.2}", m.0, m.1);
+        // C : référence = volume exact (rappel)
+        let exact = align::register_slices(&stacks, &identite, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let m = mediane(erreurs_de_pose(&stacks, &exact.poses, &vraies));
+        println!("C volume exact : médiane {:.2}, p90 {:.2}", m.0, m.1);
+        let m = mediane(erreurs_de_pose(&stacks, &identite, &vraies));
+        println!("départ : médiane {:.2}, p90 {:.2}", m.0, m.1);
+        let _ = hybride;
+    }
+
     /// Idempotence et composition : en repartant des poses obtenues, le second passage change très peu les poses (déplacement RMS du second delta
     /// < 0,3 mm) et ne dégrade pas l'erreur ; en partant de poses vraies perturbées, le recalage compose le delta à la pose courante.
     #[test]
@@ -2583,7 +2755,7 @@ mod tests {
         let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
-        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles, coarse_sigma_voxels: 0.0 };
+        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
@@ -2663,7 +2835,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0 };
+        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -2715,12 +2887,21 @@ mod tests {
         // MEDOXIDE_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (2 balayages) au lieu des poses d'en-tête ; MEDOXIDE_SUFFIXE : suffixe du fichier exporté
         let depart_stacks = std::env::var("MEDOXIDE_STACKS").map_or(false, |v| v.trim() == "1");
         let suffixe = std::env::var("MEDOXIDE_SUFFIXE").unwrap_or_default();
-        let (atlas, stacks, vraies) = (atlas, stacks, vraies);
+        // MEDOXIDE_STACKS_RETENUS : sous-ensemble de stacks (« 0,1 » : axial et coronal), tous par défaut ; MEDOXIDE_LOO_CYCLES : nombre de premiers cycles où chaque stack est recalé contre une
+        // reconstruction faite sans lui (6 par défaut ; 0 : toujours la reconstruction complète). Les exports d'un sous-ensemble vont dans un sous-dossier `stacks_<indices>` (pas d'écrasement).
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").map_or_else(|_| (0..stacks.len()).collect(), |v| v.split(',').map(|i| i.trim().parse().unwrap()).collect());
+        let (stacks_choisis, vraies_choisies): (Vec<Stack>, SlicePoses) = (retenus.iter().map(|&i| stacks[i].clone()).collect(), vraies.select(&retenus));
+        let (atlas, stacks, vraies) = (atlas, &stacks_choisis[..], &vraies_choisies);
+        let sous_ensemble = retenus.len() < 3;
+        let cycles_sans_le_stack: usize = std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
         let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
         let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
-        let sortie = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
+        let mut sortie = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
+        if sous_ensemble {
+            sortie = sortie.join(format!("stacks_{}", retenus.iter().map(|i| i.to_string()).collect::<String>()));
+        }
         let borne = |poses: &SlicePoses, nom: &str| {
             let p = ReconstructionProblem::with_poses(&grille, &stacks, poses, ALPHA_CHOISI).unwrap();
             let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
@@ -2730,7 +2911,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 6, coarse_sigma_voxels: sigma_grossier };
+        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();
