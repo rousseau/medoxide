@@ -24,7 +24,7 @@ for s in args.substitut:
     sujet, h = cle.split(":")
     subst[(sujet, int(h))] = f
 
-methodes = {"sans_la_coupe": "ours_loop_loso_sans{h}", "boucle_actuelle": "ours_loop_sans{h}", "sans_correction": "ours_header_sans{h}", "SVRTK": "svrtk_sans{h}"}
+methodes = {"avec_garde_fou": "ours_loop_garde_sans{h}", "sans_la_coupe": "ours_loop_loso_sans{h}", "boucle_actuelle": "ours_loop_sans{h}", "sans_correction": "ours_header_sans{h}", "SVRTK": "svrtk_sans{h}"}
 
 
 def lire(sujet, nom, h):
@@ -49,6 +49,6 @@ moy = {m: np.mean([r[m] for r in par_sujet.values()]) for m in methodes}
 print(f"{'moyenne':10} {'':6} " + " ".join(f"{moy[m]:16.4f}" for m in methodes))
 print("\nPar sujet (unité statistique) :")
 n = len(par_sujet)
-for a, b in (("sans_la_coupe", "SVRTK"), ("sans_la_coupe", "sans_correction"), ("sans_la_coupe", "boucle_actuelle"), ("boucle_actuelle", "SVRTK"), ("boucle_actuelle", "sans_correction"), ("SVRTK", "sans_correction")):
+for a, b in (("avec_garde_fou", "SVRTK"), ("avec_garde_fou", "sans_correction"), ("avec_garde_fou", "sans_la_coupe"), ("sans_la_coupe", "SVRTK"), ("sans_la_coupe", "sans_correction"), ("sans_la_coupe", "boucle_actuelle"), ("boucle_actuelle", "SVRTK"), ("boucle_actuelle", "sans_correction"), ("SVRTK", "sans_correction")):
     d = np.array([r[a] - r[b] for r in par_sujet.values()])
     print(f"  {a} − {b:16}: différence moyenne {d.mean():+.4f} (min {d.min():+.4f}, max {d.max():+.4f}) ; {a} gagne chez {int((d > 0).sum())} sujet(s) sur {n}")
