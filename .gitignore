@@ -24,3 +24,4 @@ docs/ROADMAP.md
 
 # Notes d'étude SVR (locales)
 /docs/svr/
+__pycache__/

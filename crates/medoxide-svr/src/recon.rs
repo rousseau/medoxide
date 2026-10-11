@@ -2084,7 +2084,7 @@ mod tests {
         let corriges: Vec<Stack> = injectes.iter().zip(&estimes).map(|(s, f)| s.divided_by_slice_scales(f).unwrap()).collect();
         let (si, k) = (1usize, 5usize);
         let (a, b) = (corriges[si].data().index_axis(Axis(2), k), propres[si].data().index_axis(Axis(2), k));
-        let ecart = a.iter().zip(b.iter()).map(|(x, y)| ((f64::from(*x) * mediane_vraie - f64::from(*y)).abs())).fold(0.0_f64, f64::max);
+        let ecart = a.iter().zip(b.iter()).map(|(x, y)| (f64::from(*x) * mediane_vraie - f64::from(*y)).abs()).fold(0.0_f64, f64::max);
         assert!(ecart < 1e-2 * f64::from(propres[si].data().iter().cloned().fold(0.0_f32, f32::max)), "la correction ne redonne pas les pixels : {ecart}");
         assert!(matches!(raw_slice_scales(&injectes, &SlicePoses::identity(&injectes[..1]), &volume), Err(SvrError::PoseMismatch)));
     }
@@ -2920,6 +2920,15 @@ mod tests {
         let sortie = sortie_reelle();
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
+        // MEDOXIDE_ALIGN_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (un mouvement rigide par stack, 2 balayages) au lieu des poses d'en-tête
+        let depart = if std::env::var("MEDOXIDE_ALIGN_STACKS").map_or(false, |v| v.trim() == "1") {
+            let debut_stacks = std::time::Instant::now();
+            let alignes = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            println!("alignement des stacks : {:.0} s ; NCC finales {:?}", debut_stacks.elapsed().as_secs_f64(), alignes.stacks.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+            alignes.poses
+        } else {
+            identite.clone()
+        };
         println!("stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles", grille.dims, stacks.iter().map(|s| s.dim().2).sum::<usize>());
         let debut = std::time::Instant::now();
         let sans = ReconstructionProblem::with_poses(&grille, &stacks, &identite, ALPHA_CHOISI).unwrap();
@@ -2927,7 +2936,7 @@ mod tests {
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
         let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
-        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, _, _| {
+        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
         .unwrap();
