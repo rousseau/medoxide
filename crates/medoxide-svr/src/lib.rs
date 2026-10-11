@@ -57,6 +57,8 @@ pub enum SvrError {
     InvalidRegularization,
     /// Écart type de flou invalide (négatif ou non fini).
     InvalidBlur,
+    /// Facteurs d'intensité par coupe invalides : nombre différent du nombre de coupes, ou valeur non finie ou non strictement positive.
+    InvalidScales,
     /// Le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes différent).
     PoseMismatch,
     /// Résolution ou marge de la grille non finie, ou résolution non strictement positive, ou marge négative.
@@ -92,6 +94,7 @@ impl std::fmt::Display for SvrError {
             SvrError::PoseMismatch => write!(f, "le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes)"),
             SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
             SvrError::InvalidBlur => write!(f, "écart type de flou invalide : σ >= 0 et fini requis"),
+            SvrError::InvalidScales => write!(f, "facteurs d'intensité par coupe invalides : un facteur fini et > 0 par coupe requis"),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
             SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
@@ -839,6 +842,24 @@ impl Stack {
     pub fn brain_barycenter_world(&self) -> Option<Vector3<f64>> {
         let b = self.mask.as_ref()?.barycenter_index();
         Some((self.affine * b.push(1.0)).xyz())
+    }
+
+    /// Ce stack dont la coupe `k` est **divisée** par `scales[k]` : si l'intensité mesurée d'une coupe est `yₖ = sₖ · (Aₖ x)` (un facteur d'intensité propre à la coupe, dû par exemple à des
+    /// variations de signal entre coupes), les données corrigées `yₖ / sₖ` ramènent toutes les coupes à la même échelle, et la reconstruction n'a pas à changer. Le masque, la géométrie et les
+    /// autres propriétés sont conservés (le chemin du fichier d'origine aussi).
+    ///
+    /// # Erreurs
+    /// [`SvrError::InvalidScales`] si `scales` n'a pas une valeur par coupe, ou si une valeur n'est pas finie ou pas strictement positive.
+    pub fn divided_by_slice_scales(&self, scales: &[f64]) -> Result<Stack, SvrError> {
+        let nz = self.data.dim().2;
+        if scales.len() != nz || scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return Err(SvrError::InvalidScales);
+        }
+        let mut copie = self.clone();
+        for (k, &s) in scales.iter().enumerate() {
+            copie.data.index_axis_mut(Axis(2), k).mapv_inplace(|v| (f64::from(v) / s) as f32);
+        }
+        Ok(copie)
     }
 
     /// Masque cérébral attaché, s'il y en a un.
@@ -2512,5 +2533,46 @@ mod tests {
         for mauvais in [-1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(volume.blurred(mauvais), Err(SvrError::InvalidBlur)), "{mauvais}");
         }
+    }
+
+    // ------------------------------------------------------------------ facteurs d'intensité par coupe
+
+    /// `divided_by_slice_scales` : chaque coupe est divisée par son facteur (exactement, à l'arrondi `f32`), les autres propriétés (affine, espacement, masque) sont conservées,
+    /// le stack d'origine est inchangé ; des facteurs de 1 rendent le stack tel quel ; mauvais nombre de facteurs, facteur nul, négatif ou non fini : refusés.
+    #[test]
+    fn dividing_a_stack_by_slice_scales_rescales_each_slice_and_keeps_the_rest() {
+        let dossier = std::env::temp_dir().join(format!("medoxide_echelles_{}", std::process::id()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let (chemin, chemin_masque) = (dossier.join("s.nii.gz"), dossier.join("m.nii.gz"));
+        let data = Array3::from_shape_fn((6, 5, 4), |(i, j, k)| 10.0 + (i + 2 * j + 3 * k) as f32);
+        let masque = Array3::from_shape_fn((6, 5, 4), |(i, j, k)| u8::from((i + j + k) % 2 == 0 || i > 2));
+        let h = {
+            let mut h = NiftiHeader::default();
+            h.sform_code = 1;
+            h.srow_x = [0.9, 0.0, 0.0, -2.0];
+            h.srow_y = [0.0, 0.9, 0.0, 1.0];
+            h.srow_z = [0.0, 0.0, 3.0, 4.0];
+            h.pixdim = [1.0, 0.9, 0.9, 3.0, 1.0, 1.0, 1.0, 1.0];
+            h
+        };
+        WriterOptions::new(&chemin).reference_header(&h).write_nifti(&data).unwrap();
+        WriterOptions::new(&chemin_masque).reference_header(&h).write_nifti(&masque).unwrap();
+        let mut stack = Stack::read(&chemin).unwrap();
+        stack.set_brain_mask(&chemin_masque).unwrap();
+        let echelles = [0.5, 1.0, 2.0, 1.25];
+        let corrige = stack.divided_by_slice_scales(&echelles).unwrap();
+        for ((i, j, k), &v) in corrige.data().indexed_iter() {
+            let attendu = (f64::from(stack.data()[[i, j, k]]) / echelles[k]) as f32;
+            assert_eq!(v, attendu, "pixel ({i},{j},{k})");
+        }
+        assert_eq!(corrige.affine(), stack.affine());
+        assert_eq!(corrige.spacing(), stack.spacing());
+        assert_eq!(corrige.brain_mask().unwrap().voxels(), stack.brain_mask().unwrap().voxels());
+        assert_eq!(stack.data()[[1, 1, 0]], data[[1, 1, 0]], "le stack d'origine doit rester inchangé");
+        assert_eq!(stack.divided_by_slice_scales(&[1.0; 4]).unwrap().data(), stack.data());
+        for mauvais in [vec![1.0; 3], vec![1.0; 5], vec![1.0, 0.0, 1.0, 1.0], vec![1.0, -1.0, 1.0, 1.0], vec![1.0, f64::NAN, 1.0, 1.0], vec![1.0, f64::INFINITY, 1.0, 1.0]] {
+            assert!(matches!(stack.divided_by_slice_scales(&mauvais), Err(SvrError::InvalidScales)), "{mauvais:?}");
+        }
+        std::fs::remove_dir_all(&dossier).ok();
     }
 }

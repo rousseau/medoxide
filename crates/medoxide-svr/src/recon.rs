@@ -52,6 +52,62 @@ impl SlicePoses {
     }
 }
 
+/// Facteurs d'intensité **bruts** de chaque coupe contre un volume : `sₖ = ⟨Aₖx, yₖ⟩ / ⟨Aₖx, Aₖx⟩`, somme sur les pixels du masque cérébral de la coupe entièrement couverts par le volume, à la pose de la
+/// coupe ; c'est la solution des moindres carrés de `min_s ‖mₖ (s · Aₖx − yₖ)‖²`. `None` pour une coupe de moins de [`crate::align::MIN_MASK_PIXELS`] pixels utilisables ou de signal simulé nul. Un vecteur par stack.
+///
+/// Si `volume` a été reconstruit AVEC la coupe, il en a déjà absorbé une partie du facteur : l'estimation est alors tirée vers 1. Pour mesurer une incohérence, utiliser un volume qui ne la contient pas.
+///
+/// # Erreurs
+/// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+pub fn raw_slice_scales(stacks: &[Stack], poses: &SlicePoses, volume: &Volume) -> Result<Vec<Vec<Option<f64>>>, SvrError> {
+    if !poses.matches(stacks) {
+        return Err(SvrError::PoseMismatch);
+    }
+    stacks
+        .iter()
+        .enumerate()
+        .map(|(si, stack)| {
+            let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?.voxels();
+            Ok(stack
+                .slices()
+                .map(|coupe| {
+                    let k = coupe.index();
+                    let posee = coupe.with_motion(*poses.get(si, k));
+                    let m = masque.index_axis(Axis(2), k);
+                    let sim = volume.simulate_slice_masked(&posee, &posee.psf(), m);
+                    let y = posee.data();
+                    let (mut num, mut den, mut n) = (0.0_f64, 0.0_f64, 0usize);
+                    for ((i, j), &dedans) in m.indexed_iter() {
+                        if dedans && sim.coverage[[i, j]] >= 0.99 {
+                            let a = f64::from(sim.values[[i, j]]);
+                            num += a * f64::from(y[[i, j]]);
+                            den += a * a;
+                            n += 1;
+                        }
+                    }
+                    (n >= crate::align::MIN_MASK_PIXELS && den > 0.0).then(|| num / den)
+                })
+                .collect())
+        })
+        .collect()
+}
+
+/// Facteurs d'intensité par coupe, **normalisés** : les facteurs bruts de [`raw_slice_scales`], bornés à `[1/5 ; 5]`, divisés par leur médiane (sur les coupes estimées) pour que l'échelle de la reconstruction
+/// reste celle d'une coupe médiane ; 1 pour les coupes non estimées. Utilisables par [`Stack::divided_by_slice_scales`].
+///
+/// # Erreurs
+/// Celles de [`raw_slice_scales`].
+pub fn estimate_slice_scales(stacks: &[Stack], poses: &SlicePoses, volume: &Volume) -> Result<Vec<Vec<f64>>, SvrError> {
+    let brutes = raw_slice_scales(stacks, poses, volume)?;
+    let mut valeurs: Vec<f64> = brutes.iter().flatten().flatten().map(|s| s.clamp(0.2, 5.0)).collect();
+    if valeurs.is_empty() {
+        return Ok(brutes.iter().map(|v| vec![1.0; v.len()]).collect());
+    }
+    valeurs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mediane = valeurs[valeurs.len() / 2];
+    Ok(brutes.iter().map(|v| v.iter().map(|s| s.map_or(1.0, |s| s.clamp(0.2, 5.0) / mediane)).collect()).collect())
+}
+
 /// Support minimal (somme des poids rétroprojetés) au-dessous duquel un voxel est considéré comme non couvert par les données.
 /// Chaque pixel de masque répartit une masse totale de 1 sur les voxels : le support compte, en pixels, les données qui touchent
 /// le voxel. 1e-3 écarte les voxels que seule la queue d'une PSF atteint.
@@ -1981,6 +2037,58 @@ mod tests {
         }
     }
 
+    /// Estimation des facteurs d'intensité par coupe (critères fixés avant : erreur relative < 1e-3 avec le volume exact ; < 3 % avec une reconstruction faite des données déjà mises à l'échelle) :
+    /// trois stacks de blobs simulés aux vraies poses depuis un volume connu, chaque coupe multipliée par un facteur injecté (log-normal σ = 0,15) ; (1) contre le VOLUME EXACT, les facteurs estimés
+    /// égalent les facteurs injectés à la normalisation près (médiane 1) ; (2) les coupes non estimables (masque trop petit) valent 1 ; (3) la correction par les facteurs estimés redonne les pixels de
+    /// départ (à la normalisation près) ; (4) un jeu de poses de mauvaise forme est refusé.
+    #[test]
+    fn slice_scales_are_recovered_exactly_from_the_true_volume() {
+        let t = Temp::new("echelles_exactes");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let propres = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let injectes_facteurs = facteurs_injectes(&propres, 0.15, 4242);
+        let injectes: Vec<Stack> = propres.iter().zip(&injectes_facteurs).map(|(s, f)| s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap()).collect();
+        let estimes = estimate_slice_scales(&injectes, &vraies, &volume).unwrap();
+        let brutes = raw_slice_scales(&injectes, &vraies, &volume).unwrap();
+        let mut valeurs_vraies: Vec<f64> = Vec::new();
+        for (si, v) in brutes.iter().enumerate() {
+            for (k, b) in v.iter().enumerate() {
+                if b.is_some() {
+                    valeurs_vraies.push(injectes_facteurs[si][k]);
+                }
+            }
+        }
+        valeurs_vraies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mediane_vraie = valeurs_vraies[valeurs_vraies.len() / 2];
+        let (mut pire, mut n_est, mut n_un) = (0.0_f64, 0usize, 0usize);
+        for (si, v) in brutes.iter().enumerate() {
+            for (k, b) in v.iter().enumerate() {
+                match b {
+                    Some(_) => {
+                        n_est += 1;
+                        pire = pire.max((estimes[si][k] / (injectes_facteurs[si][k] / mediane_vraie) - 1.0).abs());
+                    }
+                    None => {
+                        n_un += 1;
+                        assert_eq!(estimes[si][k], 1.0, "coupe non estimable : facteur 1 attendu");
+                    }
+                }
+            }
+        }
+        println!("{n_est} coupes estimées, {n_un} non estimables ; erreur relative maximale {pire:.2e}");
+        assert!(n_est >= 30 && n_un >= 1, "{n_est} / {n_un}");
+        assert!(pire < 1e-3, "erreur relative maximale {pire}");
+        // correction : redonne les pixels de départ à un facteur global près (la médiane vraie)
+        let corriges: Vec<Stack> = injectes.iter().zip(&estimes).map(|(s, f)| s.divided_by_slice_scales(f).unwrap()).collect();
+        let (si, k) = (1usize, 5usize);
+        let (a, b) = (corriges[si].data().index_axis(Axis(2), k), propres[si].data().index_axis(Axis(2), k));
+        let ecart = a.iter().zip(b.iter()).map(|(x, y)| ((f64::from(*x) * mediane_vraie - f64::from(*y)).abs())).fold(0.0_f64, f64::max);
+        assert!(ecart < 1e-2 * f64::from(propres[si].data().iter().cloned().fold(0.0_f32, f32::max)), "la correction ne redonne pas les pixels : {ecart}");
+        assert!(matches!(raw_slice_scales(&injectes, &SlicePoses::identity(&injectes[..1]), &volume), Err(SvrError::PoseMismatch)));
+    }
+
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
     fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
         let mut data = stack.data().clone();
@@ -2890,6 +2998,101 @@ mod tests {
         let mut ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
         ncc.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!("JUGE synthétique stack {indice} : {} coupes ; NCC moyenne {:.4}, médiane {:.4}", ncc.len(), ncc.iter().sum::<f64>() / ncc.len() as f64, ncc[ncc.len() / 2]);
+    }
+
+    /// Facteurs d'intensité par coupe tirés log-normalement : `sₖ = exp(σ · gₖ)`, `gₖ` gaussienne centrée réduite (somme de 12 uniformes − 6), graine fixe ; un vecteur par stack.
+    fn facteurs_injectes(stacks: &[Stack], sigma: f64, graine: u64) -> Vec<Vec<f64>> {
+        let mut alea = Alea(graine);
+        stacks.iter().map(|s| (0..s.dim().2).map(|_| (sigma * ((0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0)).exp()).collect()).collect()
+    }
+
+    /// CONTRÔLE (étape 4c) sur données de vérité connue : jeu pyrecon lisse ±2, vraies poses ; on multiplie chaque coupe par un facteur injecté `sₖ` (log-normal d'écart type σ = 0 ; 0,05 ;
+    /// 0,10 ; 0,15 ; 0,20, la plage observée sur le réel étant d'environ ±15 %), on reconstruit (gradient conjugué, α fixé) et on mesure le PSNR et la NCC contre l'atlas ; on exporte chaque
+    /// volume (`ours_scales_sigma<σ>.nii.gz`) pour valider la mesure de texture. Pour σ = 0,15 on reconstruit aussi après CORRECTION PAR LES VRAIS FACTEURS (borne haute de la mise à l'échelle).
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn control_reconstruction_with_injected_slice_scales() {
+        let (atlas, stacks, vraies) = stacks_pyrecon_modele("lisse", 2);
+        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+        let init = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
+        let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+        let sortie = PathBuf::from(format!("{}/data/atlas/results/pyrecon_lisse_mvt2", racine()));
+        let reconstruire_et_mesurer = |nom: &str, stacks: &[Stack]| {
+            let p = ReconstructionProblem::with_poses(&grille, stacks, &vraies, ALPHA_CHOISI).unwrap();
+            let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
+            ecrire_image_grille(&sortie.join(format!("ours_scales_{nom}.nii.gz")), &x, &grille);
+            let q = qualite(&c, &x);
+            println!("{nom:24} : NCC {:.4}, PSNR {:.2} dB", q.0, q.1);
+        };
+        for sigma in [0.0, 0.05, 0.10, 0.15, 0.20] {
+            let facteurs = facteurs_injectes(&stacks, sigma, 4242);
+            let injectes: Vec<Stack> = stacks.iter().zip(&facteurs).map(|(s, f)| s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap()).collect();
+            reconstruire_et_mesurer(&format!("sigma{sigma:.2}"), &injectes);
+            if (sigma - 0.15).abs() < 1e-9 {
+                let corriges: Vec<Stack> = injectes.iter().zip(&facteurs).map(|(s, f)| s.divided_by_slice_scales(f).unwrap()).collect();
+                reconstruire_et_mesurer("sigma0.15_corrige_vrai", &corriges);
+            }
+        }
+    }
+
+    /// Statistiques de dispersion de facteurs d'intensité bruts : nombre de coupes estimées, écart type de `ln s` (après division par la médiane), 5ᵉ, 50ᵉ et 95ᵉ centiles de `s / médiane`.
+    fn dispersion_des_facteurs(brutes: &[Option<f64>]) -> String {
+        let mut v: Vec<f64> = brutes.iter().flatten().copied().collect();
+        if v.len() < 5 {
+            return format!("{} coupes estimées (trop peu)", v.len());
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mediane = v[v.len() / 2];
+        let ln: Vec<f64> = v.iter().map(|s| (s / mediane).ln()).collect();
+        let moyenne = ln.iter().sum::<f64>() / ln.len() as f64;
+        let ecart = (ln.iter().map(|l| (l - moyenne).powi(2)).sum::<f64>() / (ln.len() - 1) as f64).sqrt();
+        let p = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize] / mediane;
+        format!("{} coupes estimées ; écart type de ln s : {ecart:.3} ; s/médiane : p5 {:.3}, médiane 1, p95 {:.3}", v.len(), p(0.05), p(0.95))
+    }
+
+    /// Lit un fichier de poses (stack, coupe, 16 valeurs en ordre colonne) pour des stacks donnés ; les coupes absentes gardent l'identité.
+    fn lire_poses_tsv(chemin: &Path, stacks: &[Stack]) -> SlicePoses {
+        let mut poses = SlicePoses::identity(stacks);
+        for ligne in std::fs::read_to_string(chemin).expect("fichier de poses absent").lines() {
+            let c: Vec<&str> = ligne.split('\t').collect();
+            let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
+            poses.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+        }
+        poses
+    }
+
+    /// DIAGNOSTIC des facteurs d'intensité par coupe sur DONNÉES RÉELLES : pour le stack `MEDOXIDE_STACK_TEST`, facteurs bruts contre un volume reconstruit SANS ce stack (`MEDOXIDE_VOLUME`) aux poses
+    /// du fichier `MEDOXIDE_POSES` (poses de la reconstruction à 3 stacks, `poses_loop.tsv`). Une dispersion plus grande que le plancher mesuré sur données simulées signale une vraie incohérence
+    /// d'intensité entre coupes (les erreurs de pose et de modèle ajoutent du bruit à l'estimation).
+    /// Variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME, MEDOXIDE_POSES. À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données réelles locales"]
+    fn diagnose_slice_scales_on_real_data() {
+        let h: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let tous = stacks_reels();
+        let poses_tous = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let teste = std::slice::from_ref(&tous[h]);
+        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).expect("volume illisible"));
+        let brutes = raw_slice_scales(teste, &poses_tous.select(&[h]), &volume).unwrap();
+        println!("FACTEURS réel, stack {h} : {}", dispersion_des_facteurs(&brutes[0]));
+    }
+
+    /// CONTRÔLE de ce diagnostic sur DONNÉES SIMULÉES (modèle direct de pyrecon, différent du nôtre) : jeu indépendant ±2, volume reconstruit aux vraies poses avec les stacks 0 et 1 (exporté par
+    /// `evaluer_la_boucle`), facteurs bruts du stack 2 mis de côté aux vraies poses ; σ injecté = 0 (le PLANCHER de l'estimateur : erreur de modèle et de bruit seulement), 0,05 et 0,15.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn control_slice_scales_estimation_on_held_out_synthetic_stack() {
+        let (_, stacks, vraies) = stacks_pyrecon_modele("", 2);
+        let volume = Volume::from_stack(&Stack::read(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt2/stacks_01/ours_true_poses.nii.gz", racine()))).expect("volume absent"));
+        let teste = &stacks[2..3];
+        for sigma in [0.0, 0.05, 0.15] {
+            let facteurs = facteurs_injectes(teste, sigma, 99);
+            let injecte = teste[0].divided_by_slice_scales(&facteurs[0].iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap();
+            let brutes = raw_slice_scales(std::slice::from_ref(&injecte), &vraies.select(&[2]), &volume).unwrap();
+            println!("FACTEURS simulé, σ injecté {sigma:.2} : {}", dispersion_des_facteurs(&brutes[0]));
+        }
     }
 
     /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
