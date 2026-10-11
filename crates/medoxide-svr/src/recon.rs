@@ -2054,6 +2054,69 @@ mod tests {
         }
     }
 
+    /// Référence « sans la fenêtre » (`parcourir_references_sans_fenetre`) : pour des fenêtres de 0, 3 et « tout le stack », et des coupes au bord et au milieu, la référence égale la somme
+    /// DIRECTE sur toutes les coupes sauf celles du même stack à distance ≤ `w` (écart < 1e-4 de la dynamique) ; elle est aveugle aux coupes de la fenêtre (modifier la coupe k+w ne change pas
+    /// la référence de k) mais pas à celle juste hors fenêtre (modifier k+w+1 la change de plus de 0,1 % de la dynamique) ; la fenêtre 0 redonne la référence « sans la coupe ».
+    #[test]
+    fn the_window_reference_excludes_exactly_the_neighbours_in_the_stack() {
+        let t = Temp::new("loso_fenetre");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let poses = poses_aleatoires(&stacks, 1.0, 1.0, 17);
+        let geometrie = grille.zeros();
+        let dynamique = stacks[0].data().iter().cloned().fold(0.0_f32, f32::max);
+        let nz = stacks[1].dim().2;
+        let references = |stacks: &[Stack], si: usize, w: usize| {
+            let (num, den) = adjoint_sums(&grille, stacks, &poses).unwrap();
+            let mut sortie = std::collections::HashMap::new();
+            align::parcourir_references_sans_fenetre(&grille, &stacks[si], si, &poses, w, &num, &den, &|_| true, |k, image| {
+                sortie.insert(k, image.unwrap());
+            });
+            sortie
+        };
+        let ecart_max = |a: &Array3<f32>, b: &Array3<f32>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max);
+        let si = 1usize; // stack coronal
+        for w in [0usize, 3, nz] {
+            let obtenues = references(&stacks, si, w);
+            for k in [0usize, 2, 6, nz - 1] {
+                let (mut n_dir, mut d_dir) = (Array3::<f64>::zeros(grille.dims), Array3::<f64>::zeros(grille.dims));
+                for (sj, stack) in stacks.iter().enumerate() {
+                    let masque = stack.brain_mask().unwrap().voxels();
+                    for coupe in stack.slices() {
+                        let j = coupe.index();
+                        let dans_la_fenetre = sj == si && j.abs_diff(k) <= w;
+                        if !dans_la_fenetre {
+                            let posee = coupe.with_motion(*poses.get(sj, j));
+                            geometrie.back_project_with_weight(&posee, &posee.psf(), posee.data(), masque.index_axis(Axis(2), j), &mut n_dir, &mut d_dir);
+                        }
+                    }
+                }
+                let mut attendue = Array3::<f32>::zeros(grille.dims);
+                for (idx, v) in attendue.indexed_iter_mut() {
+                    if d_dir[idx] >= f64::from(SUPPORT_MIN) {
+                        *v = (n_dir[idx] / d_dir[idx]) as f32;
+                    }
+                }
+                let ecart = ecart_max(&obtenues[&k], &attendue);
+                assert!(ecart < 1e-4 * dynamique, "w = {w}, k = {k} : écart à la somme directe {ecart}");
+            }
+            // aveuglement : modifier la coupe k + w (dans la fenêtre de k) ne change pas la référence de k ; modifier k + w + 1 la change
+            if w < nz {
+                let k = 2usize;
+                let modif = |j: usize| -> Vec<Stack> { stacks.iter().enumerate().map(|(sj, s)| if sj == si { stack_avec_coupe_modifiee(&t, s, j, 500.0, "fen") } else { s.clone() }).collect() };
+                let dedans = references(&modif(k + w), si, w);
+                let dehors = references(&modif(k + w + 1), si, w);
+                let (d_in, d_out) = (ecart_max(&dedans[&k], &obtenues[&k]), ecart_max(&dehors[&k], &obtenues[&k]));
+                assert!(d_in < 1e-6 * dynamique + 1e-6, "w = {w} : la référence lit la coupe {} de sa fenêtre : {d_in}", k + w);
+                assert!(d_out > 0.001 * dynamique, "w = {w} : la coupe {} hors fenêtre devrait compter : {d_out}", k + w + 1);
+                println!("w = {w} : exacte ; coupe de la fenêtre {d_in:.1e}, coupe hors fenêtre {:.3} de la dynamique", d_out / dynamique);
+            }
+        }
+    }
+
     /// Recalage contre une référence sans la coupe (critères fixés avant) : trois stacks de blobs de 12 coupes avec un mouvement propre à chaque coupe (±2°/±2 mm), un passage depuis
     /// l'identité : erreur de pose médiane ≤ 1 mm et amélioration pour au moins 90 % des coupes ; avec la référence COMPLÈTE (contenant la coupe) le même passage doit échouer à ce critère
     /// (auto-biais), ce qui rend le test discriminant ; poses ou masques invalides refusés.
@@ -2755,7 +2818,7 @@ mod tests {
         let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
-        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
@@ -2806,6 +2869,29 @@ mod tests {
         );
     }
 
+    /// JUGE sur données SYNTHÉTIQUES (validation du juge, dont la vérité est connue) : même protocole que `judge_a_volume_with_a_held_out_stack`, mais le stack mis de côté est celui d'un jeu pyrecon
+    /// (variables MEDOXIDE_MODELE, MEDOXIDE_AMPLITUDES = une amplitude, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME). Écrit `<volume>.juge.tsv`.
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales"]
+    fn judge_a_synthetic_volume_with_a_held_out_stack() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let chemin = std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME");
+        let amplitude: u32 = std::env::var("MEDOXIDE_AMPLITUDES").expect("MEDOXIDE_AMPLITUDES").trim().parse().unwrap();
+        let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
+        let infixe = if modele == "independant" { String::new() } else { modele };
+        let teste = stacks_pyrecon_modele(&infixe, amplitude).1.remove(indice);
+        let volume = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("volume illisible"));
+        let un_stack = std::slice::from_ref(&teste);
+        let rapport = align::register_slices(un_stack, &SlicePoses::identity(un_stack), &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let par_coupe: Vec<String> = rapport.slices.iter().filter(|r| r.registered).map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm)).collect();
+        std::fs::write(format!("{chemin}.juge.tsv"), format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n"))).unwrap();
+        let mut ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
+        ncc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("JUGE synthétique stack {indice} : {} coupes ; NCC moyenne {:.4}, médiane {:.4}", ncc.len(), ncc.iter().sum::<f64>() / ncc.len() as f64, ncc[ncc.len() / 2]);
+    }
+
     /// ÉVALUATION de la boucle sur les jeux pyrecon (mouvement indépendant par coupe, modèle direct de pyrecon) : mêmes mesures que `evaluate_the_loop_on_sta31`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
@@ -2835,7 +2921,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -2911,7 +2997,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();

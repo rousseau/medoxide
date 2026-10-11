@@ -133,33 +133,82 @@ fn recaler_preparee(p: &CoupePreparee, si: usize, k: usize, reference: &VolumeTe
 /// restant `D − dₖ` est inférieur à [`SUPPORT_MIN`], la référence vaut 0, comme [`normalized_adjoint_with_poses`].
 ///
 /// Même sortie et mêmes conventions que [`register_slices`] (delta composé à gauche, coupes de moins de [`MIN_MASK_PIXELS`] pixels ignorées).
+/// Équivaut à [`register_slices_leave_window_out`] avec une fenêtre nulle.
 ///
 /// # Erreurs
 /// Celles de [`register_slices`].
 pub fn register_slices_leave_slice_out(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    register_slices_leave_window_out(grid, stacks, poses, 0, config, device)
+}
+
+/// Comme [`register_slices_leave_slice_out`], mais la référence de la coupe `k` d'un stack exclut aussi ses voisines **du même stack** dans une fenêtre de `±window` coupes :
+/// `(N − Σ_{|j−k| ≤ window} nⱼ) / (D − Σ dⱼ)`. Les coupes voisines d'un même stack partagent une partie de leur erreur de pose quand le mouvement est lisse ; les garder dans la
+/// référence tire la coupe vers leur position (auto-biais « par procuration »). `window = 0` : la coupe seule ; `window` ≥ nombre de coupes du stack : tout le stack (« sans le stack »).
+/// La somme de la fenêtre est mise à jour par glissement (une rétroprojection ajoutée et une retirée par coupe).
+///
+/// # Erreurs
+/// Celles de [`register_slices`].
+pub fn register_slices_leave_window_out(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, window: usize, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
     verifier_entrees(stacks, poses)?;
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
-    let geometrie = grid.zeros();
     let mut nouvelles = poses.clone();
     let mut rapports = Vec::new();
     for (si, stack) in stacks.iter().enumerate() {
-        let masque = stack.brain_mask().expect("vérifié").voxels();
-        for coupe in stack.slices() {
-            let k = coupe.index();
-            let courante = *poses.get(si, k);
-            let Some(preparee) = preparer_coupe(stack, k, courante) else {
-                rapports.push(SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 });
-                continue;
-            };
-            let (num_k, den_k) = contribution_de_la_coupe(&geometrie, &coupe.with_motion(courante), masque.index_axis(Axis(2), k));
-            let image = reference_sans_la_coupe(&numerateur, &denominateur, &num_k, &den_k);
-            let reference = Volume::new(image, grid.affine)?;
-            let (delta, rapport) = recaler_preparee(&preparee, si, k, &VolumeTensors::new(&reference, device), config, device);
-            nouvelles.set(si, k, delta * courante);
-            rapports.push(rapport);
-        }
+        let nz = stack.dim().2;
+        let preparees: Vec<Option<CoupePreparee>> = (0..nz).map(|k| preparer_coupe(stack, k, *poses.get(si, k))).collect();
+        parcourir_references_sans_fenetre(grid, stack, si, poses, window, &numerateur, &denominateur, &|k| preparees[k].is_some(), |k, image| match (&preparees[k], image) {
+            (Some(preparee), Some(image)) => {
+                let reference = Volume::new(image, grid.affine).expect("l'affine d'une grille est inversible");
+                let (delta, rapport) = recaler_preparee(preparee, si, k, &VolumeTensors::new(&reference, device), config, device);
+                nouvelles.set(si, k, delta * *poses.get(si, k));
+                rapports.push(rapport);
+            }
+            _ => rapports.push(SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }),
+        });
     }
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// Pour chaque coupe `k` du stack `si` (dans l'ordre), appelle `f(k, Some(référence))` si `veut(k)` (la référence : `(N − Σ nⱼ)/(D − Σ dⱼ)` sur la fenêtre `|j − k| ≤ window` du même stack,
+/// 0 là où le support restant est < [`SUPPORT_MIN`]), sinon `f(k, None)`. `numerateur` et `denominateur` sont les sommes `N` et `D` de toutes les coupes de tous les stacks à `poses`.
+pub(crate) fn parcourir_references_sans_fenetre(
+    grid: &GridSpec,
+    stack: &Stack,
+    si: usize,
+    poses: &SlicePoses,
+    window: usize,
+    numerateur: &Array3<f64>,
+    denominateur: &Array3<f64>,
+    veut: &dyn Fn(usize) -> bool,
+    mut f: impl FnMut(usize, Option<Array3<f32>>),
+) {
+    let geometrie = grid.zeros();
+    let masque = stack.brain_mask().expect("vérifié").voxels();
+    let coupes: Vec<crate::Slice> = stack.slices().collect();
+    let nz = coupes.len();
+    let contribution = |j: usize| contribution_de_la_coupe(&geometrie, &coupes[j].with_motion(*poses.get(si, j)), masque.index_axis(Axis(2), j));
+    let (mut somme_n, mut somme_d) = (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims));
+    for j in 0..=window.min(nz.saturating_sub(1)) {
+        let (n, d) = contribution(j);
+        somme_n += &n;
+        somme_d += &d;
+    }
+    for k in 0..nz {
+        if k > 0 {
+            // la fenêtre passe de [k−1−w, k−1+w] à [k−w, k+w]
+            if k + window < nz {
+                let (n, d) = contribution(k + window);
+                somme_n += &n;
+                somme_d += &d;
+            }
+            if k > window {
+                let (n, d) = contribution(k - window - 1);
+                somme_n -= &n;
+                somme_d -= &d;
+            }
+        }
+        f(k, veut(k).then(|| reference_sans_la_coupe(numerateur, denominateur, &somme_n, &somme_d)));
+    }
 }
 
 /// L'adjoint normalisé de TOUTES les coupes (celle qu'on recale comprise) comme volume : la référence « complète » à laquelle comparer [`register_slices_leave_slice_out`].
@@ -353,6 +402,9 @@ pub struct LoopConfig {
     /// Nombre de premiers cycles où chaque coupe est recalée contre une référence qui ne la contient pas, l'adjoint normalisé de toutes les AUTRES coupes
     /// ([`register_slices_leave_slice_out`]) ; prioritaire sur `leave_one_stack_out_cycles`. 0 : désactivé. Voir l'étude 06 §30 : option expérimentale.
     pub leave_one_slice_out_cycles: usize,
+    /// Avec `leave_one_slice_out_cycles`, nombre de coupes voisines **de chaque côté, dans le même stack**, exclues de la référence en plus de la coupe elle-même
+    /// ([`register_slices_leave_window_out`]) ; 0 : la coupe seule.
+    pub leave_slice_out_window: usize,
 }
 
 /// Résultat de la boucle.
@@ -399,7 +451,7 @@ pub fn reconstruct_with_motion_correction(
         observateur(c, &resultat.x, &poses);
         if c < config.cycles {
             let rapport = if c < config.leave_one_slice_out_cycles {
-                register_slices_leave_slice_out(grid, stacks, &poses, config.robust, device)?
+                register_slices_leave_window_out(grid, stacks, &poses, config.leave_slice_out_window, config.robust, device)?
             } else if c < config.leave_one_stack_out_cycles {
                 recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
             } else {

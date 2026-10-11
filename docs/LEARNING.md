@@ -1305,4 +1305,15 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-11 — Fenêtre glissante de voisines, et validation d'un juge
+
+- **Quoi** : généralisation de la référence sans la coupe : exclure aussi ses voisines du même stack dans une fenêtre de `±w` coupes. La somme de la fenêtre se met à jour par **glissement** : à chaque coupe, une contribution entre dans la fenêtre et une sort (une rétroprojection chacune), au lieu de recalculer toute la somme.
+- **Rust** : un paramètre `&dyn Fn(usize) -> bool` (une fermeture passée par référence, utilisée comme prédicat) et un paramètre `impl FnMut(usize, Option<Array3<f32>>)` (une fermeture qui consomme chaque référence, ce qui évite de garder en mémoire une référence par coupe) ; `bool::then(|| …)` pour ne calculer une valeur que si une condition est vraie ; `usize::abs_diff`.
+- **Tests** : exactitude contre une somme directe qui exclut exactement la fenêtre (bords, milieu, fenêtre couvrant tout le stack) ; aveuglement testé **des deux côtés** (une coupe dans la fenêtre ne change pas la référence, une coupe juste hors fenêtre la change) ; quatre mutants d'indices (entrée, sortie, initialisation, condition de sortie) tous détectés.
+- **Résultats** : exclure les voisines ne rétablit pas le jeu de mouvement lisse (16,7 dB contre 23,8 pour l'ancienne boucle) : l'hypothèse « les voisines tirent la coupe » est rejetée. **Validation du juge** : sur des données synthétiques, son classement des volumes (NCC hors échantillon) coïncide avec le classement par PSNR contre la vérité (Spearman 1,00 aux deux amplitudes, 5 volumes) ; la contradiction entre données réelles et synthétiques n'est donc pas un défaut de la mesure : le comportement des méthodes diffère réellement.
+
+**Suite** : calibrer un jeu synthétique sur le mouvement estimé des données réelles.
+
+---
+
 *(à compléter à la prochaine étape)*
