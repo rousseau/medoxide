@@ -2194,6 +2194,53 @@ mod tests {
         assert!(ecart(&sans.poses, &large.poses) < 1e-12, "des seuils très larges ne doivent rien changer");
     }
 
+    /// Gros vers fin dans la référence « sans la coupe » (critères fixés avant) : trois stacks de blobs, poses de départ = identité, σ = 1,5 voxel. (1) Pour des coupes du stack coronal, la pose obtenue est EXACTEMENT
+    /// (à 1e-9) celle d'un calcul manuel en deux passes (une passe contre la référence de la coupe floutée de σ, puis une passe contre sa référence nette depuis la pose de la première) ; (2) le résultat diffère de
+    /// celui sans flou (> 1e-6) ; (3) avec σ = 0 il est identique à `register_slices_leave_slice_out` ; (4) un σ négatif ou non fini est refusé. Ce test a été ajouté après avoir constaté qu'une expérience sur
+    /// données réelles avait un journal de recalage identique à sa base : la branche « sans la coupe » ignorait le réglage du gros vers fin.
+    #[test]
+    fn leave_slice_out_coarse_to_fine_is_the_blurred_pass_then_the_sharp_pass() {
+        let t = Temp::new("loso_c2f");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = RobustConfig::new(0.9);
+        let identite = SlicePoses::identity(&stacks);
+        let sigma = 1.5;
+        let flou = align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, sigma, config, &device).unwrap();
+        let net = align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, 0.0, config, &device).unwrap();
+        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| s.slices().map(move |c| (si, c.index()))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        assert!(ecart(&flou.poses, &net.poses) > 1e-6, "le flou ne change rien : réglage ignoré ?");
+        let direct = align::register_slices_leave_slice_out(&grille, &stacks, &identite, config, &device).unwrap();
+        assert!(ecart(&direct.poses, &net.poses) < 1e-12, "σ = 0 doit redonner `register_slices_leave_slice_out`");
+        // calcul manuel en deux passes pour des coupes du stack coronal
+        let si = 1usize;
+        let (num, den) = adjoint_sums(&grille, &stacks, &identite).unwrap();
+        let mut references = std::collections::HashMap::new();
+        align::parcourir_references_sans_fenetre(&grille, &stacks[si], si, &identite, 0, &num, &den, &|_| true, |k, image| {
+            references.insert(k, image.unwrap());
+        });
+        let seul = std::slice::from_ref(&stacks[si]);
+        let depart = identite.select(&[si]);
+        for k in [4usize, 6] {
+            let nette = Volume::new(references[&k].clone(), grille.affine).unwrap();
+            let floue = nette.blurred(sigma).unwrap();
+            let p1 = *align::register_slices(seul, &depart, &VolumeTensors::new(&floue, &device), config, &device).unwrap().poses.get(0, k);
+            let mut apres_premiere = depart.clone();
+            apres_premiere.set(0, k, p1);
+            let p2 = *align::register_slices(seul, &apres_premiere, &VolumeTensors::new(&nette, &device), config, &device).unwrap().poses.get(0, k);
+            let ecart_k = (flou.poses.get(si, k) - p2).abs().max();
+            println!("coupe {k} : écart à la suite manuelle {ecart_k:.1e}");
+            assert!(ecart_k < 1e-9, "coupe {k} : écart à la suite manuelle {ecart_k}");
+        }
+        for mauvais in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, mauvais, config, &device), Err(SvrError::InvalidBlur)), "{mauvais}");
+        }
+    }
+
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
     fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
         let mut data = stack.data().clone();

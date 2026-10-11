@@ -138,18 +138,30 @@ fn recaler_preparee(p: &CoupePreparee, si: usize, k: usize, reference: &VolumeTe
 /// # Erreurs
 /// Celles de [`register_slices`].
 pub fn register_slices_leave_slice_out(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
-    register_slices_leave_window_out(grid, stacks, poses, 0, config, device)
+    register_slices_leave_window_out(grid, stacks, poses, 0, 0.0, config, device)
 }
 
 /// Comme [`register_slices_leave_slice_out`], mais la référence de la coupe `k` d'un stack exclut aussi ses voisines **du même stack** dans une fenêtre de `±window` coupes :
 /// `(N − Σ_{|j−k| ≤ window} nⱼ) / (D − Σ dⱼ)`. Les coupes voisines d'un même stack partagent une partie de leur erreur de pose quand le mouvement est lisse ; les garder dans la
 /// référence tire la coupe vers leur position (auto-biais « par procuration »). `window = 0` : la coupe seule ; `window` ≥ nombre de coupes du stack : tout le stack (« sans le stack »).
-/// La somme de la fenêtre est mise à jour par glissement (une rétroprojection ajoutée et une retirée par coupe).
+/// La somme de la fenêtre est mise à jour par glissement (une rétroprojection ajoutée et une retirée par coupe). Avec `coarse_sigma_voxels > 0`, chaque coupe est recalée en deux passes : contre sa référence
+/// floutée de `coarse_sigma_voxels` voxels ([`Volume::blurred`]), puis contre sa référence nette depuis la pose de la première (gros vers fin) ; 0 : un seul passage net.
 ///
 /// # Erreurs
 /// Celles de [`register_slices`].
-pub fn register_slices_leave_window_out(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, window: usize, config: RobustConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+pub fn register_slices_leave_window_out(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    window: usize,
+    coarse_sigma_voxels: f64,
+    config: RobustConfig,
+    device: &Device,
+) -> Result<AlignmentReport, SvrError> {
     verifier_entrees(stacks, poses)?;
+    if !(coarse_sigma_voxels >= 0.0) || !coarse_sigma_voxels.is_finite() {
+        return Err(SvrError::InvalidBlur);
+    }
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let mut nouvelles = poses.clone();
     let mut rapports = Vec::new();
@@ -159,8 +171,22 @@ pub fn register_slices_leave_window_out(grid: &GridSpec, stacks: &[Stack], poses
         parcourir_references_sans_fenetre(grid, stack, si, poses, window, &numerateur, &denominateur, &|k| preparees[k].is_some(), |k, image| match (&preparees[k], image) {
             (Some(preparee), Some(image)) => {
                 let reference = Volume::new(image, grid.affine).expect("l'affine d'une grille est inversible");
-                let (delta, rapport) = recaler_preparee(preparee, si, k, &VolumeTensors::new(&reference, device), config, device);
-                nouvelles.set(si, k, delta * *poses.get(si, k));
+                let courante = *poses.get(si, k);
+                let (delta, rapport) = if coarse_sigma_voxels > 0.0 {
+                    // gros vers fin : une passe contre la référence floutée de cette coupe, puis une passe contre la référence nette depuis la pose de la première
+                    let floue = reference.blurred(coarse_sigma_voxels).expect("σ validé");
+                    let (d1, rapport1) = recaler_preparee(preparee, si, k, &VolumeTensors::new(&floue, device), config, device);
+                    match preparer_coupe(stack, k, d1 * courante) {
+                        Some(deuxieme) => {
+                            let (d2, rapport2) = recaler_preparee(&deuxieme, si, k, &VolumeTensors::new(&reference, device), config, device);
+                            (d2 * d1, rapport2)
+                        }
+                        None => (d1, rapport1),
+                    }
+                } else {
+                    recaler_preparee(preparee, si, k, &VolumeTensors::new(&reference, device), config, device)
+                };
+                nouvelles.set(si, k, delta * courante);
                 rapports.push(rapport);
             }
             _ => rapports.push(SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }),
@@ -520,7 +546,7 @@ pub fn reconstruct_with_motion_correction(
         observateur(c, &resultat.x, &poses);
         if c < config.cycles {
             let rapport = if c < config.leave_one_slice_out_cycles {
-                register_slices_leave_window_out(grid, stacks, &poses, config.leave_slice_out_window, config.robust, device)?
+                register_slices_leave_window_out(grid, stacks, &poses, config.leave_slice_out_window, config.coarse_sigma_voxels, config.robust, device)?
             } else if c < config.leave_one_stack_out_cycles {
                 recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
             } else {
