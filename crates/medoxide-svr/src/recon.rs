@@ -2089,6 +2089,111 @@ mod tests {
         assert!(matches!(raw_slice_scales(&injectes, &SlicePoses::identity(&injectes[..1]), &volume), Err(SvrError::PoseMismatch)));
     }
 
+    /// Pose de la coupe de centre `c` qui déplace ce centre de `d` et tourne de `rotvec` (vecteur de rotation, radians) autour de lui.
+    fn pose_autour_du_centre(c: &Vector3<f64>, rotvec: &Vector3<f64>, d: &Vector3<f64>) -> Matrix4<f64> {
+        let r = Rotation3::from_scaled_axis(*rotvec);
+        let mut m = Matrix4::identity();
+        m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
+        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(c + d - r * c));
+        m
+    }
+
+    /// Rejet des poses aberrantes par la médiane locale (critères fixés avant) : trois stacks de 12 coupes aux poses LISSES (dérive linéaire : déplacement de 0,3 mm et rotation de 3° par coupe, rotation autour du
+    /// centre de la coupe, centres éloignés de l'origine), des poses aberrantes injectées, des coupes non recalées (identité). Seuils 5 mm et 10°, fenêtre ±2. (1) Sont remplacées exactement : un déplacement
+    /// de 30 mm, une rotation de 40°, une rotation qui s'écarte de la médiane locale de 12° (juste au-dessus du seuil) ; PAS celle qui s'en écarte de 8° (juste en dessous) ; (2) une pose remplacée est à moins de
+    /// 1 mm et 4° (un pas de dérive) de la pose lisse vraie ; (3) une coupe dont toutes les voisines sont non recalées reste inchangée (moins de 2 voisines recalées) ; (4) toutes les autres poses sont rendues IDENTIQUES au bit près ;
+    /// (5) avec des seuils très larges (100 mm, 100°) rien n'est remplacé ; avec une fenêtre nulle rien n'est remplacé ; (6) une forme de poses incorrecte est refusée.
+    #[test]
+    fn local_median_rejects_outlier_poses_and_leaves_the_others_untouched() {
+        let t = Temp::new("pose_mediane");
+        let modeles = modeles_de_blobs_larges(&t);
+        let mut vraies = SlicePoses::identity(&modeles);
+        let axe = Vector3::new(0.3, -0.5, 0.8).normalize();
+        let centre = |si: usize, k: usize| modeles[si].slices().nth(k).unwrap().geometric_center();
+        let lisse = |si: usize, k: usize| {
+            let facteur = k as f64 + 1.0;
+            pose_autour_du_centre(&centre(si, k), &(axe * (3.0_f64 * facteur).to_radians()), &Vector3::new(1.0, -0.6, 0.4).normalize().scale(0.3 * facteur + si as f64))
+        };
+        for si in 0..3 {
+            for k in 0..12 {
+                vraies.set(si, k, lisse(si, k));
+            }
+        }
+        for k in [0usize, 8, 9, 11] {
+            vraies.set(0, k, Matrix4::identity()); // coupes non recalées
+        }
+        let mut entree = vraies.clone();
+        // la coupe 10 du stack 0 : toutes ses voisines (8, 9, 11) sont non recalées ; son déplacement de 12 mm l'aurait fait remplacer si on les comptait comme voisines
+        entree.set(0, 10, pose_autour_du_centre(&centre(0, 10), &(axe * 33.0_f64.to_radians()), &Vector3::new(12.0, 0.0, 0.0)));
+        entree.set(0, 5, pose_autour_du_centre(&centre(0, 5), &(axe * 6.0_f64.to_radians()), &Vector3::new(30.0, 0.0, 0.0)));
+        entree.set(1, 3, pose_autour_du_centre(&centre(1, 3), &(axe * 40.0_f64.to_radians()), &Vector3::new(1.0, 0.0, 0.0)));
+        // rotation lisse de la coupe k : 3 (k + 1)° ; la médiane locale de ses 4 voisines est celle de la coupe k + 1, soit 3 (k + 2)° ; écart = |rotation injectée − 3 (k + 2)°|
+        entree.set(2, 7, pose_autour_du_centre(&centre(2, 7), &(axe * 39.0_f64.to_radians()), &Vector3::new(2.4, 0.0, 0.0))); // médiane locale 27° : 39 − 27 = 12° au-dessus du seuil
+        entree.set(2, 4, pose_autour_du_centre(&centre(2, 4), &(axe * 25.0_f64.to_radians()), &Vector3::new(2.5, 0.0, 0.0))); // médiane locale 18° : 25 − 18 = 7° < 10° : conservée
+        let r = align::regularize_poses(&modeles, &entree, 2, 5.0, 10.0).unwrap();
+        let mut remplacees = r.replaced.clone();
+        remplacees.sort();
+        assert_eq!(remplacees, vec![(0, 5), (1, 3), (2, 7)], "coupes remplacées : {remplacees:?}");
+        for &(si, k) in &remplacees {
+            let (nouvelle, vraie) = (r.poses.get(si, k), vraies.get(si, k));
+            let c = centre(si, k);
+            let d_mm = ((nouvelle * c.push(1.0)).xyz() - (vraie * c.push(1.0)).xyz()).norm();
+            let rot = (Rotation3::from_matrix(&nouvelle.fixed_view::<3, 3>(0, 0).into_owned()) * Rotation3::from_matrix(&vraie.fixed_view::<3, 3>(0, 0).into_owned()).inverse()).angle().to_degrees();
+            println!("({si},{k}) : remplacée à {d_mm:.2} mm et {rot:.2}° de la pose lisse vraie");
+            assert!(d_mm < 1.0 && rot < 4.0, "({si},{k}) : {d_mm} mm, {rot}°");
+            // le déplacement du centre ET la rotation sont ceux de la médiane : mesure aux deux extrémités de la coupe, pour qu'une rotation mal placée se voie
+            let coupe = modeles[si].slices().nth(k).unwrap();
+            let (nx, ny) = coupe.dim();
+            for (i, j) in [(0.0, 0.0), ((nx - 1) as f64, (ny - 1) as f64)] {
+                let x = coupe.pixel_to_world(i, j).push(1.0);
+                let ecart = ((nouvelle * x).xyz() - (vraie * x).xyz()).norm();
+                assert!(ecart < 3.0, "({si},{k}) : écart de {ecart} mm à un coin de la coupe");
+            }
+        }
+        for si in 0..3 {
+            for k in 0..12 {
+                if !remplacees.contains(&(si, k)) {
+                    assert_eq!(r.poses.get(si, k), entree.get(si, k), "la pose ({si},{k}) devait rester identique");
+                }
+            }
+        }
+        assert!(align::regularize_poses(&modeles, &entree, 2, 100.0, 100.0).unwrap().replaced.is_empty());
+        assert!(align::regularize_poses(&modeles, &entree, 0, 5.0, 10.0).unwrap().replaced.is_empty());
+        assert!(matches!(align::regularize_poses(&modeles, &SlicePoses::identity(&modeles[..1]), 2, 5.0, 10.0), Err(SvrError::PoseMismatch)));
+    }
+
+    /// Câblage du rejet des poses aberrantes dans la boucle : trois stacks de blobs de 12 coupes (mouvement par coupe ±2°/±2 mm), 1 cycle. (1) Avec `pose_outlier_window = 0` le résultat n'a aucun
+    /// comptage ; (2) avec une fenêtre de 2 et des seuils NULS (toute pose s'écartant de sa médiane locale est remplacée) il y a un comptage par cycle, au moins un remplacement, et les poses finales
+    /// diffèrent de celles du même calcul sans rejet (la régularisation est bien réinjectée dans la boucle) ; (3) avec des seuils très larges le résultat est identique à celui sans rejet.
+    #[test]
+    fn the_loop_applies_the_pose_outlier_rejection() {
+        let t = Temp::new("boucle_garde_fou");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let identite = SlicePoses::identity(&stacks);
+        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig {
+            cycles: 1, alpha: 0.01, cg_max_iterations: 30, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: 0,
+            leave_slice_out_window: 0, pose_outlier_window: fenetre, pose_outlier_max_mm: mm, pose_outlier_max_deg: deg,
+        };
+        let sans = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(0, 5.0, 10.0), &device, |_, _, _| {}).unwrap();
+        let strict = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(2, 0.0, 0.0), &device, |_, _, _| {}).unwrap();
+        let large = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(2, 100.0, 100.0), &device, |_, _, _| {}).unwrap();
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            stacks.iter().enumerate().flat_map(|(si, s)| s.slices().map(move |c| (si, c.index()))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max)
+        };
+        println!("remplacements par cycle : sans {:?}, seuils nuls {:?}, seuils larges {:?} ; écart des poses finales : nuls {:.3}, larges {:.1e}", sans.pose_replacements, strict.pose_replacements, large.pose_replacements, ecart(&sans.poses, &strict.poses), ecart(&sans.poses, &large.poses));
+        assert!(sans.pose_replacements.is_empty());
+        assert_eq!(strict.pose_replacements.len(), 1);
+        assert!(strict.pose_replacements.iter().sum::<usize>() >= 1);
+        assert!(ecart(&sans.poses, &strict.poses) > 1e-6, "la régularisation n'est pas réinjectée dans la boucle");
+        assert_eq!(large.pose_replacements, vec![0]);
+        assert!(ecart(&sans.poses, &large.poses) < 1e-12, "des seuils très larges ne doivent rien changer");
+    }
+
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
     fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
         let mut data = stack.data().clone();
@@ -2935,7 +3040,7 @@ mod tests {
         let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
-        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
@@ -2948,6 +3053,7 @@ mod tests {
             );
         }
         ecrire_image_grille(&sortie.join(format!("ours_loop{etiquette}.nii.gz")), &resultat.volume, &grille);
+        println!("poses remplacées par la médiane locale, par cycle : {:?}", resultat.pose_replacements);
         let mut lignes = Vec::new();
         for (n, stack) in stacks.iter().enumerate() {
             for coupe in stack.slices() {
@@ -3133,7 +3239,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -3209,7 +3315,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();

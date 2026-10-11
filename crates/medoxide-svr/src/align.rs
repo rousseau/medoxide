@@ -212,6 +212,7 @@ pub(crate) fn parcourir_references_sans_fenetre(
 }
 
 /// L'adjoint normalisé de TOUTES les coupes (celle qu'on recale comprise) comme volume : la référence « complète » à laquelle comparer [`register_slices_leave_slice_out`].
+#[cfg(test)]
 pub(crate) fn normalized_reference_volume(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<Volume, SvrError> {
     Volume::new(normalized_adjoint_with_poses(grid, stacks, poses)?.image, grid.affine)
 }
@@ -234,6 +235,66 @@ pub(crate) fn reference_sans_la_coupe(n: &Array3<f64>, d: &Array3<f64>, n_k: &Ar
         }
     }
     image
+}
+
+/// Résultat de [`regularize_poses`].
+#[derive(Debug, Clone)]
+pub struct PoseRegularization {
+    /// Poses après remplacement des poses aberrantes.
+    pub poses: SlicePoses,
+    /// Les coupes (stack, coupe) dont la pose a été remplacée par la médiane locale de leurs voisines.
+    pub replaced: Vec<(usize, usize)>,
+}
+
+fn mediane(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).expect("valeurs finies"));
+    v[v.len() / 2]
+}
+
+/// **Rejet des poses aberrantes par la médiane locale** : un mouvement fœtal plausible est cohérent entre coupes voisines ; une pose qui échoue ou qui dérive ne l'est pas. Pour chaque stack, chaque coupe
+/// recalée (pose différente de l'identité) ayant au moins 3 voisines recalées dans la fenêtre (une médiane n'est robuste à une valeur aberrante qu'à partir de 3 valeurs : avec 2, la valeur haute des deux suffit à être faussée) `|j − k| ≤ window` est comparée à la **médiane locale** de ces voisines (elle-même exclue) : médiane, par composante, du
+/// déplacement du centre de la coupe et du vecteur de rotation. Si le déplacement du centre s'écarte de plus de `max_mm` mm de cette médiane, ou si la rotation s'en écarte de plus de `max_deg` degrés, la pose est
+/// remplacée par la pose de la médiane locale (rotation médiane, déplacement du centre médian). Toutes les décisions sont prises sur les poses d'ENTRÉE (pas d'effet d'ordre) ; les autres poses sont rendues
+/// inchangées (bit à bit), ainsi que celles des coupes non recalées et des coupes à moins de 3 voisines recalées. Le recalage suivant repart de la pose remplacée.
+///
+/// # Erreurs
+/// [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+pub fn regularize_poses(stacks: &[Stack], poses: &SlicePoses, window: usize, max_mm: f64, max_deg: f64) -> Result<PoseRegularization, SvrError> {
+    if !poses.matches(stacks) {
+        return Err(SvrError::PoseMismatch);
+    }
+    let mut nouvelles = poses.clone();
+    let mut remplacees = Vec::new();
+    for (si, stack) in stacks.iter().enumerate() {
+        let coupes: Vec<crate::Slice> = stack.slices().collect();
+        let nz = coupes.len();
+        let recalee = |k: usize| (poses.get(si, k) - Matrix4::identity()).abs().max() > 1e-12;
+        let centre: Vec<Vector3<f64>> = coupes.iter().map(|c| c.geometric_center()).collect();
+        let deplacement = |k: usize| (poses.get(si, k) * centre[k].push(1.0)).xyz() - centre[k];
+        let rotation = |k: usize| nalgebra::Rotation3::from_matrix(&poses.get(si, k).fixed_view::<3, 3>(0, 0).into_owned());
+        for k in 0..nz {
+            if !recalee(k) {
+                continue;
+            }
+            let voisines: Vec<usize> = (k.saturating_sub(window)..=(k + window).min(nz - 1)).filter(|&j| j != k && recalee(j)).collect();
+            if voisines.len() < 3 {
+                continue;
+            }
+            let med_dep = Vector3::from_fn(|c, _| mediane(&mut voisines.iter().map(|&j| deplacement(j)[c]).collect::<Vec<_>>()));
+            let med_rot = Vector3::from_fn(|c, _| mediane(&mut voisines.iter().map(|&j| rotation(j).scaled_axis()[c]).collect::<Vec<_>>()));
+            let r_med = nalgebra::Rotation3::from_scaled_axis(med_rot);
+            let ecart_mm = (deplacement(k) - med_dep).norm();
+            let ecart_deg = (rotation(k) * r_med.inverse()).angle().to_degrees();
+            if ecart_mm > max_mm || ecart_deg > max_deg {
+                let mut m = Matrix4::identity();
+                m.fixed_view_mut::<3, 3>(0, 0).copy_from(r_med.matrix());
+                m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(centre[k] + med_dep - r_med * centre[k]));
+                nouvelles.set(si, k, m);
+                remplacees.push((si, k));
+            }
+        }
+    }
+    Ok(PoseRegularization { poses: nouvelles, replaced: remplacees })
 }
 
 /// Nombre maximal de pixels de masque utilisés pour recaler un stack entier (sous-échantillonnage régulier au-delà) : le coût de la NCC croît avec ce nombre.
@@ -405,6 +466,12 @@ pub struct LoopConfig {
     /// Avec `leave_one_slice_out_cycles`, nombre de coupes voisines **de chaque côté, dans le même stack**, exclues de la référence en plus de la coupe elle-même
     /// ([`register_slices_leave_window_out`]) ; 0 : la coupe seule.
     pub leave_slice_out_window: usize,
+    /// Fenêtre (nombre de coupes de chaque côté) du rejet des poses aberrantes par la médiane locale ([`regularize_poses`]), appliqué après chaque passe de recalage ; 0 : désactivé.
+    pub pose_outlier_window: usize,
+    /// Écart maximal de déplacement (mm) d'une pose à la médiane locale de ses voisines avant remplacement (seuil calibré sur des sujets propres : 5 mm).
+    pub pose_outlier_max_mm: f64,
+    /// Écart maximal de rotation (°) d'une pose à la médiane locale de ses voisines avant remplacement (10°).
+    pub pose_outlier_max_deg: f64,
 }
 
 /// Résultat de la boucle.
@@ -418,6 +485,8 @@ pub struct LoopResult {
     pub cycles: Vec<AlignmentReport>,
     /// Itérations du gradient conjugué de chaque reconstruction (`config.cycles + 1` valeurs).
     pub cg_iterations: Vec<usize>,
+    /// Nombre de poses remplacées par la médiane locale après chaque recalage (`config.cycles` valeurs ; vide si le rejet est désactivé).
+    pub pose_replacements: Vec<usize>,
 }
 
 /// **Boucle recalage / reconstruction** : reconstruit le volume avec les poses `initial`, puis répète `config.cycles` fois « recaler toutes les
@@ -442,7 +511,7 @@ pub fn reconstruct_with_motion_correction(
     let mut poses = initial.clone();
     let mut x: Option<Array3<f64>> = None;
     let mut hors_stack: Vec<Option<Array3<f64>>> = vec![None; stacks.len()]; // démarrage à chaud de chaque reconstruction « sans le stack s »
-    let (mut rapports, mut iterations) = (Vec::new(), Vec::new());
+    let (mut rapports, mut iterations, mut remplacements) = (Vec::new(), Vec::new(), Vec::new());
     for c in 0..=config.cycles {
         let probleme = ReconstructionProblem::with_poses(grid, stacks, &poses, config.alpha)?;
         let depart = x.take().unwrap_or_else(|| probleme.initial_guess());
@@ -459,11 +528,16 @@ pub fn reconstruct_with_motion_correction(
                 register_slices_coarse_to_fine(stacks, &poses, &reference, config.coarse_sigma_voxels, config.robust, device)?
             };
             poses = rapport.poses.clone();
+            if config.pose_outlier_window > 0 {
+                let regularisation = regularize_poses(stacks, &poses, config.pose_outlier_window, config.pose_outlier_max_mm, config.pose_outlier_max_deg)?;
+                remplacements.push(regularisation.replaced.len());
+                poses = regularisation.poses;
+            }
             rapports.push(rapport);
         }
         x = Some(resultat.x);
     }
-    Ok(LoopResult { poses, volume: x.expect("au moins une reconstruction"), cycles: rapports, cg_iterations: iterations })
+    Ok(LoopResult { poses, volume: x.expect("au moins une reconstruction"), cycles: rapports, cg_iterations: iterations, pose_replacements: remplacements })
 }
 
 /// Un recalage de tous les stacks où chaque stack `s` est recalé contre la reconstruction faite avec **les autres** stacks (poses courantes).
