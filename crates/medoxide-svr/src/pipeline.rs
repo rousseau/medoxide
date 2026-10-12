@@ -28,7 +28,7 @@ pub enum DeviceKind {
 /// Device par défaut d'un algorithme de mouvement : le CPU de la machine pour les deux, le choix étant fait **par algorithme** (le `match` oblige à décider pour tout nouvel algorithme).
 ///
 /// Mesures (étude 06, §41) : le recalage coupe par coupe lance un grand nombre de petits calculs, que le GPU (`wgpu`) traite plus lentement que le CPU (coupe-coupe : 118 s contre 18 s sur des
-/// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Le coupe-volume n'a pas été mesuré sur GPU : il garde le CPU par prudence, à revoir après mesure.
+/// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Coupe-volume, sujet réel à trois stacks : 1 038 s sur CPU ; sur GPU, calcul interrompu après 90 min (au moins 5 fois plus lent).
 pub fn default_device_kind(motion: Motion) -> DeviceKind {
     match motion {
         Motion::SliceToSlice => DeviceKind::Cpu,

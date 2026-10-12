@@ -49,7 +49,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--motion` | Principe | Durée | À retenir |
 |---|---|---|---|
 | `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 2 à 3 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
-| `s2v` | Chaque coupe est recalée contre un volume reconstruit **qui ne la contient pas**, puis le volume est reconstruit avec les nouvelles poses, en boucle. | environ 12 à 21 minutes pour 3 stacks | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
+| `s2v` | Chaque coupe est recalée contre un volume reconstruit **qui ne la contient pas**, puis le volume est reconstruit avec les nouvelles poses, en boucle. | environ 12 à 21 minutes pour 3 stacks (17 minutes sur un sujet réel de 98 coupes) | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
 et la reconstruction du volume est la même.
@@ -65,11 +65,12 @@ très grand nombre de petits calculs, que le GPU (`--device wgpu`, Metal sur Mac
 |---|---|---|
 | `s2s`, stacks simulés | 18 s | 118 s |
 | `s2s`, un sujet réel (3 stacks) | 150 s | 556 s |
+| `s2v`, un sujet réel (3 stacks) | 1 038 s | plus de 5 400 s (interrompu) |
 
 Les poses obtenues sur GPU diffèrent un peu de celles du CPU sur quelques coupes (calcul en
 `f32` sur GPU : le minimum local trouvé n'est pas toujours le même), sans être moins bonnes.
 Sur le CPU, le résultat est **reproductible** : deux exécutions donnent exactement les mêmes poses.
-Le coupe-volume n'a pas été mesuré sur GPU.
+Pour le coupe-volume, le calcul sur GPU a été interrompu après 90 minutes, contre 17 minutes sur le CPU.
 
 ## Fichier de poses
 

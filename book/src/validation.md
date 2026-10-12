@@ -87,7 +87,8 @@ principales sont comparées à des références écrites séparément ; la plupa
 | Coût coupe-coupe | référence indépendante en `f64` ; mesure faite en Python | écart 1,5e-7 ; 2 898 paires identiques |
 | Gradient automatique (Burn) du coût coupe-coupe | différences finies | cosinus 1,0000 |
 | Poses écrites par `--poses` | relecture | exactement identiques |
-| `medx svr recon --device cpu` (3 stacks, sujet réel) | résultat de la version de développement | poses identiques bit à bit, volume à 7e-7 près |
+| `medx svr recon --device cpu` (`s2s`, 3 stacks, sujet réel) | résultat de la version de développement | poses identiques bit à bit, volume à 7e-7 près |
+| `medx svr recon --motion s2v --device cpu` (3 stacks, sujet réel) | résultat de la version de développement | poses identiques bit à bit (98 coupes) |
 
 ## Évaluation sur données réelles
 
@@ -124,7 +125,7 @@ critère, atteint 0,727 : la comparaison n'est pas neutre pour lui.
 | Méthode | Un sujet, 3 stacks |
 |---|---|
 | medoxide `s2s` (mouvement + reconstruction) | 150 s |
-| medoxide `s2v` | 12 à 21 minutes |
+| medoxide `s2v` | 12 à 21 minutes (17 minutes mesurées avec la commande) |
 | SVRTK (Docker, arm64) | 1 à 3 minutes |
 | NeSVoR (CPU, 2 stacks) | 3 à 5 minutes |
 
