@@ -2715,6 +2715,39 @@ mod tests {
         }
     }
 
+    /// DIAGNOSTIC (sans critère) : pourquoi des coupes ne sont-elles pas recalées par le coupe-coupe ? Pour un sujet réel (MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACKS_RETENUS), aux poses
+    /// d'en-tête, compte les coupes selon : moins de `MIN_MASK_PIXELS` pixels de masque, sans partenaire, ou recalables ; et affiche la distribution des pixels de masque et du nombre de partenaires.
+    #[test]
+    #[ignore = "données réelles locales"]
+    fn diagnose_unregistered_slices_for_slice_to_slice() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let tous = stacks_reels();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| "0,1,2".into()).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
+        let poses = SlicePoses::identity(&stacks);
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let (mut peu_de_masque, mut sans_partenaire, mut recalables) = (0, 0, 0);
+        let mut details = Vec::new();
+        for (si, stack) in stacks.iter().enumerate() {
+            let masque = stack.brain_mask().unwrap().voxels();
+            for k in 0..stack.dim().2 {
+                let pixels = masque.index_axis(Axis(2), k).iter().filter(|&&m| m).count();
+                let partenaires = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &poses, si, k, &crate::s2s::IntersectionConfig::default(), &device).map_or(0, |p| p.n_pairs());
+                match (pixels >= align::MIN_MASK_PIXELS, partenaires > 0) {
+                    (false, _) => peu_de_masque += 1,
+                    (true, false) => sans_partenaire += 1,
+                    (true, true) => recalables += 1,
+                }
+                details.push((si, k, pixels, partenaires));
+            }
+        }
+        println!("{} coupes : {recalables} recalables, {peu_de_masque} avec moins de {} pixels de masque, {sans_partenaire} sans partenaire (masque suffisant)", details.len(), align::MIN_MASK_PIXELS);
+        let petites: Vec<_> = details.iter().filter(|d| d.2 < align::MIN_MASK_PIXELS).collect();
+        println!("pixels de masque des coupes sous le seuil (stack, coupe, pixels, partenaires) : {:?}", petites);
+        let sans: Vec<_> = details.iter().filter(|d| d.2 >= align::MIN_MASK_PIXELS && d.3 == 0).collect();
+        println!("coupes à masque suffisant sans partenaire : {:?}", sans);
+    }
+
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
     fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
         let mut data = stack.data().clone();
