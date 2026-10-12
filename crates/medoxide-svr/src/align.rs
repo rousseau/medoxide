@@ -83,15 +83,15 @@ fn verifier_entrees(stacks: &[Stack], poses: &SlicePoses) -> Result<(), SvrError
 }
 
 /// Ce qu'il faut pour recaler une coupe : positions monde (à sa pose courante) et intensités de ses pixels de masque, pivot P3 et échelle de rotation.
-struct CoupePreparee {
-    points: Vec<Vector3<f64>>,
-    intensites: Vec<f64>,
-    pivot: Vector3<f64>,
-    echelle: f64,
+pub(crate) struct CoupePreparee {
+    pub(crate) points: Vec<Vector3<f64>>,
+    pub(crate) intensites: Vec<f64>,
+    pub(crate) pivot: Vector3<f64>,
+    pub(crate) echelle: f64,
 }
 
 /// Prépare la coupe `k` d'un stack à la pose `courante` ; `None` si elle a moins de [`MIN_MASK_PIXELS`] pixels de masque ou si son pivot ou son échelle sont indéfinis.
-fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) -> Option<CoupePreparee> {
+pub(crate) fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) -> Option<CoupePreparee> {
     let masque = stack.brain_mask().expect("vérifié").voxels();
     let coupe = stack.slices().nth(k).expect("coupe existante");
     let posee = coupe.with_motion(courante);

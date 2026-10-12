@@ -1327,4 +1327,16 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-12 — Estimation coupe-coupe (s2s), briques 1 à 3 : un coût différentiable à travers la géométrie
+
+- **Quoi** : recaler une coupe sans reconstruire de volume. Le coût d'une coupe mobile est la concordance moyenne (NCC) de ses profils d'intensité le long des droites où elle croise les coupes des autres stacks. Quand on corrige la pose de la coupe mobile (6 paramètres), **la droite d'intersection bouge** : le coût est donc dérivable *à travers la géométrie* (plan déplacé → droite → points → coordonnées de pixel → échantillonnage bilinéaire → NCC).
+- **Burn** : échantillonnage bilinéaire 2D écrit en tenseurs (quatre `select` pondérés ; les indices sont des entiers, le gradient passe par les poids) ; produit vectoriel par `narrow` et `cat` ; `matmul` par lot sur un tenseur à 3 dimensions (une matrice 3×3 par partenaire) ; masques et validités obtenus par `greater_elem(..).float()` : ils servent de **poids** et ne portent pas de gradient. **Rust** : `let … else { continue }` pour sauter une coupe sans partenaire.
+- **Choix de conception** : l'ensemble des partenaires est **gelé** à la pose de départ (le coût n'a pas de saut quand un partenaire apparaît ou disparaît pendant l'optimisation). Conséquence pour les tests : à pose corrigée, une référence qui recalcule ses partenaires trouve parfois d'autres paires (19 contre 17) et son gradient diffère de 20 % ; le **critère de gradient n'a pas été relâché** (norme < 5e-2, cosinus > 0,99) : c'est la référence qui a été restreinte aux mêmes partenaires.
+- **Tests** : référence indépendante en `f64` (écart 1e-7), dose-réponse (0,999 → 0,70 de 0 à 4 mm), gradient automatique contre différences finies (cosinus 1,0000 sur 4 coupes), et **recoupement avec la mesure Python** sur un jeu simulé : 2898 paires (2 × 1449, chaque paire vue des deux côtés) et concordance moyenne 0,9315, identiques.
+- **Mutants** : 21 mutations du coût (transposée de la rotation, signes, décalages de pixel, masques, validité des paires, normalisation de la droite…). Au premier jeu de test, **8 survivaient** : les trois stacks étaient orthogonaux (|d| = 1, donc la normalisation n'était jamais sollicitée) et les masques n'excluaient que du fond. Ajout d'un second jeu (stack oblique à 34°, masques réduits à une moitié de coupe) : 21/21 détectées. Leçon : un mutant qui survit désigne souvent un jeu de test trop facile, pas une ligne inutile.
+
+**Suite** : brique 4, le recalage d'une coupe avec ce coût (Adam, plusieurs départs), puis la boucle sur toutes les coupes.
+
+---
+
 *(à compléter à la prochaine étape)*

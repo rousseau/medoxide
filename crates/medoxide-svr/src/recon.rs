@@ -2241,6 +2241,255 @@ mod tests {
         }
     }
 
+    /// Interpolation bilinéaire d'une image 2D en `f64`, `None` hors des centres de pixel (référence écrite à part, sans tenseur).
+    fn bilineaire_2d(image: ndarray::ArrayView2<f32>, i: f64, j: f64) -> Option<f64> {
+        let (nx, ny) = image.dim();
+        if i < 0.0 || j < 0.0 || i > (nx - 1) as f64 || j > (ny - 1) as f64 {
+            return None;
+        }
+        let (i0, j0) = (i.floor() as usize, j.floor() as usize);
+        let (i1, j1) = ((i0 + 1).min(nx - 1), (j0 + 1).min(ny - 1));
+        let (ti, tj) = (i - i0 as f64, j - j0 as f64);
+        let p = |a: usize, b: usize| f64::from(image[[a, b]]);
+        Some((1.0 - ti) * (1.0 - tj) * p(i0, j0) + (1.0 - ti) * tj * p(i0, j1) + ti * (1.0 - tj) * p(i1, j0) + ti * tj * p(i1, j1))
+    }
+
+    /// RÉFÉRENCE en `f64` de la concordance moyenne de la coupe `k` du stack `si` aux poses `poses` avec toutes les coupes des autres stacks, ou avec les seuls `partenaires` imposés (même définition que `IntersectionProblem::cost` et que la mesure
+    /// Python validée, mais calculée par une autre voie : plans tirés des matrices de pose 4×4 complètes, masque au plus proche voisin). Rend (NCC moyenne sur les paires valides, nombre de paires valides).
+    fn concordance_de_reference(stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, partenaires: Option<&[(usize, usize)]>) -> (f64, usize) {
+        let plan = |s: usize, j: usize| {
+            let ma = poses.get(s, j) * stacks[s].affine();
+            let (nx, ny, _) = stacks[s].dim();
+            let centre = (ma * Vector4::new((nx - 1) as f64 / 2.0, (ny - 1) as f64 / 2.0, j as f64, 1.0)).xyz();
+            let normale = ma.fixed_view::<3, 1>(0, 2).into_owned().normalize();
+            (ma.try_inverse().unwrap(), centre, normale)
+        };
+        let (inv1, c1, n1) = plan(si, k);
+        let image1 = stacks[si].data().index_axis(Axis(2), k);
+        let masque1 = stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k);
+        let (mut somme, mut n_paires) = (0.0, 0usize);
+        for (sj, stack) in stacks.iter().enumerate() {
+            if sj == si {
+                continue;
+            }
+            for j in 0..stack.dim().2 {
+                if partenaires.map_or(false, |p| !p.contains(&(sj, j))) {
+                    continue; // ensemble de partenaires imposé (gelé) : seuls ceux-là comptent
+                }
+                let (inv2, c2, n2) = plan(sj, j);
+                let d = n1.cross(&n2);
+                if d.norm() < 30.0_f64.to_radians().sin() {
+                    continue;
+                }
+                let x0 = (n1.dot(&c1) * n2.cross(&d) + n2.dot(&c2) * d.cross(&n1)) / d.norm_squared();
+                let dh = d / d.norm();
+                let image2 = stack.data().index_axis(Axis(2), j);
+                let masque2 = stack.brain_mask().unwrap().voxels().index_axis(Axis(2), j);
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                let mut t = -150.0;
+                while t <= 150.0 + 1e-9 {
+                    let p = (x0 + t * dh).push(1.0);
+                    let (u, v) = (inv1 * p, inv2 * p);
+                    if let (Some(va), Some(vb)) = (bilineaire_2d(image1, u.x, u.y), bilineaire_2d(image2, v.x, v.y)) {
+                        if masque1[[u.x.round() as usize, u.y.round() as usize]] && masque2[[v.x.round() as usize, v.y.round() as usize]] {
+                            a.push(va);
+                            b.push(vb);
+                        }
+                    }
+                    t += 0.5;
+                }
+                if a.len() >= 20 {
+                    let n = a.len() as f64;
+                    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+                    let cov: f64 = a.iter().zip(&b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+                    let (va, vb): (f64, f64) = (a.iter().map(|x| (x - ma).powi(2)).sum(), b.iter().map(|y| (y - mb).powi(2)).sum());
+                    if va > 1e-12 && vb > 1e-12 {
+                        somme += cov / (va * vb).sqrt();
+                        n_paires += 1;
+                    }
+                }
+            }
+        }
+        (if n_paires > 0 { somme / n_paires as f64 } else { 0.0 }, n_paires)
+    }
+
+    /// Pose de la coupe `k` du stack `si` après une correction `params` autour du pivot P3 (même convention que le recalage) : `D(params) · M`.
+    fn poses_corrigees(stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, params: &[f64; 6]) -> (SlicePoses, Vector3<f64>, f64) {
+        let preparee = align::preparer_coupe(&stacks[si], k, *poses.get(si, k)).expect("coupe recalable");
+        let delta = crate::diff::pose_to_matrix(params, &preparee.pivot, preparee.echelle);
+        let mut p = poses.clone();
+        p.set(si, k, delta * poses.get(si, k));
+        (p, preparee.pivot, preparee.echelle)
+    }
+
+    /// Les trois stacks de blobs simulés aux poses vraies, et ces poses.
+    fn jeu_de_blobs_pour_s2s(t: &Temp) -> (Vec<Stack>, SlicePoses) {
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        (simuler_blobs(t, &volume, &modeles, &vraies), vraies)
+    }
+
+    /// Coût coupe-coupe (critères fixés avant) : (1) au repos et pour de petites corrections, le coût différentiable égale la référence indépendante en `f64` à 5e-3 près, pour 6 coupes de 3 stacks, avec le
+    /// même nombre de paires ; (2) dose-réponse : en moyenne sur ces coupes, le coût aux vraies poses est supérieur à celui des poses corrigées de 0,5, 1, 2 puis 4 (déplacements en mm équivalents) et la suite
+    /// est décroissante ; (3) le gradient automatique égale les différences finies de la référence (erreur relative de la norme < 5e-2, cosinus > 0,99) pour 4 coupes. L'ensemble des partenaires est GELÉ au départ (choix de conception) : à pose corrigée, la référence recalcule ses
+    /// partenaires et en trouve parfois davantage (19 contre 17 pour une coupe) ; les comparaisons de valeur et de gradient à pose corrigée utilisent donc la référence restreinte aux mêmes partenaires.
+    #[test]
+    fn slice_to_slice_cost_matches_an_independent_f64_reference_and_its_gradient() {
+        let t = Temp::new("s2s_cout");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let config = crate::s2s::IntersectionConfig::default();
+        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let coupes = [(0usize, 4usize), (0, 6), (1, 5), (1, 7), (2, 4), (2, 6)];
+        let valeur = |v: burn::prelude::Tensor<1>| f64::from(v.into_data().try_to_vec::<f32>().unwrap()[0]);
+        let direction = [1.0, 0.5, -0.5, 1.0, -0.5, 0.7];
+        let (mut moyennes, mut pire) = (vec![0.0_f64; 5], 0.0_f64);
+        let echelles = [0.0, 0.5, 1.0, 2.0, 4.0];
+        for &(si, k) in &coupes {
+            let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device).expect("la coupe doit avoir des partenaires");
+            for (n, &e) in echelles.iter().enumerate() {
+                let params: [f64; 6] = std::array::from_fn(|c| e * direction[c]);
+                let (corrigees, pivot, scale) = poses_corrigees(&stacks, &vraies, si, k, &params);
+                let tensoriel = valeur(probleme.cost(tenseur(&params), tenseur(&[pivot.x, pivot.y, pivot.z]), scale));
+                let (reference, n_ref) = concordance_de_reference(&stacks, &corrigees, si, k, None);
+                // à pose corrigée, la référence recalcule ses partenaires ; le problème, lui, les gèle : on compare aussi à la référence restreinte aux mêmes partenaires
+                let (reference_gelee, _) = concordance_de_reference(&stacks, &corrigees, si, k, Some(&probleme.partners));
+                moyennes[n] += tensoriel / coupes.len() as f64;
+                if e <= 0.5 {
+                    pire = pire.max((tensoriel - reference_gelee).abs());
+                    println!("({si},{k}) e={e} : coût {tensoriel:.4}, référence {reference:.4} ({n_ref} paires), paires du problème {}", probleme.n_pairs());
+                    if e == 0.0 {
+                        assert_eq!(probleme.n_pairs(), n_ref, "({si},{k}) : nombre de paires différent");
+                    }
+                }
+            }
+        }
+        println!("écart maximal à la référence : {pire:.2e} ; coût moyen selon la perturbation {echelles:?} : {:?}", moyennes.iter().map(|m| (m * 1e4).round() / 1e4).collect::<Vec<_>>());
+        assert!(pire < 5e-3, "écart à la référence : {pire}");
+        assert!(moyennes.windows(2).all(|w| w[1] < w[0]), "la concordance doit baisser quand la perturbation augmente : {moyennes:?}");
+        assert!(moyennes[0] - moyennes[4] > 0.1, "dynamique trop faible : {moyennes:?}");
+        // gradient contre différences finies de la référence
+        for &(si, k) in &coupes[..4] {
+            let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device).unwrap();
+            let p0 = [0.8, -0.6, 0.4, 0.7, -0.5, 0.9];
+            let (_, pivot, scale) = poses_corrigees(&stacks, &vraies, si, k, &p0);
+            let params = tenseur(&p0).require_grad();
+            let cout = probleme.cost(params.clone(), tenseur(&[pivot.x, pivot.y, pivot.z]), scale);
+            let grads = cout.sum().backward();
+            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+            let h = 1e-3;
+            let g_diff: Vec<f64> = (0..6)
+                .map(|c| {
+                    let (mut plus, mut moins) = (p0, p0);
+                    plus[c] += h;
+                    moins[c] -= h;
+                    let (pp, _, _) = poses_corrigees(&stacks, &vraies, si, k, &plus);
+                    let (pm, _, _) = poses_corrigees(&stacks, &vraies, si, k, &moins);
+                    (concordance_de_reference(&stacks, &pp, si, k, Some(&probleme.partners)).0 - concordance_de_reference(&stacks, &pm, si, k, Some(&probleme.partners)).0) / (2.0 * h)
+                })
+                .collect();
+            let (na, nd) = (g_auto.iter().map(|v| v * v).sum::<f64>().sqrt(), g_diff.iter().map(|v| v * v).sum::<f64>().sqrt());
+            let cosinus = g_auto.iter().zip(&g_diff).map(|(a, b)| a * b).sum::<f64>() / (na * nd);
+            println!("({si},{k}) gradient : norme automatique {na:.4}, différences finies {nd:.4}, cosinus {cosinus:.4}");
+            assert!(g_auto.iter().all(|v| v.is_finite()), "gradient non fini : {g_auto:?}");
+            assert!((na - nd).abs() / nd < 5e-2 && cosinus > 0.99, "({si},{k}) : normes {na} / {nd}, cosinus {cosinus}");
+        }
+    }
+
+    /// Jeu plus exigeant pour le coût coupe-coupe : un stack axial, un coronal et un OBLIQUE (inclinaison de 0,6 rad ≈ 34°, soit des plans qui se croisent à moins de 90°, donc |d| < 1), et des
+    /// masques réduits à la moitié des pixels de chaque coupe (les points de la droite hors masque portent du signal : les ignorer change le coût).
+    fn jeu_oblique_et_masque_partiel_pour_s2s(t: &Temp) -> (Vec<Stack>, Vec<Stack>, SlicePoses) {
+        let volume = volume_de_blobs();
+        let quart = std::f64::consts::FRAC_PI_2;
+        let modeles: Vec<Stack> = [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)), ("obl", Rotation3::from_euler_angles(0.0, 0.6, 0.0))]
+            .iter()
+            .map(|(nom, r)| {
+                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
+                stack_avec_masque(t, &format!("{nom}_obl"), &Array3::zeros((28, 28, 12)), &Array3::from_elem((28, 28, 12), 1u8), &affine, [1.0, 1.0, 3.0])
+            })
+            .collect();
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let complets = simuler_blobs(t, &volume, &modeles, &vraies);
+        let stacks = complets
+            .iter()
+            .enumerate()
+            .map(|(n, s)| {
+                let mut masque = s.brain_mask().unwrap().voxels().mapv(u8::from);
+                for i in 14..28 {
+                    masque.index_axis_mut(Axis(0), i).fill(0);
+                }
+                let sp = s.spacing();
+                stack_avec_masque(t, &format!("partiel{n}"), s.data(), &masque, s.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+            })
+            .collect();
+        (stacks, complets, vraies)
+    }
+
+    /// Coût coupe-coupe sur le jeu oblique à masques partiels (critères fixés avant, pour tuer les mutants survivants du premier jeu) : pour toutes les coupes centrales (3 à 8) de chaque stack qui ont
+    /// des partenaires, au repos le coût égale la référence `f64` à 5e-3 près avec le même nombre de paires, et pour une petite correction (0,5) il égale la référence restreinte aux mêmes partenaires
+    /// à 5e-3 près ; au moins 12 coupes testées.
+    #[test]
+    fn slice_to_slice_cost_handles_oblique_pairs_and_partial_masks() {
+        let t = Temp::new("s2s_oblique");
+        let (stacks, complets, vraies) = jeu_oblique_et_masque_partiel_pour_s2s(&t); // `complets` : mêmes stacks à masque complet, pour le pivot (≥ 500 pixels de masque exigés)
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let config = crate::s2s::IntersectionConfig::default();
+        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let valeur = |v: burn::prelude::Tensor<1>| f64::from(v.into_data().try_to_vec::<f32>().unwrap()[0]);
+        let direction = [1.0, 0.5, -0.5, 1.0, -0.5, 0.7];
+        let (mut testees, mut pire) = (0usize, 0.0_f64);
+        for si in 0..3 {
+            for k in 3..9 {
+                let Some(probleme) = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device) else { continue };
+                for e in [0.0, 0.5] {
+                    let params: [f64; 6] = std::array::from_fn(|c| e * direction[c]);
+                    let (corrigees, pivot, scale) = poses_corrigees(&complets, &vraies, si, k, &params);
+                    let tensoriel = valeur(probleme.cost(tenseur(&params), tenseur(&[pivot.x, pivot.y, pivot.z]), scale));
+                    let (gelee, _) = concordance_de_reference(&stacks, &corrigees, si, k, Some(&probleme.partners));
+                    pire = pire.max((tensoriel - gelee).abs());
+                    if e == 0.0 {
+                        let (_, n_ref) = concordance_de_reference(&stacks, &corrigees, si, k, None);
+                        assert_eq!(probleme.n_pairs(), n_ref, "({si},{k}) : nombre de paires différent");
+                    }
+                }
+                testees += 1;
+            }
+        }
+        println!("{testees} coupes testées ; écart maximal à la référence : {pire:.2e}");
+        assert!(testees >= 12, "trop peu de coupes avec partenaires : {testees}");
+        assert!(pire < 5e-3, "écart à la référence : {pire}");
+    }
+
+    /// RECOUPEMENT AVEC LA MÉTRIQUE PYTHON (critères fixés avant) : sur le jeu pyrecon à mouvement lisse ±2 (`STA31_lisse_mvt2_b5`), aux VRAIES poses, la concordance moyenne du coût différentiable,
+    /// pondérée par le nombre de paires sur toutes les coupes, est à 0,01 près celle de `scripts/intersection_consistency.py` (0,9315 sur 1449 paires) ; chaque paire étant vue des deux côtés, le total des paires
+    /// des problèmes est 2 × 1449 = 2898 à 2 % près.
+    #[test]
+    #[ignore = "jeu pyrecon sur disque (scripts/make_pyrecon_benchmark.py)"]
+    fn slice_to_slice_cost_agrees_with_the_python_metric_on_pyrecon_data() {
+        let (_, stacks, vraies) = stacks_pyrecon_modele("lisse", 2);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let config = crate::s2s::IntersectionConfig::default();
+        let zeros = |n: usize| burn::prelude::Tensor::<1>::from_floats(vec![0.0_f32; n].as_slice(), &device);
+        let (mut somme, mut paires, mut coupes) = (0.0_f64, 0usize, 0usize);
+        for (si, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                let Some(probleme) = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device) else { continue };
+                let c = f64::from(probleme.cost(zeros(6), zeros(3), 1.0).into_data().try_to_vec::<f32>().unwrap()[0]);
+                somme += c * probleme.n_pairs() as f64;
+                paires += probleme.n_pairs();
+                coupes += 1;
+            }
+        }
+        let moyenne = somme / paires as f64;
+        println!("{coupes} coupes avec partenaires ; {paires} paires (Python : 2 × 1449) ; concordance moyenne {moyenne:.4} (Python : 0.9315)");
+        assert!((moyenne - 0.9315).abs() < 0.01, "concordance moyenne {moyenne}");
+        assert!((paires as f64 - 2898.0).abs() / 2898.0 < 0.02, "nombre de paires {paires}");
+    }
+
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
     fn stack_avec_coupe_modifiee(t: &Temp, stack: &Stack, k: usize, ajout: f32, nom: &str) -> Stack {
         let mut data = stack.data().clone();
