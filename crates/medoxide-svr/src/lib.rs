@@ -15,6 +15,7 @@
 pub mod align;
 pub mod diff;
 pub mod optimizers;
+pub mod pipeline;
 pub mod recon;
 pub mod s2s;
 
