@@ -3556,6 +3556,32 @@ mod tests {
             identite.clone()
         };
         println!("stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles", grille.dims, stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        // MEDOXIDE_MOTION = s2s : mouvement estimé SANS reconstruction (coupe-coupe, `register_slices_s2s`, MEDOXIDE_S2S_SWEEPS balayages, 3 par défaut), puis UNE reconstruction avec ces poses
+        if std::env::var("MEDOXIDE_MOTION").map_or(false, |v| v.trim() == "s2s") {
+            let debut = std::time::Instant::now();
+            let reglages = crate::s2s::S2sConfig { sweeps: std::env::var("MEDOXIDE_S2S_SWEEPS").ok().map_or(3, |v| v.trim().parse().unwrap()), ..Default::default() };
+            let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &reglages, &device).unwrap();
+            let recalees: Vec<_> = rapport.slices.iter().filter(|s| s.registered).collect();
+            println!(
+                "coupe-coupe : {} coupes recalées sur {} en {:.0} s ; concordance moyenne {:.3} → {:.3} ; correction moyenne {:.2} mm",
+                recalees.len(), rapport.slices.len(), debut.elapsed().as_secs_f64(),
+                recalees.iter().map(|s| s.ncc_first).sum::<f64>() / recalees.len() as f64, recalees.iter().map(|s| s.ncc_final).sum::<f64>() / recalees.len() as f64,
+                recalees.iter().map(|s| s.correction_rms_mm).sum::<f64>() / recalees.len() as f64
+            );
+            let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &rapport.poses, ALPHA_CHOISI).unwrap();
+            let x = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4).x;
+            ecrire_image_grille(&sortie.join(format!("ours_s2s{etiquette}.nii.gz")), &x, &grille);
+            let mut lignes = Vec::new();
+            for (n, stack) in stacks.iter().enumerate() {
+                for coupe in stack.slices() {
+                    let m = rapport.poses.get(n, coupe.index());
+                    lignes.push(format!("{}\t{}\t{}", retenus[n], coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+                }
+            }
+            std::fs::write(sortie.join(format!("poses_s2s{etiquette}.tsv")), lignes.join("\n")).unwrap();
+            println!("terminé en {:.0} s", debut.elapsed().as_secs_f64());
+            return;
+        }
         let debut = std::time::Instant::now();
         let sans = ReconstructionProblem::with_poses(&grille, &stacks, &identite, ALPHA_CHOISI).unwrap();
         let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
