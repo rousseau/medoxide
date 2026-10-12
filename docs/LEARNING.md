@@ -1339,4 +1339,15 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-12 — Estimation coupe-coupe sur toutes les coupes : balayages, repère libre, critère révisé
+
+- **Quoi** : recaler toutes les coupes l'une après l'autre avec le coût d'intersection (Adam par coupe), en **balayages** : ordre aléatoire à graine fixe (Fisher–Yates avec un générateur xorshift), pose mise à jour tout de suite pour que les coupes suivantes voient la correction (Gauss–Seidel), et mise à jour acceptée seulement si la concordance ne baisse pas.
+- **Repère libre** : sans volume de référence, rien ne fixe le repère ; toutes les poses peuvent dériver ensemble sans changer la qualité. L'erreur se mesure donc **après retrait du mouvement rigide commun** (Kabsch : décomposition en valeurs singulières `h.svd(true, true)` de nalgebra, correction du signe du déterminant pour rester une rotation). Test : un mouvement commun ajouté aux vraies poses donne une erreur nulle (1e-6 mm).
+- **Critère révisé, dit comme tel** : le critère « ≥ 90 % des coupes à ≤ 2 mm » portait sur toutes les coupes, y compris celles que la fonction ne traite jamais (bords, trop peu de masque) : 83 % seulement, donc non atteint tel que fixé. J'ai ensuite restreint le critère aux coupes recalées (97 %), en comptant les autres à part. Cette révision est écrite après coup, dans le code et dans les notes : un critère révisé n'est pas un critère atteint.
+- **Résultats** : jeux simulés à mouvement lisse ou indépendant ±2 : 93 % et 96 % des coupes recalées à ≤ 1,5 mm de la vérité ; ±4 : 79–81 % ; ±6 : échec (pas de capture). 80 s pour 108 coupes.
+
+**Suite** : évaluation sur données réelles avec le juge.
+
+---
+
 *(à compléter à la prochaine étape)*

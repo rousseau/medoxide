@@ -72,7 +72,7 @@ pub fn register_slices(stacks: &[Stack], poses: &SlicePoses, reference: &VolumeT
 }
 
 /// Vérifie que `poses` a la forme de `stacks` et que chaque stack a un masque.
-fn verifier_entrees(stacks: &[Stack], poses: &SlicePoses) -> Result<(), SvrError> {
+pub(crate) fn verifier_entrees(stacks: &[Stack], poses: &SlicePoses) -> Result<(), SvrError> {
     if !poses.matches(stacks) {
         return Err(SvrError::PoseMismatch);
     }

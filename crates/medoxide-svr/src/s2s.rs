@@ -9,6 +9,8 @@ use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
 
 use crate::diff::{ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
+use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
+use crate::diff::pose_to_matrix;
 use crate::recon::SlicePoses;
 use crate::{Stack, SvrError};
 
@@ -387,6 +389,87 @@ pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotat
     historique.push(valeur(&problem.cost(finale.clone(), pivot, rotation_scale_mm)));
     let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
     RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
+}
+
+/// Réglages de [`register_slices_s2s`].
+#[derive(Debug, Clone, Copy)]
+pub struct S2sConfig {
+    /// Nombre de balayages : chaque balayage recale toutes les coupes une fois, dans un ordre aléatoire.
+    pub sweeps: usize,
+    /// Réglages du recalage de chaque coupe.
+    pub registration: RegistrationConfig,
+    /// Réglages des droites d'intersection.
+    pub intersection: IntersectionConfig,
+    /// Graine de l'ordre des coupes (déterministe).
+    pub seed: u64,
+}
+
+impl Default for S2sConfig {
+    fn default() -> Self {
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1 }
+    }
+}
+
+/// Permutation déterministe de `0..n` (Fisher–Yates, générateur xorshift64) : l'ordre des coupes d'un balayage.
+fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
+    let mut etat = graine.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut ordre: Vec<usize> = (0..n).collect();
+    for i in (1..n).rev() {
+        etat ^= etat << 13;
+        etat ^= etat >> 7;
+        etat ^= etat << 17;
+        ordre.swap(i, (etat % (i as u64 + 1)) as usize);
+    }
+    ordre
+}
+
+/// **Estimation du mouvement coupe-coupe, sans reconstruction** : `config.sweeps` balayages sur toutes les coupes de tous les stacks, dans un ordre aléatoire (graine `config.seed`, ordre différent à chaque
+/// balayage). Pour chaque coupe : le problème d'intersection est construit aux poses COURANTES (les partenaires déjà recalés comptent), la coupe est recalée par [`register_slice_s2s`] depuis la pose nulle
+/// (6 paramètres autour de son pivot P3), et sa pose devient `D · M` aussitôt (Gauss–Seidel : les coupes suivantes voient la pose mise à jour). La mise à jour n'est **acceptée que si la concordance ne baisse
+/// pas**. Une coupe sans partenaire, ou de moins de [`crate::align::MIN_MASK_PIXELS`] pixels de masque, garde sa pose.
+///
+/// Dans le rapport (un par coupe, dernier balayage), `ncc_first` et `ncc_final` sont des CONCORDANCES (avant et après le recalage de ce balayage), `runs` le nombre de balayages où la coupe a été recalée,
+/// `correction_rms_mm` le déplacement quadratique moyen, sur ses pixels de masque, entre la pose reçue et la pose finale. Rien n'ancre le repère : la solution n'est définie qu'à un mouvement rigide commun
+/// près (qui ne change pas la qualité).
+///
+/// `device` doit avoir l'autodiff activé.
+///
+/// # Erreurs
+/// [`SvrError::NoMask`] si un stack n'a pas de masque ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
+pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    verifier_entrees(stacks, poses)?;
+    let atlas = SliceAtlas::new(stacks, device)?;
+    let coupes: Vec<(usize, usize)> = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).collect();
+    let mut courantes = poses.clone();
+    let mut rapports: Vec<SliceReport> =
+        coupes.iter().map(|&(stack, slice)| SliceReport { stack, slice, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }).collect();
+    for balayage in 0..config.sweeps {
+        for &n in &ordre_aleatoire(coupes.len(), config.seed + balayage as u64) {
+            let (si, k) = coupes[n];
+            let courante = *courantes.get(si, k);
+            let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
+            let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+            let pivot = Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], device);
+            let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
+            let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
+            let rapport = &mut rapports[n];
+            rapport.registered = true;
+            rapport.runs += 1;
+            rapport.ncc_first = avant;
+            rapport.ncc_final = avant;
+            if apres >= avant {
+                courantes.set(si, k, pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante);
+                rapport.ncc_final = apres;
+            }
+        }
+    }
+    for (n, &(si, k)) in coupes.iter().enumerate() {
+        if let Some(depart) = preparer_coupe(&stacks[si], k, *poses.get(si, k)) {
+            let relatif = courantes.get(si, k) * poses.get(si, k).try_inverse().expect("une pose est inversible");
+            rapports[n].correction_rms_mm = (depart.points.iter().map(|x| ((relatif * x.push(1.0)).xyz() - x).norm_squared()).sum::<f64>() / depart.points.len() as f64).sqrt();
+        }
+    }
+    Ok(AlignmentReport { poses: courantes, slices: rapports })
 }
 
 #[cfg(test)]
