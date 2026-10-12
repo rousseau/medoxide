@@ -2541,6 +2541,32 @@ mod tests {
         assert!(ameliorations as f64 >= 0.9 * 18.0, "seulement {ameliorations}/18 cas à ≤ 1 mm : {finales:?}");
     }
 
+    /// Stack d'ancrage (critères fixés avant, sur les trois stacks de blobs aux vraies poses) : (1) avec `anchor_stack = Some(0)`, tout partenaire d'une coupe est dans le stack 0 ou la coupe est elle-même
+    /// dans le stack 0 ; (2) pour TOUTE coupe, la liste de partenaires avec ancrage est EXACTEMENT la liste sans ancrage
+    /// filtrée (stack 0 pour une coupe d'un autre stack, tous pour une coupe du stack 0) ; (3) sans ancrage, au moins une coupe des stacks 1 ou 2 a un partenaire dans l'autre de ces deux stacks (l'option
+    /// a un effet).
+    #[test]
+    fn anchor_stack_keeps_only_the_pairs_that_involve_it() {
+        let t = Temp::new("s2s_ancrage");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let libre = crate::s2s::IntersectionConfig::default();
+        let ancre = crate::s2s::IntersectionConfig { anchor_stack: Some(0), ..libre };
+        let mut effet = false;
+        for (si, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                let avec = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &ancre, &device).map(|p| p.partners).unwrap_or_default();
+                let sans = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &libre, &device).map(|p| p.partners).unwrap_or_default();
+                assert!(avec.iter().all(|&(sj, _)| si == 0 || sj == 0), "paire hors ancrage pour ({si}, {k})");
+                let attendue: Vec<(usize, usize)> = sans.iter().copied().filter(|&(sj, _)| si == 0 || sj == 0).collect();
+                assert_eq!(avec, attendue, "partenaires de ({si}, {k})");
+                effet |= si != 0 && sans.iter().any(|&(sj, _)| sj != 0);
+            }
+        }
+        assert!(effet, "l'ancrage n'a aucun effet sur ce jeu");
+    }
+
     /// Contrat des réglages de `register_slice_s2s` (critères fixés avant, pour des mutants que le test de récupération ne voit pas) : (1) avec 0 itération, la correction rendue est exactement `initial`
     /// (1e-6) et l'historique ne contient que le coût en ce point ; (2) la dernière valeur de l'historique est le coût recalculé à la correction finale avec le bon pivot (1e-6) ; (3) sur 2 itérations de pas 1,
     /// des décroissances de 1,0 et de 0,5 donnent des corrections qui diffèrent d'au moins 0,1 sur un paramètre.
@@ -2722,7 +2748,7 @@ mod tests {
     fn diagnose_unregistered_slices_for_slice_to_slice() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
-        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| "0,1,2".into()).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(",")).split(',').map(|i| i.trim().parse().unwrap()).collect();
         let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
         let poses = SlicePoses::identity(&stacks);
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
@@ -3545,11 +3571,22 @@ mod tests {
         let mut sessions: Vec<PathBuf> = std::fs::read_dir(racine.join(&sujet)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("ses-")).collect();
         sessions.sort();
         let session = sessions.into_iter().next().expect("aucune session");
-        ["trufiax", "truficor", "trufisag"]
-            .iter()
-            .map(|plan| {
-                let nom = format!("{sujet}_{}_acq-{plan}_run-1", session.file_name().unwrap().to_string_lossy());
-                let mut stack = Stack::read(&session.join("anat").join(format!("{nom}_T2w.nii.gz"))).expect("stack absent");
+        // tous les stacks TRUFI de la session : axial, coronal, sagittal du run 1 d'abord (indices 0, 1, 2), puis les stacks supplémentaires (autres runs) par ordre de run et de plan
+        let dossier = session.join("anat");
+        let prefixe = format!("{sujet}_{}_acq-", session.file_name().unwrap().to_string_lossy());
+        let mut noms: Vec<(usize, usize, String)> = Vec::new();
+        for entree in std::fs::read_dir(&dossier).unwrap() {
+            let fichier = entree.unwrap().file_name().to_string_lossy().into_owned();
+            let Some(reste) = fichier.strip_prefix(&prefixe).and_then(|r| r.strip_suffix("_T2w.nii.gz")) else { continue };
+            let Some((plan, run)) = reste.split_once("_run-") else { continue };
+            let Some(rang_plan) = ["trufiax", "truficor", "trufisag"].iter().position(|p| *p == plan) else { continue };
+            let run: usize = run.parse().unwrap();
+            noms.push((usize::from(run != 1), run * 10 + rang_plan, format!("{prefixe}{plan}_run-{run}")));
+        }
+        noms.sort();
+        noms.into_iter()
+            .map(|(_, _, nom)| {
+                let mut stack = Stack::read(&dossier.join(format!("{nom}_T2w.nii.gz"))).expect("stack absent");
                 let masque = racine.join("derivatives/medx-fetalbet").join(&sujet).join(session.file_name().unwrap()).join("anat").join(format!("{nom}_desc-brain_mask.nii.gz"));
                 stack.set_brain_mask(&masque).expect("masque absent");
                 stack
@@ -3563,7 +3600,7 @@ mod tests {
     }
 
     /// Reconstruction par notre algorithme sur un sujet réel (variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET ; optionnelles : MEDOXIDE_STACKS_RETENUS = indices des stacks
-    /// gardés dans {0 axial, 1 coronal, 2 sagittal}, par défaut « 0,1,2 » ; MEDOXIDE_CYCLES, 6 par défaut ; MEDOXIDE_ETIQUETTE, suffixe des fichiers). Écrit dans `data/svr/results/<sujet>/` :
+    /// gardés dans {0 axial, 1 coronal, 2 sagittal}, par défaut tous les stacks TRUFI de la session (3, ou plus : les indices au-delà de 2 sont des stacks d'autres runs) ; MEDOXIDE_CYCLES, 6 par défaut ; MEDOXIDE_ETIQUETTE, suffixe des fichiers). Écrit dans `data/svr/results/<sujet>/` :
     /// `ours_loop<étiquette>.nii.gz` (volume final), `ours_header<étiquette>.nii.gz` (reconstruction sans correction, poses d'en-tête) et `poses_loop<étiquette>.tsv` (mouvement estimé par coupe,
     /// même format que les jeux simulés). Pas de vérité terrain : voir `judge_a_volume_with_a_held_out_stack`.
     /// À lancer en `--release --ignored --nocapture`.
@@ -3572,7 +3609,7 @@ mod tests {
     fn reconstruct_a_real_subject() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
-        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| "0,1,2".into()).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(",")).split(',').map(|i| i.trim().parse().unwrap()).collect();
         let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
         let cycles: usize = std::env::var("MEDOXIDE_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
         let etiquette = std::env::var("MEDOXIDE_ETIQUETTE").unwrap_or_default();
@@ -3601,7 +3638,13 @@ mod tests {
         // MEDOXIDE_MOTION = s2s : mouvement estimé SANS reconstruction (coupe-coupe, `register_slices_s2s`, MEDOXIDE_S2S_SWEEPS balayages, 3 par défaut), puis UNE reconstruction avec ces poses
         if std::env::var("MEDOXIDE_MOTION").map_or(false, |v| v.trim() == "s2s") {
             let debut = std::time::Instant::now();
-            let reglages = crate::s2s::S2sConfig { sweeps: std::env::var("MEDOXIDE_S2S_SWEEPS").ok().map_or(3, |v| v.trim().parse().unwrap()), ..Default::default() };
+            // MEDOXIDE_S2S_ANCRE = a : seules les paires impliquant le stack `a` (indice dans `retenus`) servent à l'estimation ; les autres paires restent pour évaluer
+            let ancre = std::env::var("MEDOXIDE_S2S_ANCRE").ok().map(|v| v.trim().parse::<usize>().unwrap());
+            let reglages = crate::s2s::S2sConfig {
+                sweeps: std::env::var("MEDOXIDE_S2S_SWEEPS").ok().map_or(3, |v| v.trim().parse().unwrap()),
+                intersection: crate::s2s::IntersectionConfig { anchor_stack: ancre, ..Default::default() },
+                ..Default::default()
+            };
             let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &reglages, &device).unwrap();
             let recalees: Vec<_> = rapport.slices.iter().filter(|s| s.registered).collect();
             println!(

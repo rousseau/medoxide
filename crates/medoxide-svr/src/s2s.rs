@@ -175,11 +175,14 @@ pub struct IntersectionConfig {
     pub reach_mm: f64,
     /// Nombre minimal de points communs aux deux coupes et à leurs masques pour qu'une paire compte (20, soit 10 mm à 0,5 mm).
     pub min_points: usize,
+    /// Stack d'ancrage : si `Some(a)`, seules les paires dont une des deux coupes est dans le stack `a` sont formées (les paires entre deux autres stacks sont ignorées). Sert à garder des paires
+    /// non utilisées par l'estimation pour les évaluer (`None` : toutes les paires).
+    pub anchor_stack: Option<usize>,
 }
 
 impl Default for IntersectionConfig {
     fn default() -> Self {
-        IntersectionConfig { min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20 }
+        IntersectionConfig { min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, anchor_stack: None }
     }
 }
 
@@ -237,7 +240,7 @@ impl IntersectionProblem {
         let t_valeurs: Vec<f64> = (0..n_t).map(|i| -config.reach_mm + i as f64 * config.step_mm).collect();
         let mut partenaires: Vec<(usize, usize, Plan)> = Vec::new();
         for (sj, stack) in stacks.iter().enumerate() {
-            if sj == si {
+            if sj == si || config.anchor_stack.is_some_and(|a| si != a && sj != a) {
                 continue;
             }
             let masque = stack.brain_mask()?.voxels();
