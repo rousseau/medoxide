@@ -3,10 +3,12 @@
 //! Deux coupes de stacks différents se croisent le long d'une droite ; si leurs poses sont justes, leurs intensités le long de cette droite concordent. Le coût est écrit en opérations sur tenseurs
 //! Burn, pour que la différentiation automatique en tire les gradients, comme pour le recalage coupe-volume ([`crate::diff`]).
 
+use burn::module::Param;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
 
-use crate::diff::{ncc, rotation_matrix};
+use crate::diff::{ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::recon::SlicePoses;
 use crate::{Stack, SvrError};
 
@@ -359,6 +361,32 @@ impl IntersectionProblem {
         let valides = w.sum_dim(1).reshape([j]).greater_equal_elem(self.min_points).float();
         (ncc_paires * valides.clone()).sum() / valides.sum().clamp_min(1.0)
     }
+}
+
+/// **Recale une coupe par concordance aux intersections** : cherche la correction `(φx, φy, φz, tx, ty, tz)` (mm équivalents autour de `pivot`, départ `config.initial`) qui maximise
+/// [`IntersectionProblem::cost`], par Adam (Burn) sur le gradient automatique, comme [`crate::diff::register_slice`] mais sans volume. Le problème fixe la pose courante de la coupe
+/// et de ses partenaires : la nouvelle pose de la coupe est `D(params) · M`, avec `M` sa pose au moment de [`IntersectionProblem::build`].
+///
+/// `ncc_history` du résultat contient la concordance moyenne à chaque itération (avant la mise à jour) puis à la correction finale. Les tenseurs doivent être sur un `Device` avec autodiff.
+pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig) -> RegistrationResult {
+    let device = pivot.device();
+    let depart: Vec<f32> = config.initial.iter().map(|&v| v as f32).collect();
+    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
+    let mut optimiseur = AdamConfig::new().init();
+    let valeur = |t: &Tensor<1>| f64::from(t.clone().into_data().try_to_vec::<f32>().unwrap()[0]);
+    let mut historique = Vec::with_capacity(config.iterations + 1);
+    let mut pas = config.learning_rate;
+    for _ in 0..config.iterations {
+        let concordance = problem.cost(module.params.val(), pivot.clone(), rotation_scale_mm);
+        historique.push(valeur(&concordance));
+        let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module); // perte = −concordance
+        module = optimiseur.step(pas, module, gradients);
+        pas *= config.lr_decay;
+    }
+    let finale = module.params.val();
+    historique.push(valeur(&problem.cost(finale.clone(), pivot, rotation_scale_mm)));
+    let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
+    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
 }
 
 #[cfg(test)]

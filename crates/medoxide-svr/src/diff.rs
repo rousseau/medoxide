@@ -213,8 +213,8 @@ pub fn slice_ncc(
 /// Les 6 paramètres de pose, dans un `Module` : c'est ce que les optimiseurs de Burn savent mettre à jour. Un `Param` est un tenseur
 /// qui porte un identifiant, auquel `backward` associe un gradient.
 #[derive(Module, Debug)]
-struct PoseModule {
-    params: Param<Tensor<1>>,
+pub(crate) struct PoseModule {
+    pub(crate) params: Param<Tensor<1>>,
 }
 
 /// Réglages de [`register_slice`].

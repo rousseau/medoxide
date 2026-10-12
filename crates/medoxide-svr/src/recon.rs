@@ -2255,7 +2255,7 @@ mod tests {
     }
 
     /// RÉFÉRENCE en `f64` de la concordance moyenne de la coupe `k` du stack `si` aux poses `poses` avec toutes les coupes des autres stacks, ou avec les seuls `partenaires` imposés (même définition que `IntersectionProblem::cost` et que la mesure
-    /// Python validée, mais calculée par une autre voie : plans tirés des matrices de pose 4×4 complètes, masque au plus proche voisin). Rend (NCC moyenne sur les paires valides, nombre de paires valides).
+    /// Python validée, mais calculée par une autre voie : plans tirés des matrices de pose 4×4 complètes, masque interpolé > 0,5 comme dans le coût). Rend (NCC moyenne sur les paires valides, nombre de paires valides).
     fn concordance_de_reference(stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, partenaires: Option<&[(usize, usize)]>) -> (f64, usize) {
         let plan = |s: usize, j: usize| {
             let ma = poses.get(s, j) * stacks[s].affine();
@@ -2266,7 +2266,7 @@ mod tests {
         };
         let (inv1, c1, n1) = plan(si, k);
         let image1 = stacks[si].data().index_axis(Axis(2), k);
-        let masque1 = stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k);
+        let masque1 = stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k).mapv(|m| if m { 1.0_f32 } else { 0.0 });
         let (mut somme, mut n_paires) = (0.0, 0usize);
         for (sj, stack) in stacks.iter().enumerate() {
             if sj == si {
@@ -2284,14 +2284,15 @@ mod tests {
                 let x0 = (n1.dot(&c1) * n2.cross(&d) + n2.dot(&c2) * d.cross(&n1)) / d.norm_squared();
                 let dh = d / d.norm();
                 let image2 = stack.data().index_axis(Axis(2), j);
-                let masque2 = stack.brain_mask().unwrap().voxels().index_axis(Axis(2), j);
+                let masque2 = stack.brain_mask().unwrap().voxels().index_axis(Axis(2), j).mapv(|m| if m { 1.0_f32 } else { 0.0 });
                 let (mut a, mut b) = (Vec::new(), Vec::new());
                 let mut t = -150.0;
                 while t <= 150.0 + 1e-9 {
                     let p = (x0 + t * dh).push(1.0);
                     let (u, v) = (inv1 * p, inv2 * p);
                     if let (Some(va), Some(vb)) = (bilineaire_2d(image1, u.x, u.y), bilineaire_2d(image2, v.x, v.y)) {
-                        if masque1[[u.x.round() as usize, u.y.round() as usize]] && masque2[[v.x.round() as usize, v.y.round() as usize]] {
+                        // règle du coût : un point est dans le masque si le masque interpolé (bilinéaire) y dépasse 0,5
+                        if bilineaire_2d(masque1.view(), u.x, u.y).unwrap_or(0.0) > 0.5 && bilineaire_2d(masque2.view(), v.x, v.y).unwrap_or(0.0) > 0.5 {
                             a.push(va);
                             b.push(vb);
                         }
@@ -2420,16 +2421,25 @@ mod tests {
                 for i in 14..28 {
                     masque.index_axis_mut(Axis(0), i).fill(0);
                 }
+                // hors masque : du bruit déterministe de pleine amplitude, pour que tout point hors masque pris à tort fausse nettement la concordance
+                let mut data = s.data().clone();
+                let mut alea = Alea(0x5EED ^ (n as u64 + 1));
+                let maximum = data.iter().cloned().fold(0.0_f32, f32::max);
+                for (v, &m) in data.iter_mut().zip(masque.iter()) {
+                    if m == 0 {
+                        *v = alea.suivant() as f32 * maximum;
+                    }
+                }
                 let sp = s.spacing();
-                stack_avec_masque(t, &format!("partiel{n}"), s.data(), &masque, s.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+                stack_avec_masque(t, &format!("partiel{n}"), &data, &masque, s.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
             })
             .collect();
         (stacks, complets, vraies)
     }
 
     /// Coût coupe-coupe sur le jeu oblique à masques partiels (critères fixés avant, pour tuer les mutants survivants du premier jeu) : pour toutes les coupes centrales (3 à 8) de chaque stack qui ont
-    /// des partenaires, au repos le coût égale la référence `f64` à 5e-3 près avec le même nombre de paires, et pour une petite correction (0,5) il égale la référence restreinte aux mêmes partenaires
-    /// à 5e-3 près ; au moins 12 coupes testées.
+    /// des partenaires, au repos le coût égale la référence `f64` à 1e-4 près avec le même nombre de paires, et pour une petite correction (0,5) il égale la référence restreinte aux mêmes partenaires
+    /// à 1e-4 près ; au moins 12 coupes testées. Les pixels hors masque contiennent du bruit de pleine amplitude. (Tolérance resserrée de 5e-3 à 1e-4 après des mutants survivants : l'écart réel est de l'ordre de 1e-7.)
     #[test]
     fn slice_to_slice_cost_handles_oblique_pairs_and_partial_masks() {
         let t = Temp::new("s2s_oblique");
@@ -2460,7 +2470,7 @@ mod tests {
         }
         println!("{testees} coupes testées ; écart maximal à la référence : {pire:.2e}");
         assert!(testees >= 12, "trop peu de coupes avec partenaires : {testees}");
-        assert!(pire < 5e-3, "écart à la référence : {pire}");
+        assert!(pire < 1e-4, "écart à la référence : {pire}");
     }
 
     /// RECOUPEMENT AVEC LA MÉTRIQUE PYTHON (critères fixés avant) : sur le jeu pyrecon à mouvement lisse ±2 (`STA31_lisse_mvt2_b5`), aux VRAIES poses, la concordance moyenne du coût différentiable,
@@ -2488,6 +2498,79 @@ mod tests {
         println!("{coupes} coupes avec partenaires ; {paires} paires (Python : 2 × 1449) ; concordance moyenne {moyenne:.4} (Python : 0.9315)");
         assert!((moyenne - 0.9315).abs() < 0.01, "concordance moyenne {moyenne}");
         assert!((paires as f64 - 2898.0).abs() / 2898.0 < 0.02, "nombre de paires {paires}");
+    }
+
+    /// Recalage d'UNE coupe par concordance aux intersections (critères fixés avant) : sur les blobs, la pose d'une seule coupe est perturbée (6 paramètres tirés dans ±2 mm équivalents autour de son pivot, 6 coupes ×
+    /// 3 graines = 18 cas), les autres coupes restant aux vraies poses ; le recalage part de zéro. (1) l'erreur de départ a une médiane > 1,5 mm ; (2) au moins 90 % des cas finissent à ≤ 1 mm de la vraie pose ;
+    /// (3) aucun cas n'est plus loin de la vérité qu'au départ ; (4) la concordance finale est ≥ celle du départ dans tous les cas. Réglages de l'optimiseur : seuls modifiables si le test échoue, jamais les critères.
+    #[test]
+    fn slice_to_slice_registration_recovers_a_perturbed_slice() {
+        let t = Temp::new("s2s_recalage");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let config = crate::s2s::IntersectionConfig::default();
+        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let reglages = crate::diff::RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] };
+        let (mut departs, mut finales, mut ameliorations) = (Vec::new(), Vec::new(), 0usize);
+        for &(si, k) in &[(0usize, 4usize), (0, 6), (1, 5), (1, 7), (2, 4), (2, 6)] {
+            for graine in 1..=3u64 {
+                let mut alea = Alea(graine * 7919 + (si * 31 + k) as u64);
+                let p0: [f64; 6] = std::array::from_fn(|_| (alea.suivant() * 2.0 - 1.0) * 2.0);
+                let (perturbees, _, _) = poses_corrigees(&stacks, &vraies, si, k, &p0);
+                let preparee = align::preparer_coupe(&stacks[si], k, *perturbees.get(si, k)).expect("coupe recalable");
+                let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &perturbees, si, k, &config, &device).expect("partenaires");
+                let resultat = crate::s2s::register_slice_s2s(&probleme, tenseur(&[preparee.pivot.x, preparee.pivot.y, preparee.pivot.z]), preparee.echelle, reglages);
+                let delta = crate::diff::pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle);
+                let mut recalees = perturbees.clone();
+                recalees.set(si, k, delta * perturbees.get(si, k));
+                let erreur = |poses: &SlicePoses| erreurs_de_pose(&stacks, poses, &vraies)[si * 12 + k];
+                let (e0, e1) = (erreur(&perturbees), erreur(&recalees));
+                let (c0, c1) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
+                println!("({si},{k}) graine {graine} : erreur {e0:.2} → {e1:.2} mm, concordance {c0:.4} → {c1:.4}");
+                assert!(e1 <= e0 + 1e-9, "({si},{k}) graine {graine} : l'erreur augmente ({e0} → {e1})");
+                assert!(c1 >= c0 - 1e-6, "({si},{k}) graine {graine} : la concordance baisse ({c0} → {c1})");
+                ameliorations += usize::from(e1 <= 1.0);
+                departs.push(e0);
+                finales.push(e1);
+            }
+        }
+        departs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("erreur de départ médiane {:.2} mm ; {ameliorations}/18 cas à ≤ 1 mm", departs[9]);
+        assert!(departs[9] > 1.5, "perturbation trop faible : {}", departs[9]);
+        assert!(ameliorations as f64 >= 0.9 * 18.0, "seulement {ameliorations}/18 cas à ≤ 1 mm : {finales:?}");
+    }
+
+    /// Contrat des réglages de `register_slice_s2s` (critères fixés avant, pour des mutants que le test de récupération ne voit pas) : (1) avec 0 itération, la correction rendue est exactement `initial`
+    /// (1e-6) et l'historique ne contient que le coût en ce point ; (2) la dernière valeur de l'historique est le coût recalculé à la correction finale avec le bon pivot (1e-6) ; (3) sur 2 itérations de pas 1,
+    /// des décroissances de 1,0 et de 0,5 donnent des corrections qui diffèrent d'au moins 0,1 sur un paramètre.
+    #[test]
+    fn slice_to_slice_registration_honours_its_settings() {
+        let t = Temp::new("s2s_reglages");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
+        let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, 0, 4, &crate::s2s::IntersectionConfig::default(), &device).unwrap();
+        let preparee = align::preparer_coupe(&stacks[0], 4, *vraies.get(0, 4)).unwrap();
+        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let pivot = || tenseur(&[preparee.pivot.x, preparee.pivot.y, preparee.pivot.z]);
+        let cout = |p: &[f64; 6]| f64::from(probleme.cost(tenseur(p), pivot(), preparee.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let depart = [0.4, -0.3, 0.2, 0.5, -0.6, 0.3];
+        let reglages = |iterations, lr, decay| crate::diff::RegistrationConfig { learning_rate: lr, iterations, lr_decay: decay, initial: depart };
+        // (1)
+        let zero = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(0, 0.3, 0.97));
+        assert!(zero.params.iter().zip(&depart).all(|(a, b)| (a - b).abs() < 1e-6), "départ non respecté : {:?}", zero.params);
+        assert_eq!(zero.ncc_history.len(), 1);
+        assert!((zero.ncc_history[0] - cout(&depart)).abs() < 1e-6);
+        // (2)
+        let vingt = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(20, 0.3, 0.97));
+        assert_eq!(vingt.ncc_history.len(), 21);
+        assert!((vingt.ncc_history[20] - cout(&vingt.params)).abs() < 1e-6, "{} contre {}", vingt.ncc_history[20], cout(&vingt.params));
+        // (3)
+        let constant = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(2, 1.0, 1.0));
+        let decroissant = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(2, 1.0, 0.5));
+        let ecart = constant.params.iter().zip(&decroissant.params).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+        assert!(ecart >= 0.1, "la décroissance du pas n'a pas d'effet : {ecart}");
     }
 
     /// Remplace les pixels de la coupe `k` d'un stack par `valeur + pixel` (le masque et la géométrie sont conservés) : sert à vérifier qu'une référence ne lit pas cette coupe.
