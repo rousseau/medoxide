@@ -53,8 +53,8 @@ def preparer(jeu, poses, coupes):
     return out
 
 
-def concordance(jeu, poses, coupes, angle_min_deg=30.0, pas_mm=0.5, portee_mm=150.0, min_points=20):
-    """Liste des NCC de chaque paire de coupes de stacks différents (coupes dans `coupes`)."""
+def concordance(jeu, poses, coupes, angle_min_deg=30.0, pas_mm=0.5, portee_mm=150.0, min_points=20, hors_stack=None):
+    """Liste des NCC de chaque paire de coupes de stacks différents (coupes dans `coupes`). Si `hors_stack` est donné, les paires qui impliquent ce stack sont ignorées."""
     prep = preparer(jeu, poses, coupes)
     cles = sorted(coupes)
     t = np.arange(-portee_mm, portee_mm + pas_mm, pas_mm)
@@ -63,7 +63,7 @@ def concordance(jeu, poses, coupes, angle_min_deg=30.0, pas_mm=0.5, portee_mm=15
     for a in range(len(cles)):
         for b in range(a + 1, len(cles)):
             (s1, k1), (s2, k2) = cles[a], cles[b]
-            if s1 == s2:
+            if s1 == s2 or hors_stack in (s1, s2):
                 continue
             _, inv1, c1, n1, h1 = prep[(s1, k1)]
             _, inv2, c2, n2, h2 = prep[(s2, k2)]
