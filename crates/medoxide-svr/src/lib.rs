@@ -65,6 +65,8 @@ pub enum SvrError {
     PoseMismatch,
     /// Résolution ou marge de la grille non finie, ou résolution non strictement positive, ou marge négative.
     InvalidGrid,
+    /// Moins de deux stacks : le mouvement ne peut pas être estimé (une coupe n'a pas de coupe d'un autre stack à croiser, ni de reconstruction indépendante d'elle).
+    NotEnoughStacks,
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -93,6 +95,7 @@ impl std::fmt::Display for SvrError {
             SvrError::SingularVolumeAffine => write!(f, "affine de volume non inversible ou non finie"),
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
+            SvrError::NotEnoughStacks => write!(f, "au moins deux stacks sont nécessaires pour estimer le mouvement"),
             SvrError::PoseMismatch => write!(f, "le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes)"),
             SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
             SvrError::InvalidBlur => write!(f, "écart type de flou invalide : σ >= 0 et fini requis"),

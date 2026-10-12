@@ -2691,6 +2691,95 @@ mod tests {
         assert!(non_recalees.len() * 4 <= rapport.slices.len(), "trop de coupes non recalées : {}", non_recalees.len());
     }
 
+    /// Correspondance des réglages de `pipeline::loop_config` (critère fixé avant) : chaque champ de `ReconstructionConfig` d'une valeur non défaut se retrouve dans le `LoopConfig` (comparaison de la
+    /// représentation `Debug`, `LoopConfig` n'étant pas `PartialEq`), pour les deux valeurs de `s2v_leave_slice_out`. Les réglages `s2v_suspect_ncc` et `s2v_start_amplitude_mm` n'agissent que sur les coupes
+    /// relancées : le test de câblage de bout en bout (sans relance, pour la durée) ne les couvre pas, celui-ci si.
+    #[test]
+    fn the_pipeline_maps_every_setting_to_the_loop_config() {
+        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, ..Default::default() };
+        for sans_la_coupe in [true, false] {
+            let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, ..base.clone() };
+            let attendu = align::LoopConfig {
+                cycles: 4, alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3,
+                robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, ..RobustConfig::new(0.7) },
+                leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
+                leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
+            };
+            assert_eq!(format!("{:?}", crate::pipeline::loop_config(&config)), format!("{attendu:?}"));
+        }
+    }
+
+    /// Réglages du gradient conjugué dans `pipeline::reconstruct_with_poses` (critère fixé avant, blobs à 3 stacks, poses d'en-tête, sans estimation de mouvement donc rapide) : le volume égale (1e-9 relatif)
+    /// celui de `ReconstructionProblem` appelé directement, pour deux réglages qui rendent chacun l'autre paramètre actif ou inactif : (i) 2 itérations au plus, tolérance très faible (le nombre d'itérations
+    /// décide) ; (ii) 300 itérations, tolérance 0,5 (la tolérance décide). Les deux volumes diffèrent entre eux (les réglages agissent) et de α = 0,01 (α agit).
+    #[test]
+    fn the_pipeline_passes_the_conjugate_gradient_settings_to_the_solver() {
+        use crate::pipeline::{reconstruct_with_poses, ReconstructionConfig};
+        let t = Temp::new("pipeline_cg");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
+        let poses = SlicePoses::identity(&stacks);
+        let direct = |alpha: f64, max: usize, tol: f64| {
+            let p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, alpha).unwrap();
+            p.conjugate_gradient(&p.initial_guess(), max, tol).x
+        };
+        let relatif = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let mut volumes = Vec::new();
+        for (alpha, max, tol) in [(0.02, 2, 1e-12), (0.02, 300, 0.5)] {
+            let config = ReconstructionConfig { alpha, cg_max_iterations: max, cg_tolerance: tol, ..Default::default() };
+            let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
+            let ecart = relatif(&obtenu, &direct(alpha, max, tol));
+            assert!(ecart < 1e-9, "(alpha {alpha}, max {max}, tol {tol}) : écart relatif {ecart:.2e}");
+            volumes.push(obtenu);
+        }
+        assert!(relatif(&volumes[0], &volumes[1]) > 1e-4, "les deux réglages donnent le même volume : ils n'agissent pas");
+        assert!(relatif(&volumes[0], &direct(0.01, 2, 1e-12)) > 1e-4, "alpha n'agit pas");
+    }
+
+    /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les
+    /// mêmes réglages, volume égal (à 1e-9 près, relatif) à celui de `ReconstructionProblem` avec ces poses, grille égale à `reconstruction_grid` ; (b) coupe-volume, 1 cycle : poses égales (1e-6 mm) à celles
+    /// de `reconstruct_with_motion_correction` appelé directement avec la référence « sans la coupe », et DIFFÉRENTES de celles de la référence « sans le stack » (le champ `s2v_leave_slice_out` agit) ;
+    /// (c) un seul stack : `NotEnoughStacks`.
+    #[test]
+    fn the_pipeline_wires_the_motion_estimators_and_the_reconstruction() {
+        use crate::pipeline::{reconstruct, Motion, ReconstructionConfig};
+        let t = Temp::new("pipeline");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        // (a) coupe-coupe
+        // tous les réglages sont NON défaut : un réglage ignoré par `reconstruct` ferait différer la sortie de l'appel direct
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
+        let sortie = reconstruct(&stacks, &config, &device).unwrap();
+        let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
+        assert_eq!(sortie.grid, grille);
+        let directes = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, ..Default::default() }, &device).unwrap().poses;
+        assert_eq!(ecart_poses(&sortie.poses, &directes), 0.0, "poses coupe-coupe différentes de l'appel direct");
+        let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &directes, config.alpha).unwrap();
+        let attendu = probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x;
+        let norme = attendu.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let ecart = sortie.volume.iter().zip(attendu.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+        assert!(ecart < 1e-9, "volume coupe-coupe : écart relatif {ecart:.2e}");
+        // (b) coupe-volume
+        let config_v = ReconstructionConfig { motion: Motion::SliceToVolume, s2v_cycles: 1, ..config.clone() };
+        let sortie_v = reconstruct(&stacks, &config_v, &device).unwrap();
+        let boucle = |sans_la_coupe: bool| align::LoopConfig {
+            cycles: 1, alpha: config.alpha, cg_max_iterations: config.cg_max_iterations, cg_tolerance: config.cg_tolerance,
+            robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, ..RobustConfig::new(config.s2v_suspect_ncc) },
+            leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 1 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 1 } else { 0 },
+            leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
+        };
+        let identite = SlicePoses::identity(&stacks);
+        let directes_v = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, boucle(true), &device, |_, _, _| {}).unwrap().poses;
+        let ecart_v = ecart_poses(&sortie_v.poses, &directes_v);
+        assert!(ecart_v < 1e-6, "poses coupe-volume différentes de l'appel direct : {ecart_v:.2e}");
+        let config_pile = ReconstructionConfig { s2v_leave_slice_out: false, ..config_v };
+        let sortie_pile = reconstruct(&stacks, &config_pile, &device).unwrap();
+        assert!(ecart_poses(&sortie_pile.poses, &sortie_v.poses) > 1e-3, "l'option s2v_leave_slice_out n'a aucun effet");
+        // (c) un seul stack
+        assert!(matches!(reconstruct(&stacks[..1], &config, &device), Err(SvrError::NotEnoughStacks)));
+    }
+
     /// Déterminisme (critère fixé avant) : deux exécutions de l'estimation coupe-coupe avec la même graine donnent des poses identiques au bit près ; une autre graine donne un ordre, donc des poses, différents.
     #[test]
     fn slice_to_slice_motion_estimation_is_deterministic() {
