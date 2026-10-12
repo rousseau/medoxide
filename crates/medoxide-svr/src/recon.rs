@@ -3555,6 +3555,15 @@ mod tests {
         } else {
             identite.clone()
         };
+        // MEDOXIDE_INIT_S2S = 1 : la boucle (coupe-volume) part des poses de l'estimation coupe-coupe au lieu des poses d'en-tête (ou alignées)
+        let depart = if std::env::var("MEDOXIDE_INIT_S2S").map_or(false, |v| v.trim() == "1") {
+            let debut_s2s = std::time::Instant::now();
+            let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
+            println!("initialisation coupe-coupe : {} coupes recalées sur {} en {:.0} s", rapport.slices.iter().filter(|s| s.registered).count(), rapport.slices.len(), debut_s2s.elapsed().as_secs_f64());
+            rapport.poses
+        } else {
+            depart
+        };
         println!("stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles", grille.dims, stacks.iter().map(|s| s.dim().2).sum::<usize>());
         // MEDOXIDE_MOTION = s2s : mouvement estimé SANS reconstruction (coupe-coupe, `register_slices_s2s`, MEDOXIDE_S2S_SWEEPS balayages, 3 par défaut), puis UNE reconstruction avec ces poses
         if std::env::var("MEDOXIDE_MOTION").map_or(false, |v| v.trim() == "s2s") {
