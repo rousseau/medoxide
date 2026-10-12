@@ -2819,6 +2819,35 @@ mod tests {
         assert!(matches!(reconstruct(&stacks[..1], &config, &device), Err(SvrError::NotEnoughStacks)));
     }
 
+    /// SONDE du backend wgpu (critères fixés avant ; blobs, 3 stacks, coupe-coupe) : sur le device par défaut de Burn avec autodiff (Metal sur le Mac), (a) le nom du device est affiché ; (b) les critères du test sur
+    /// `flex` tiennent (erreur médiane ≤ 1,0 mm sur les coupes recalées, ≥ 90 % à ≤ 2 mm) ; (c) les poses de wgpu et de `flex` diffèrent de moins de 0,2 mm en médiane (erreur de l'une à l'autre, sans mouvement
+    /// commun) ; (d) les durées sont affichées (sans critère).
+    #[test]
+    #[ignore = "sonde du backend wgpu (GPU) ; lancer avec --release --ignored --nocapture"]
+    fn probe_slice_to_slice_on_the_default_wgpu_device() {
+        let t = Temp::new("s2s_wgpu");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let depart = SlicePoses::identity(&stacks);
+        let gpu = burn::tensor::Device::default().autodiff();
+        println!("device par défaut : {gpu:?}");
+        let cpu = burn::tensor::Device::flex().autodiff();
+        let (t0, sur_cpu) = (std::time::Instant::now(), crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &cpu).unwrap());
+        let duree_cpu = t0.elapsed().as_secs_f64();
+        let (t1, sur_gpu) = (std::time::Instant::now(), crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &gpu).unwrap());
+        let duree_gpu = t1.elapsed().as_secs_f64();
+        let (e_cpu, e_gpu) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_cpu.poses, &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_gpu.poses, &vraies));
+        let recalees: Vec<usize> = sur_gpu.slices.iter().enumerate().filter(|(n, s)| s.registered && e_gpu[*n].is_finite()).map(|(n, _)| n).collect();
+        let r_gpu: Vec<f64> = recalees.iter().map(|&n| e_gpu[n]).collect();
+        let r_cpu: Vec<f64> = recalees.iter().map(|&n| e_cpu[n]).collect();
+        let part = |v: &[f64], seuil: f64| 100.0 * v.iter().filter(|&&x| x <= seuil).count() as f64 / v.len() as f64;
+        let entre = erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_gpu.poses, &sur_cpu.poses);
+        let entre_recalees: Vec<f64> = recalees.iter().map(|&n| entre[n]).collect();
+        println!("flex : {duree_cpu:.1} s, médiane {:.2} mm, ≤ 2 mm {:.0} % ; wgpu : {duree_gpu:.1} s, médiane {:.2} mm, ≤ 2 mm {:.0} % ; écart wgpu/flex : médiane {:.3} mm, max {:.2} mm ({} coupes recalées)", quantile(&r_cpu, 0.5), part(&r_cpu, 2.0), quantile(&r_gpu, 0.5), part(&r_gpu, 2.0), quantile(&entre_recalees, 0.5), quantile(&entre_recalees, 1.0), recalees.len());
+        assert!(quantile(&r_gpu, 0.5) <= 1.0, "erreur médiane wgpu {}", quantile(&r_gpu, 0.5));
+        assert!(part(&r_gpu, 2.0) >= 90.0, "part ≤ 2 mm wgpu : {}", part(&r_gpu, 2.0));
+        assert!(quantile(&entre_recalees, 0.5) < 0.2, "écart médian wgpu/flex {}", quantile(&entre_recalees, 0.5));
+    }
+
     /// Déterminisme (critère fixé avant) : deux exécutions de l'estimation coupe-coupe avec la même graine donnent des poses identiques au bit près ; une autre graine donne un ordre, donc des poses, différents.
     #[test]
     fn slice_to_slice_motion_estimation_is_deterministic() {
