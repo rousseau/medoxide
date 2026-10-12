@@ -2775,6 +2775,16 @@ mod tests {
         assert!(matches!(sortie.write_poses(&stacks[..2], &tsv), Err(SvrError::PoseMismatch)));
     }
 
+    /// Choix du device (critère fixé avant) : `DeviceKind::Cpu` donne un device `Flex` et `DeviceKind::Wgpu` un device `Wgpu`, tous deux avec autodiff (la construction ne lance aucun calcul, donc
+    /// le test ne demande pas de GPU).
+    #[test]
+    fn the_device_kind_selects_the_backend() {
+        use crate::pipeline::{autodiff_device, DeviceKind};
+        let (cpu, gpu) = (format!("{:?}", autodiff_device(DeviceKind::Cpu)), format!("{:?}", autodiff_device(DeviceKind::Wgpu)));
+        assert!(cpu.contains("Flex") && cpu.contains("Autodiff") && !cpu.contains("Wgpu"), "{cpu}");
+        assert!(gpu.contains("Wgpu") && gpu.contains("Autodiff") && !gpu.contains("Flex"), "{gpu}");
+    }
+
     /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les
     /// mêmes réglages, volume égal (à 1e-9 près, relatif) à celui de `ReconstructionProblem` avec ces poses, grille égale à `reconstruction_grid` ; (b) coupe-volume, 1 cycle : poses égales (1e-6 mm) à celles
     /// de `reconstruct_with_motion_correction` appelé directement avec la référence « sans la coupe », et DIFFÉRENTES de celles de la référence « sans le stack » (le champ `s2v_leave_slice_out` agit) ;

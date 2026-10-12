@@ -16,6 +16,23 @@ use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePo
 use crate::s2s::{register_slices_s2s, S2sConfig};
 use crate::{Stack, SvrError};
 
+/// Où se font les calculs de tenseurs (recalage et reconstruction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    /// GPU, par `wgpu` (Metal sur Mac) : le choix par défaut de la ligne de commande.
+    Wgpu,
+    /// CPU, par le backend `flex` de Burn (Rust pur, déterministe).
+    Cpu,
+}
+
+/// Le device de calcul demandé, avec la différentiation automatique activée (nécessaire au recalage).
+pub fn autodiff_device(kind: DeviceKind) -> Device {
+    match kind {
+        DeviceKind::Wgpu => Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff(),
+        DeviceKind::Cpu => Device::flex().autodiff(),
+    }
+}
+
 /// Comment le mouvement de chaque coupe est estimé.
 ///
 /// Les deux méthodes produisent les mêmes poses (une transformation rigide par coupe) ; la reconstruction

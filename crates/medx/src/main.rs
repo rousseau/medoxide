@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use medoxide_svr::pipeline::{DeviceKind, Motion, ReconstructionConfig};
 
 #[derive(Parser)]
 #[command(name = "medx", version, about = "Boîte à outils medoxide pour l'imagerie médicale")]
@@ -17,8 +18,77 @@ struct Cli {
     command: Command,
 }
 
+/// Estimation du mouvement, telle qu'écrite sur la ligne de commande (`--motion`).
+#[derive(Clone, Copy, ValueEnum)]
+enum MotionArg {
+    /// Coupe-coupe : sans volume intermédiaire, rapide
+    S2s,
+    /// Coupe-volume : coupes recalées contre un volume reconstruit, en boucle, lent
+    S2v,
+}
+
+impl From<MotionArg> for Motion {
+    fn from(m: MotionArg) -> Motion {
+        match m {
+            MotionArg::S2s => Motion::SliceToSlice,
+            MotionArg::S2v => Motion::SliceToVolume,
+        }
+    }
+}
+
+/// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
+#[derive(Clone, Copy, ValueEnum)]
+enum DeviceArg {
+    /// GPU (wgpu : Metal sur Mac)
+    Wgpu,
+    /// CPU (backend flex, déterministe)
+    Cpu,
+}
+
+impl From<DeviceArg> for DeviceKind {
+    fn from(d: DeviceArg) -> DeviceKind {
+        match d {
+            DeviceArg::Wgpu => DeviceKind::Wgpu,
+            DeviceArg::Cpu => DeviceKind::Cpu,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum SvrAction {
+    /// Reconstruit un volume 3D à partir de stacks 2D (IRM fœtale) : estime le mouvement de chaque coupe, puis reconstruit
+    Recon {
+        /// Deux stacks NIfTI au moins (`.nii` ou `.nii.gz`), de plans différents
+        #[arg(long, num_args = 2.., required = true)]
+        input: Vec<PathBuf>,
+        /// Masques cérébraux (par exemple produits par `medx fetalbet`), un par stack et dans le même ordre
+        #[arg(long, num_args = 2.., required = true)]
+        mask: Vec<PathBuf>,
+        /// Volume NIfTI reconstruit (compressé si le nom finit par `.gz`)
+        #[arg(long)]
+        output: PathBuf,
+        /// Écrit aussi le mouvement estimé de chaque coupe (texte : stack, coupe, matrice 4 x 4 en ordre colonne)
+        #[arg(long)]
+        poses: Option<PathBuf>,
+        /// Estimation du mouvement
+        #[arg(long, value_enum, default_value_t = MotionArg::S2s)]
+        motion: MotionArg,
+        /// Où se font les calculs
+        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
+        device: DeviceArg,
+        /// Côté des voxels du volume reconstruit, en mm
+        #[arg(long, default_value_t = ReconstructionConfig::default().resolution_mm)]
+        resolution_mm: f64,
+        /// Poids de la régularisation (lissage)
+        #[arg(long, default_value_t = ReconstructionConfig::default().alpha)]
+        alpha: f64,
+        /// Avec `--motion s2s` : nombre de balayages de toutes les coupes
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_sweeps)]
+        s2s_sweeps: usize,
+        /// Avec `--motion s2v` : nombre de cycles « recaler puis reconstruire »
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2v_cycles)]
+        s2v_cycles: usize,
+    },
     /// Affiche la géométrie de stacks NIfTI : dimensions, espacement, normale des coupes, boîte dans le monde
     Info {
         /// Un ou plusieurs stacks NIfTI (`.nii` ou `.nii.gz`)
@@ -56,6 +126,39 @@ enum Command {
         #[command(subcommand)]
         action: SvrAction,
     },
+}
+
+/// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit le volume (et les poses si demandé).
+fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, device: DeviceArg, config: &ReconstructionConfig) -> ExitCode {
+    if masques.len() != entrees.len() {
+        eprintln!("medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), entrees.len());
+        return ExitCode::FAILURE;
+    }
+    let debut = std::time::Instant::now();
+    let resultat = (|| -> Result<(), medoxide_svr::SvrError> {
+        let mut stacks = medoxide_svr::read_stacks(entrees)?;
+        for (s, m) in stacks.iter_mut().zip(masques) {
+            s.set_brain_mask(m)?;
+        }
+        let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
+        eprintln!("{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}", stacks.len(), config.motion, match device { DeviceArg::Wgpu => "GPU (wgpu)", DeviceArg::Cpu => "CPU (flex)" });
+        let sortie_reconstruction = medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(device.into()))?;
+        sortie_reconstruction.write_volume(sortie)?;
+        if let Some(p) = poses {
+            sortie_reconstruction.write_poses(&stacks, p)?;
+        }
+        Ok(())
+    })();
+    match resultat {
+        Ok(()) => {
+            println!("Volume écrit dans {sortie:?} en {:.0} s", debut.elapsed().as_secs_f64());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("medx svr recon : {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Affiche la géométrie de chaque stack, puis la boîte de l'ensemble (repère monde RAS+, mm).
@@ -134,6 +237,10 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
+        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, s2s_sweeps, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, s2s_sweeps, s2v_cycles, ..Default::default() };
+            svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
+        }
         Command::Fetalbet { input, output, model } => {
             // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;
             // `None` : `segment` télécharge les poids par défaut au besoin.
@@ -148,5 +255,18 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// Les définitions d'arguments sont cohérentes (pas de doublon, valeurs par défaut valides) : clap le vérifie pour toutes les sous-commandes.
+    #[test]
+    fn the_command_line_definition_is_consistent() {
+        Cli::command().debug_assert();
     }
 }

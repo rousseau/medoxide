@@ -11,8 +11,5 @@ rayon = { workspace = true }
 # Écriture du volume reconstruit au format NIfTI.
 nifti = { workspace = true }
 # Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).
-burn = { workspace = true, features = ["autodiff", "optim"] }
-
-[dev-dependencies]
-# Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU .
-burn = { workspace = true, features = ["flex"] }
+# `flex` : backend CPU de Burn (Rust pur), déterministe, sans GPU ; utilisé par les tests et par `--device cpu`.
+burn = { workspace = true, features = ["autodiff", "optim", "flex"] }
