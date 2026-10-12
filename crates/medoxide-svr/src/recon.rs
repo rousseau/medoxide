@@ -2736,6 +2736,45 @@ mod tests {
         assert!(relatif(&volumes[0], &direct(0.01, 2, 1e-12)) > 1e-4, "alpha n'agit pas");
     }
 
+    /// Écriture des sorties (critères fixés avant, blobs à 3 stacks, poses quelconques) : (a) le NIfTI relu a les mêmes dimensions, une affine égale à 1e-4 près, un espacement égal à la résolution et des valeurs `f32`
+    /// identiques ; (b) le TSV relu par `lire_poses_tsv` redonne des poses EXACTEMENT égales (le mouvement tiré est quelconque, donc non symétrique : un ordre ligne/colonne inversé serait vu) ; (c) écrire dans un dossier
+    /// inexistant renvoie `Err(Write)` ; (d) des stacks de forme différente des poses donnent `Err(PoseMismatch)`.
+    #[test]
+    fn the_pipeline_writes_the_volume_and_the_poses_so_that_they_read_back() {
+        use crate::pipeline::ReconstructionOutput;
+        let t = Temp::new("pipeline_ecriture");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let grid = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
+        let (nx, ny, nz) = grid.dims;
+        let volume = Array3::from_shape_fn(grid.dims, |(i, j, k)| (i + 3 * j + 7 * k) as f64 * 0.37 + if i == nx - 1 && j == ny - 1 && k == nz - 1 { 1000.5 } else { 0.0 });
+        let sortie = ReconstructionOutput { grid: grid.clone(), volume: volume.clone(), poses: vraies.clone() };
+        // (a) volume
+        let chemin = t.fichier("volume.nii.gz");
+        sortie.write_volume(&chemin).unwrap();
+        let relu = Stack::read(&chemin).unwrap();
+        assert_eq!(relu.dim(), grid.dims);
+        assert!((relu.affine() - grid.affine).abs().max() < 1e-4, "affine relue : {:?}", relu.affine());
+        assert!(relu.spacing().iter().all(|s| (s - 2.0).abs() < 1e-6), "espacement {:?}", relu.spacing());
+        let valeurs = medoxide_core::read_volume(&chemin).unwrap();
+        assert!(valeurs.iter().zip(volume.iter()).all(|(a, b)| *a == *b as f32), "valeurs différentes");
+        // (b) poses
+        let tsv = t.fichier("poses.tsv");
+        sortie.write_poses(&stacks, &tsv).unwrap();
+        let relues = lire_poses_tsv(&tsv, &stacks);
+        for (si, s) in stacks.iter().enumerate() {
+            for k in 0..s.dim().2 {
+                assert_eq!(relues.get(si, k), vraies.get(si, k), "pose ({si},{k})");
+            }
+        }
+        assert!(vraies.get(0, 4) != &vraies.get(0, 4).transpose(), "les poses de test sont symétriques : le test ne voit pas un ordre inversé");
+        // (c) dossier inexistant
+        let absent = t.fichier("absent/volume.nii.gz");
+        assert!(matches!(sortie.write_volume(&absent), Err(SvrError::Write { .. })));
+        assert!(matches!(sortie.write_poses(&stacks, &t.fichier("absent/poses.tsv")), Err(SvrError::Write { .. })));
+        // (d) forme des stacks
+        assert!(matches!(sortie.write_poses(&stacks[..2], &tsv), Err(SvrError::PoseMismatch)));
+    }
+
     /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les
     /// mêmes réglages, volume égal (à 1e-9 près, relatif) à celui de `ReconstructionProblem` avec ces poses, grille égale à `reconstruction_grid` ; (b) coupe-volume, 1 cycle : poses égales (1e-6 mm) à celles
     /// de `reconstruct_with_motion_correction` appelé directement avec la référence « sans la coupe », et DIFFÉRENTES de celles de la référence « sans le stack » (le champ `s2v_leave_slice_out` agit) ;

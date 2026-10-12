@@ -4,7 +4,10 @@
 //! `MEDOXIDE_*` lues par des tests) en une seule structure, [`ReconstructionConfig`], que la ligne de
 //! commande `medx svr` remplit.
 
+use std::path::Path;
+
 use burn::prelude::Device;
+use nifti::{writer::WriterOptions, NiftiHeader};
 use ndarray::Array3;
 
 use crate::align::{reconstruct_with_motion_correction, LoopConfig};
@@ -86,6 +89,46 @@ pub struct ReconstructionOutput {
     pub volume: Array3<f64>,
     /// Mouvement estimé de chaque coupe (composé après l'affine d'en-tête).
     pub poses: SlicePoses,
+}
+
+impl ReconstructionOutput {
+    /// Écrit le volume au format NIfTI (`float32`), dans le repère monde de la grille (sform) ; le fichier est compressé si `path` finit par `.gz`.
+    ///
+    /// # Erreurs
+    /// [`SvrError::Write`] si le fichier ne peut pas être écrit (dossier absent, droits).
+    pub fn write_volume(&self, path: &Path) -> Result<(), SvrError> {
+        let mut header = NiftiHeader::default();
+        header.sform_code = 1;
+        header.srow_x = std::array::from_fn(|c| self.grid.affine[(0, c)] as f32);
+        header.srow_y = std::array::from_fn(|c| self.grid.affine[(1, c)] as f32);
+        header.srow_z = std::array::from_fn(|c| self.grid.affine[(2, c)] as f32);
+        let r = self.grid.resolution_mm as f32;
+        header.pixdim = [1.0, r, r, r, 1.0, 1.0, 1.0, 1.0];
+        WriterOptions::new(path)
+            .reference_header(&header)
+            .write_nifti(&self.volume.mapv(|v| v as f32))
+            .map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+    }
+
+    /// Écrit le mouvement de chaque coupe : un fichier texte, une ligne par coupe, `stack \t coupe \t` puis les 16 valeurs de la matrice 4 × 4 **en ordre colonne**
+    /// (lisible en Python par `reshape(4, 4, order="F")`). `stacks` donne les stacks de `poses`, dans le même ordre ; l'indice de stack écrit est celui de cette liste.
+    /// Les nombres sont écrits avec leur représentation décimale la plus courte qui se relit exactement.
+    ///
+    /// # Erreurs
+    /// [`SvrError::PoseMismatch`] si `stacks` n'a pas la forme des poses ; [`SvrError::Write`] si le fichier ne peut pas être écrit.
+    pub fn write_poses(&self, stacks: &[Stack], path: &Path) -> Result<(), SvrError> {
+        if !self.poses.matches(stacks) {
+            return Err(SvrError::PoseMismatch);
+        }
+        let mut lines = Vec::new();
+        for (s, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                let values: Vec<String> = self.poses.get(s, k).iter().map(|v| format!("{v:?}")).collect();
+                lines.push(format!("{s}\t{k}\t{}", values.join("\t")));
+            }
+        }
+        std::fs::write(path, lines.join("\n")).map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+    }
 }
 
 /// **Reconstruit un volume** à partir de stacks (avec masque cérébral) : définit la grille, estime le mouvement de chaque coupe selon

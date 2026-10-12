@@ -8,11 +8,11 @@ medoxide-core = { path = "../medoxide-core" }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
 rayon = { workspace = true }
+# Écriture du volume reconstruit au format NIfTI.
+nifti = { workspace = true }
 # Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).
 burn = { workspace = true, features = ["autodiff", "optim"] }
 
 [dev-dependencies]
-# Pour écrire des fichiers NIfTI synthétiques dans les tests (cas d'erreur).
-nifti = { workspace = true }
 # Backend CPU de Burn (Rust pur) pour les tests : déterministe, sans GPU .
 burn = { workspace = true, features = ["flex"] }
