@@ -61,3 +61,76 @@ rééchantillonnage sont réécrits en Rust.
 - **Attention U-Net**, l'architecture. Oktay O. et al., *Attention U-Net: Learning
   Where to Look for the Pancreas*, [arXiv:1804.03999](https://arxiv.org/abs/1804.03999), 2018.
 - **Burn**, le framework d'apprentissage profond en Rust : <https://burn.dev>.
+
+## SVR, reconstruction coupe-vers-volume
+
+`medx svr recon` reconstruit un volume 3D à partir de stacks de coupes 2D acquises avec du mouvement fœtal.
+Le principe est celui de la reconstruction coupe-vers-volume (*slice-to-volume reconstruction*, SVR) de
+Kuklisova-Murgasova et al. (2012) ; l'implémentation est la nôtre, en Rust et Burn, et fait des choix différents
+de SVRTK et de NeSVoR (voir plus bas).
+
+### Modèle d'acquisition
+
+Chaque coupe est une version floue du volume, vue sous sa propre position : le volume est échantillonné
+selon le repère de la coupe (affine de son en-tête, corrigée du mouvement estimé) puis lissé par une réponse
+impulsionnelle (PSF) gaussienne orientée avec la coupe : écart type dans le plan = 1,2 × taille du pixel / 2,355,
+hors plan = épaisseur / 2,355. L'**opérateur adjoint** (la rétroprojection) est écrit et vérifié exactement.
+Seuls les pixels du **masque cérébral** de la coupe sont utilisés.
+
+### Reconstruction du volume
+
+Le volume est discrétisé sur une grille isotrope (0,8 mm par défaut) autour des masques, avec une marge de
+10 mm. Pour des poses données, on minimise
+
+> ½ Σ ‖ m · (A x − y) ‖² + (α / 2) ‖ G x ‖²
+
+où `A` est l'opérateur d'acquisition de chaque coupe, `y` ses pixels, `m` son masque et `G` le gradient du
+volume (régularisation de Tikhonov d'ordre 1, `α` = 0,01 par défaut). La solution est calculée par
+**gradient conjugué** sur les équations normales, à partir de l'adjoint normalisé. Nous avons comparé six
+optimiseurs sur cet objectif (gradient conjugué, plus forte pente, Barzilai-Borwein, Jacobi, Adam et L-BFGS
+de Burn) : le gradient conjugué est le plus précis.
+
+### Estimation du mouvement
+
+Chaque coupe a un mouvement **rigide** propre (3 rotations, 3 translations), exprimé autour du barycentre du
+masque ; les paramètres sont estimés par **Adam**, avec le gradient calculé par la **différentiation
+automatique de Burn**. Deux méthodes, au choix (`--motion`) :
+
+- **Coupe-coupe (`s2s`)** : deux coupes de stacks différents se croisent le long d'une droite, où leurs
+  intensités doivent concorder. Le coût d'une coupe est la corrélation normalisée moyenne des profils
+  d'intensité échantillonnés (tous les 0,5 mm) sur ses droites d'intersection avec les coupes des autres
+  stacks. Quand la pose change, la droite bouge : le coût est dérivable à travers la géométrie. Toutes les
+  coupes sont recalées l'une après l'autre en **balayages** (ordre aléatoire à graine fixe, chaque coupe voit
+  les poses déjà mises à jour), une mise à jour n'étant acceptée que si la concordance ne baisse pas. Aucun
+  volume n'est reconstruit pendant l'estimation ; le volume est reconstruit une fois à la fin.
+- **Coupe-volume (`s2v`)** : chaque coupe est recalée contre un volume reconstruit, par corrélation
+  normalisée. La référence **ne contient pas la coupe recalée** (sa contribution est retirée exactement de
+  l'adjoint normalisé) : sinon chaque coupe retrouverait sa propre erreur dans la référence. Les coupes
+  mal recalées (corrélation finale < 0,9) sont relancées depuis 6 poses de départ tirées dans ±5 mm. Le
+  volume est reconstruit puis les coupes recalées, pendant 6 cycles.
+
+### Ce que SVRTK fait et que nous ne faisons pas (encore)
+
+SVRTK, la référence de la communauté, ajoute notamment l'alignement global des stacks, la mise à l'échelle
+des intensités par coupe, un champ de biais, des statistiques robustes avec exclusion de coupes et un lissage
+adaptatif préservant les contours. Nous n'avons rien de tout cela dans la chaîne par défaut (une mise à
+l'échelle par coupe est écrite et testée mais non branchée). À l'inverse, notre opérateur a un adjoint exact,
+notre objectif est écrit (donc validable), et les références « sans la coupe » n'existent pas chez SVRTK, qui
+recale contre un volume contenant la coupe.
+
+### Références
+
+- **Principe de la SVR fœtale** : Kuklisova-Murgasova M., Quaghebeur G., Rutherford M. A., Hajnal J. V.,
+  Schnabel J. A. *Reconstruction of fetal brain MRI with intensity matching and complete outlier removal*.
+  Medical Image Analysis 16(8):1550-1564, 2012. <https://doi.org/10.1016/j.media.2012.07.004>
+- **SVRTK**, comparé à nos résultats (utilisé comme outil externe, licence Apache 2.0) :
+  <https://github.com/SVRTK/SVRTK>. Référence demandée par le projet : Uus A. et al. *Deformable
+  Slice-to-Volume Registration for Motion Correction in Fetal Body MRI and Placenta*. IEEE Transactions on
+  Medical Imaging 39(9):2750-2759, 2020. <https://doi.org/10.1109/TMI.2020.2974844>
+- **NeSVoR**, comparé à nos résultats (modèle d'acquisition et estimation du mouvement coupe-volume sans
+  SVoRT) : Xu J., Moyer D., Gagoski B., Iglesias J. E., Grant P. E., Golland P., Adalsteinsson E. *NeSVoR:
+  Implicit Neural Representation for Slice-to-Volume Reconstruction in MRI*. IEEE Transactions on Medical
+  Imaging, 2023. <https://doi.org/10.1109/TMI.2023.3236216>
+- **Atlas fœtal** utilisé pour les tests sur données simulées : Gholipour A. et al. *A normative
+  spatiotemporal MRI atlas of the fetal brain for automatic segmentation and analysis of early brain
+  growth*. Scientific Reports 7:476, 2017. <https://doi.org/10.1038/s41598-017-00525-w>

@@ -356,7 +356,7 @@ pub struct StackAlignment {
 /// aligner les stacks les uns sur les autres. Il retire la partie *cohérente* du mouvement (le décalage entre stacks) avant le recalage par coupe de la boucle.
 ///
 /// Le stack 0 est l'**ancre** : il ne bouge pas et définit le repère. Chaque autre stack est recalé (même NCC et même recalage robuste que par coupe, sur tous ses
-/// pixels de masque, sous-échantillonnés à [`MAX_STACK_POINTS`] ; pivot = barycentre de ces pixels) contre la référence `adjoint normalisé des autres stacks`
+/// pixels de masque, sous-échantillonnés à `MAX_STACK_POINTS` ; pivot = barycentre de ces pixels) contre la référence `adjoint normalisé des autres stacks`
 /// ([`normalized_adjoint_with_poses`], sur la grille `grid`, sans gradient conjugué). D'abord une passe d'ancrage (le stack `s` contre les stacks `0..s` déjà alignés),
 /// puis `sweeps` balayages où chaque stack non ancre est recalé contre **tous** les autres. La correction `D` d'un stack est composée à gauche : pose `D · M` pour chaque
 /// coupe de pose `M`.

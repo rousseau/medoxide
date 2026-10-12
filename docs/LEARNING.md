@@ -1350,4 +1350,14 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-12 — Une commande complète : `ValueEnum`, `?` dans une fermeture, et le choix du backend de Burn
+
+- **Quoi (Rust)** : (1) `#[derive(ValueEnum)]` de clap transforme une énumération en argument de ligne de commande : `--motion s2s` devient `MotionArg::S2s`, et toute autre valeur est refusée avec la liste des valeurs possibles. L'énumération est définie dans `medx`, pas dans la bibliothèque (qui ne dépend pas de clap), et une implémentation de `From` la convertit vers le type de la bibliothèque. (2) L'opérateur `?` ne s'utilise que dans une fonction qui renvoie un `Result` ; `svr_recon` renvoie un `ExitCode`. On enveloppe donc la suite d'opérations dans une **fermeture** typée appelée aussitôt, `(|| -> Result<(), SvrError> { … })()`, dont on examine ensuite le résultat avec un `match` : un seul endroit pour afficher l'erreur. (3) `Option::map_or_else(défaut, conversion)` : valeur par défaut calculée seulement si l'option est vide (ici le device par défaut de l'algorithme). (4) Un `match` **exhaustif** sur `Motion` dans `default_device_kind` : ajouter un algorithme ne compile plus tant qu'on n'a pas décidé de son device.
+- **Quoi (Burn)** : un `Device` se construit explicitement, `Device::flex()` (CPU, Rust pur) ou `Device::wgpu(DeviceKind::DefaultDevice)` (GPU), puis `.autodiff()` active la différentiation automatique. `Device::default()` dépend des fonctionnalités compilées : on préfère le constructeur explicite. **Mesure** : sur ce projet, le GPU est *plus lent* que le CPU (118 s contre 18 s sur des stacks simulés, 556 s contre 150 s sur un sujet réel) parce que le recalage lance des centaines de milliers de petits calculs ; les poses sont de même qualité mais pas identiques (f32 sur GPU, minimum local parfois différent). Le CPU est déterministe, le GPU non reproductible au bit près.
+- **Pourquoi ici** : rendre le SVR utilisable sans lire les tests (jalon 1 : `medx svr recon`) ; le défaut de calcul dépend de l'algorithme, décidé sur mesures et non par principe.
+- **Où** : `crates/medx/src/main.rs` (`MotionArg`, `DeviceArg`, `svr_recon`), `crates/medoxide-svr/src/pipeline.rs` (`Motion`, `DeviceKind`, `autodiff_device`, `default_device_kind`, `reconstruct`, `write_volume`, `write_poses`), documentation publique dans `book/src/svr.md`.
+- **Test de régression sur données réelles** : la commande, sur CPU, redonne exactement les poses obtenues avant son écriture (identiques au bit près) ; le volume diffère de 7e-7 en relatif (sommes parallélisées dans un ordre non fixé).
+
+---
+
 *(à compléter à la prochaine étape)*

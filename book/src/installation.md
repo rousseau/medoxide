@@ -7,9 +7,10 @@ pour l'instant.
 
 - **Rust**, installé via [rustup](https://rustup.rs). Burn 0.22.0-pre.4 demande
   Rust 1.95 ou plus récent ; la configuration du dépôt suit la version stable.
-- **Un GPU compatible `wgpu`** : Metal sur Mac, Vulkan ou DX12 ailleurs. Seul un
-  Mac avec GPU Apple a été testé.
-- **Les poids du modèle** (`attunet.bpk`, 121 Mo), décrits plus bas.
+- **Un GPU compatible `wgpu`** pour `medx fetalbet` : Metal sur Mac, Vulkan ou DX12
+  ailleurs. Seul un Mac avec GPU Apple a été testé. `medx svr` n'en a pas besoin : il
+  calcule sur le CPU par défaut ([CPU ou GPU](svr.md#cpu-ou-gpu)).
+- **Les poids du modèle** (`attunet.bpk`, 121 Mo), décrits plus bas, pour `medx fetalbet`.
 
 ## Compiler
 

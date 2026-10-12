@@ -6,7 +6,8 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 | Sous-commande | Méthode |
 |---|---|
 | `medx fetalbet` | Masque cérébral en IRM fœtale (portage de [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction)) |
-| `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère ; première brique de la reconstruction coupe-vers-volume, en développement |
+| `medx svr recon` | Reconstruction coupe-vers-volume : volume 3D à partir de stacks 2D d'IRM fœtale, avec estimation du mouvement de chaque coupe (coupe-coupe ou coupe-volume) ; en développement |
+| `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère |
 
 ## Démarrage rapide
 
@@ -22,6 +23,17 @@ cargo build --release
 
 Pour utiliser un fichier de poids local (hors ligne), passez `--model` ou définissez
 `MEDOXIDE_MODEL`.
+
+Reconstruction d'un volume à partir de stacks (au moins deux, de plans différents, avec un
+masque cérébral chacun, par exemple obtenus par `medx fetalbet`) :
+
+```bash
+./target/release/medx svr recon --input stack_ax.nii.gz stack_cor.nii.gz stack_sag.nii.gz \
+  --mask masque_ax.nii.gz masque_cor.nii.gz masque_sag.nii.gz --output volume.nii.gz --poses poses.tsv
+```
+
+Calculs sur le CPU par défaut ; voir [la page SVR](https://rousseau.github.io/medoxide/svr.html) pour les
+options, les durées et les limites.
 
 ## Documentation
 

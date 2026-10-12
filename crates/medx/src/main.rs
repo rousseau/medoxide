@@ -39,9 +39,9 @@ impl From<MotionArg> for Motion {
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
-    /// GPU (wgpu : Metal sur Mac)
+    /// GPU (wgpu : Metal sur Mac), plus lent aujourd'hui
     Wgpu,
-    /// CPU (backend flex, déterministe)
+    /// CPU de la machine (backend flex, déterministe)
     Cpu,
 }
 
@@ -73,9 +73,9 @@ enum SvrAction {
         /// Estimation du mouvement
         #[arg(long, value_enum, default_value_t = MotionArg::S2s)]
         motion: MotionArg,
-        /// Où se font les calculs
-        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
-        device: DeviceArg,
+        /// Où se font les calculs. Par défaut : le CPU de la machine, choix fait par algorithme (le GPU est aujourd'hui plus lent)
+        #[arg(long, value_enum)]
+        device: Option<DeviceArg>,
         /// Côté des voxels du volume reconstruit, en mm
         #[arg(long, default_value_t = ReconstructionConfig::default().resolution_mm)]
         resolution_mm: f64,
@@ -129,7 +129,7 @@ enum Command {
 }
 
 /// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit le volume (et les poses si demandé).
-fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, device: DeviceArg, config: &ReconstructionConfig) -> ExitCode {
+fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, device: Option<DeviceArg>, config: &ReconstructionConfig) -> ExitCode {
     if masques.len() != entrees.len() {
         eprintln!("medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), entrees.len());
         return ExitCode::FAILURE;
@@ -141,8 +141,9 @@ fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path,
             s.set_brain_mask(m)?;
         }
         let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
-        eprintln!("{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}", stacks.len(), config.motion, match device { DeviceArg::Wgpu => "GPU (wgpu)", DeviceArg::Cpu => "CPU (flex)" });
-        let sortie_reconstruction = medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(device.into()))?;
+        let kind = device.map_or_else(|| medoxide_svr::pipeline::default_device_kind(config.motion), DeviceKind::from);
+        eprintln!("{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}", stacks.len(), config.motion, match kind { DeviceKind::Wgpu => "GPU (wgpu)", DeviceKind::Cpu => "CPU (flex)" });
+        let sortie_reconstruction = medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
         sortie_reconstruction.write_volume(sortie)?;
         if let Some(p) = poses {
             sortie_reconstruction.write_poses(&stacks, p)?;

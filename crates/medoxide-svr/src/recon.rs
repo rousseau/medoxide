@@ -2785,6 +2785,14 @@ mod tests {
         assert!(gpu.contains("Wgpu") && gpu.contains("Autodiff") && !gpu.contains("Flex"), "{gpu}");
     }
 
+    /// Device par défaut par algorithme (critère fixé avant) : le CPU pour le coupe-coupe comme pour le coupe-volume (décision de conception après les mesures wgpu : plus lent, mêmes poses).
+    #[test]
+    fn the_default_device_depends_on_the_algorithm_and_is_the_cpu_for_now() {
+        use crate::pipeline::{default_device_kind, DeviceKind, Motion};
+        assert_eq!(default_device_kind(Motion::SliceToSlice), DeviceKind::Cpu);
+        assert_eq!(default_device_kind(Motion::SliceToVolume), DeviceKind::Cpu);
+    }
+
     /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les
     /// mêmes réglages, volume égal (à 1e-9 près, relatif) à celui de `ReconstructionProblem` avec ces poses, grille égale à `reconstruction_grid` ; (b) coupe-volume, 1 cycle : poses égales (1e-6 mm) à celles
     /// de `reconstruct_with_motion_correction` appelé directement avec la référence « sans la coupe », et DIFFÉRENTES de celles de la référence « sans le stack » (le champ `s2v_leave_slice_out` agit) ;

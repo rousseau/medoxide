@@ -19,10 +19,21 @@ use crate::{Stack, SvrError};
 /// Où se font les calculs de tenseurs (recalage et reconstruction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
-    /// GPU, par `wgpu` (Metal sur Mac) : le choix par défaut de la ligne de commande.
+    /// GPU, par `wgpu` (Metal sur Mac) ; à demander explicitement, il est aujourd'hui plus lent (voir [`default_device_kind`]).
     Wgpu,
-    /// CPU, par le backend `flex` de Burn (Rust pur, déterministe).
+    /// CPU de la machine, par le backend `flex` de Burn (Rust pur, déterministe).
     Cpu,
+}
+
+/// Device par défaut d'un algorithme de mouvement : le CPU de la machine pour les deux, le choix étant fait **par algorithme** (le `match` oblige à décider pour tout nouvel algorithme).
+///
+/// Mesures (étude 06, §41) : le recalage coupe par coupe lance un grand nombre de petits calculs, que le GPU (`wgpu`) traite plus lentement que le CPU (coupe-coupe : 118 s contre 18 s sur des
+/// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Le coupe-volume n'a pas été mesuré sur GPU : il garde le CPU par prudence, à revoir après mesure.
+pub fn default_device_kind(motion: Motion) -> DeviceKind {
+    match motion {
+        Motion::SliceToSlice => DeviceKind::Cpu,
+        Motion::SliceToVolume => DeviceKind::Cpu,
+    }
 }
 
 /// Le device de calcul demandé, avec la différentiation automatique activée (nécessaire au recalage).
