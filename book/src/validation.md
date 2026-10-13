@@ -129,7 +129,19 @@ donc plus petit que dans le tableau** : environ +0,02 sur le sujet calme (0,877 
 sur le sujet agité (0,774 à 0,830 contre 0,717). Le juge ne mesure pas la netteté : SVRTK est visiblement plus net
 que nos volumes à α = 0,1.
 
-**Les sujets très agités, à netteté égale.** Pour écarter le biais de lissage, nous comparons `s2s` et « sans correction » sur la **frontière juge / netteté** (plusieurs valeurs de α pour chaque méthode, et pour chaque valeur de `s2s` le juge de « sans correction » interpolé à la même netteté) : agité 2 : `s2s` +0,005 (équivalent) ; agité 3 : −0,016 (moins bon). Le biais de lissage n'explique donc pas l'échec. En revanche, avec **trois** stacks (usage réel), les images de `s2s` et `s2v` montrent plus de structure que « sans correction » (anneau cortical, ventricules), et la concordance aux intersections des poses est nettement meilleure que celle des poses d'en-tête : le protocole à deux stacks, très peu contraint pour un fœtus très agité, est probablement trop dur pour trancher.
+**Les sujets très agités, à netteté égale.** Pour écarter le biais de lissage, nous comparons `s2s` et « sans correction » sur la **frontière juge / netteté** (plusieurs valeurs de α pour chaque méthode, et pour chaque valeur de `s2s` le juge de « sans correction » interpolé à la même netteté) : agité 2 : `s2s` +0,005 (équivalent) ; agité 3 : −0,016 (moins bon). Le biais de lissage n'explique donc pas l'échec à deux stacks. Avec **trois** stacks pour reconstruire (usage réel), les images de `s2s` et `s2v` montrent plus de structure que « sans correction » (anneau cortical, ventricules), la concordance aux intersections des poses est nettement meilleure que celle des poses d'en-tête, et l'évaluation à quatre stacks ci-dessous donne un net avantage à la correction : le protocole à deux stacks, très peu contraint pour un fœtus très agité, est trop dur pour trancher.
+
+**À quatre stacks (trois pour reconstruire).** Un seul de nos sujets (agité 1) a quatre stacks TRUFI : chaque stack est mis de côté à son tour (quatre repliements) et les trois autres servent à reconstruire, ce qui est plus proche de l'usage réel que le protocole à deux stacks. Nos méthodes sont à α = 0,1 (couverture minimale 1, comme le juge l'exige), SVRTK et NeSVoR à leurs défauts :
+
+| Méthode | Juge (moyenne des 4 repliements) | Netteté `S` |
+|---|---|---|
+| sans correction | 0,779 | 0,063 |
+| `s2s` | 0,818 | 0,075 |
+| `s2v` | **0,848** | 0,079 |
+| SVRTK | 0,738 | 0,085 |
+| NeSVoR | 0,769 | 0,081 |
+
+La correction du mouvement **aide ici, et les volumes corrigés sont aussi plus nets** (ce n'est donc pas un effet de lissage). À netteté égale (frontière obtenue en variant α de « sans correction »), `s2s` dépasse « sans correction » de +0,051 (α = 0,1) et de +0,034 (α = 0,3) ; à α = 0,03, `s2s` est plus net que toute la frontière de « sans correction » (0,097 contre 0,082 au maximum) tout en gardant +0,045 de juge. `s2v` dépasse « sans correction » sur les quatre repliements (de +0,062 à +0,075) ; `s2s` échoue sur l'un d'eux (le stack sagittal mis de côté : 0,735 contre 0,761). À netteté comparable, nos volumes sont meilleurs que ceux de SVRTK et de NeSVoR (par exemple `s2s` à α = 0,03 : netteté 0,097, juge 0,806, contre 0,085 et 0,738 pour SVRTK, 0,081 et 0,769 pour NeSVoR). **Réserve** : un seul sujet, donc un indice et non une preuve ; il confirme que le protocole à deux stacks est trop dur pour un fœtus très agité.
 
 **Concordance aux intersections** (mesure neutre du mouvement : les intensités de deux coupes qui se croisent
 doivent concorder le long de leur droite d'intersection ; trois stacks, mesurée sur les paires de coupes entre le
