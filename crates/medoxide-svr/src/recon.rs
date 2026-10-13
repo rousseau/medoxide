@@ -3863,6 +3863,10 @@ mod tests {
                 "  recalage {} : {} coupes recalées sur {}, {} relancées, correction moyenne {:.2} mm, NCC finale moyenne {:.3}",
                 n + 1, rec.len(), r.slices.len(), rec.iter().filter(|s| s.runs > 1).count(), rec.iter().map(|s| s.correction_rms_mm).sum::<f64>() / rec.len() as f64, rec.iter().map(|s| s.ncc_final).sum::<f64>() / rec.len() as f64
             );
+            // une ligne par coupe recalée (diagnostic de la calibration du seuil de relance) : cycle, stack, coupe, NCC du premier recalage, NCC finale, nombre de recalages
+            for s in rec {
+                println!("SLICE\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}", n + 1, s.stack, s.slice, s.ncc_first, s.ncc_final, s.runs);
+            }
         }
         ecrire_image_grille(&sortie.join(format!("ours_loop{etiquette}.nii.gz")), &resultat.volume, &grille);
         println!("poses remplacées par la médiane locale, par cycle : {:?}", resultat.pose_replacements);
