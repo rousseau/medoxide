@@ -1378,4 +1378,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-13 — Mesurer avant d'optimiser : le calcul dont personne ne lit le résultat
+
+- **Quoi (méthode)** : après avoir parallélisé le recalage (×1,2) puis écrit un recalage par lots (utile seulement sur GPU, et encore plus lent que le CPU sur la chaîne complète), j'ai **chronométré chaque phase** de la boucle coupe-volume : le gradient conjugué prenait ~44 s par cycle (près de 300 s sur ~450), le recalage seulement 20 à 28 s. Un essai « moins d'itérations aux cycles intermédiaires » a donné des poses **identiques** à la pleine précision : preuve que ces reconstructions intermédiaires **ne sont jamais lues** (la référence de chaque coupe vient de l'adjoint normalisé des autres coupes, pas du volume reconstruit). Les sauter (`skip_unused_reconstructions`) a divisé la durée par 2,5 (374-403 s → 151 s) avec des poses identiques au bit près sur un sujet réel. Leçon : avant de rendre un calcul plus rapide, vérifier que son résultat sert ; un test « poses identiques » est ce qui prouve qu'un calcul est mort.
+- **Quoi (Rust)** : une `Option` rend explicite l'absence de résultat (`let resultat = if inutile { None } else { Some(…) }`), et `if let Some(r) = resultat` ne met à jour l'état que si le calcul a eu lieu ; le compilateur force à traiter le cas `None` partout où on lit le volume (`expect` avec un message, seulement dans la branche où il existe forcément).
+- **Résultats négatifs gardés** : le sous-échantillonnage des pixels (un sur deux dans chaque direction) n'a réduit la durée que de 13 % pour une concordance un peu plus basse : retiré (pas d'option inutile). Le recalage par lots sur GPU (349 s) reste plus lent que le CPU (151 s) : le calcul est plus efficace sur CPU pour des coupes de ~15 000 pixels, et la chaîne GPU est dominée par le coût des opérations de pose et de gradient plutôt que par l'échantillonnage que la sonde avait mesuré (sonde : 14 ms pour 36 coupes ; chaîne complète : ~60 ms par itération et par lot de 22 coupes).
+- **Où** : `crates/medoxide-svr/src/align.rs` (`reconstruct_with_motion_correction`, `register_leave_window_out_by_batches`), `crates/medoxide-svr/src/diff.rs` (`register_slices_robust_batch`, `apply_pose_batch`), tests `skipping_the_unused_reconstructions_keeps_the_poses` et `the_batched_registration_equals_the_per_slice_one`.
+
+---
+
 *(à compléter à la prochaine étape)*

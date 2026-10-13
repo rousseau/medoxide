@@ -28,7 +28,7 @@ pub enum DeviceKind {
 /// Device par défaut d'un algorithme de mouvement : le CPU de la machine pour les deux, le choix étant fait **par algorithme** (le `match` oblige à décider pour tout nouvel algorithme).
 ///
 /// Mesures (étude 06, §41) : le recalage coupe par coupe lance un grand nombre de petits calculs, que le GPU (`wgpu`) traite plus lentement que le CPU (coupe-coupe : 118 s contre 18 s sur des
-/// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Coupe-volume, sujet réel à trois stacks : 1 038 s sur CPU ; sur GPU, calcul interrompu après 90 min (au moins 5 fois plus lent).
+/// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Coupe-volume, sujet réel à trois stacks : 151 s sur CPU ; sur GPU 349 s avec le recalage par lots (`s2v_batched`), après avoir dépassé 90 min coupe par coupe : le CPU reste le plus rapide.
 pub fn default_device_kind(motion: Motion) -> DeviceKind {
     match motion {
         Motion::SliceToSlice => DeviceKind::Cpu,
@@ -89,6 +89,8 @@ pub struct ReconstructionConfig {
     pub s2v_leave_slice_out: bool,
     /// Coupe-volume : recaler toutes les coupes d'un stack par lots (voir [`crate::diff::register_slices_robust_batch`]). Même calcul ; bien plus rapide sur GPU, sans gain sur CPU.
     pub s2v_batched: bool,
+    /// Coupe-volume : ne pas reconstruire aux cycles intermédiaires (avec `s2v_leave_slice_out`, ces volumes ne servent pas au recalage) ; seule la reconstruction finale est faite. Sans effet sur les poses.
+    pub s2v_skip_unused_reconstructions: bool,
 }
 
 impl Default for ReconstructionConfig {
@@ -107,6 +109,7 @@ impl Default for ReconstructionConfig {
             s2v_suspect_ncc: 0.9,
             s2v_leave_slice_out: true,
             s2v_batched: false,
+            s2v_skip_unused_reconstructions: true,
         }
     }
 }
@@ -195,6 +198,7 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
 pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
     let cycles = config.s2v_cycles;
     LoopConfig {
+        skip_unused_reconstructions: config.s2v_skip_unused_reconstructions && config.s2v_leave_slice_out,
         cycles,
         alpha: config.alpha,
         cg_max_iterations: config.cg_max_iterations,

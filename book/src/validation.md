@@ -89,6 +89,8 @@ principales sont comparées à des références écrites séparément ; la plupa
 | Poses écrites par `--poses` | relecture | exactement identiques |
 | `medx svr recon --device cpu` (`s2s`, 3 stacks, sujet réel) | résultat de la version de développement | poses identiques bit à bit, volume à 7e-7 près |
 | `medx svr recon --motion s2v --device cpu` (3 stacks, sujet réel) | résultat de la version de développement | poses identiques bit à bit (98 coupes) |
+| Recalage coupe-volume par lots (`--device wgpu`) | recalage coupe par coupe (blobs, CPU) | poses identiques (écart 0) ; sujet réel sur GPU : concordance 0,8513 contre 0,8516 sur CPU |
+| Reconstructions intermédiaires sautées | boucle complète (blobs ; sujet réel) | poses identiques bit à bit (blobs et 98 coupes réelles), volume final à 8e-3 près |
 
 ## Évaluation sur données réelles
 
@@ -125,7 +127,7 @@ critère, atteint 0,727 : la comparaison n'est pas neutre pour lui.
 | Méthode | Un sujet, 3 stacks |
 |---|---|
 | medoxide `s2s` (mouvement + reconstruction) | 150 s |
-| medoxide `s2v` | 8 à 17 minutes (le recalage des coupes est parallèle ; à charge égale, il est environ 20 % plus rapide qu'en série) |
+| medoxide `s2v` | 151 s sur CPU (349 s sur GPU par lots) |
 | SVRTK (Docker, arm64) | 1 à 3 minutes |
 | NeSVoR (CPU, 2 stacks) | 3 à 5 minutes |
 

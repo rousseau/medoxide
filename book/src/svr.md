@@ -48,8 +48,8 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 
 | `--motion` | Principe | Durée | À retenir |
 |---|---|---|---|
-| `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 2 à 3 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
-| `s2v` | Chaque coupe est recalée contre un volume reconstruit **qui ne la contient pas**, puis le volume est reconstruit avec les nouvelles poses, en boucle. | environ 8 à 17 minutes pour 3 stacks (98 coupes) : le temps varie du simple au double selon la charge de la machine | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
+| `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 2,5 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
+| `s2v` | Chaque coupe est recalée contre une référence calculée à partir des **autres** coupes (elle ne contient pas la coupe recalée), en 6 cycles ; le volume n'est reconstruit qu'à la fin, avec les poses finales. | environ 2,5 minutes pour 3 stacks (98 coupes) sur un Mac à 12 cœurs | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
 et la reconstruction du volume est la même.
@@ -65,12 +65,12 @@ très grand nombre de petits calculs, que le GPU (`--device wgpu`, Metal sur Mac
 |---|---|---|
 | `s2s`, stacks simulés | 18 s | 118 s |
 | `s2s`, un sujet réel (3 stacks) | 150 s | 556 s |
-| `s2v`, un sujet réel (3 stacks) | 1 038 s | plus de 5 400 s (interrompu) |
+| `s2v`, un sujet réel (3 stacks) | 151 s | 349 s (recalage par lots) |
 
 Les poses obtenues sur GPU diffèrent un peu de celles du CPU sur quelques coupes (calcul en
 `f32` sur GPU : le minimum local trouvé n'est pas toujours le même), sans être moins bonnes.
 Sur le CPU, le résultat est **reproductible** : deux exécutions donnent exactement les mêmes poses.
-Pour le coupe-volume, le calcul sur GPU a été interrompu après 90 minutes, contre 17 minutes sur le CPU.
+Pour le coupe-volume, le calcul sur GPU coupe par coupe a été interrompu après 90 minutes ; avec `--device wgpu`, la commande recale les coupes **par lots** (toutes les coupes d'un stack dans un seul calcul), ce qui ramène la durée à 349 s, toujours plus que les 151 s du CPU.
 
 ## Fichier de poses
 

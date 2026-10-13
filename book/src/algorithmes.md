@@ -106,8 +106,9 @@ automatique de Burn**. Deux méthodes, au choix (`--motion`) :
 - **Coupe-volume (`s2v`)** : chaque coupe est recalée contre un volume reconstruit, par corrélation
   normalisée. La référence **ne contient pas la coupe recalée** (sa contribution est retirée exactement de
   l'adjoint normalisé) : sinon chaque coupe retrouverait sa propre erreur dans la référence. Les coupes
-  mal recalées (corrélation finale < 0,9) sont relancées depuis 6 poses de départ tirées dans ±5 mm. Le
-  volume est reconstruit puis les coupes recalées, pendant 6 cycles.
+  mal recalées (corrélation finale < 0,9) sont relancées depuis 6 poses de départ tirées dans ±5 mm. Les
+  coupes sont recalées en 6 cycles (chaque cycle repart des poses du précédent) ; la référence ne dépendant
+  pas du volume reconstruit, celui-ci n'est calculé qu'une fois, à la fin.
 
 ### Ce que SVRTK fait et que nous ne faisons pas (encore)
 

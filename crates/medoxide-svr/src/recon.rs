@@ -2175,7 +2175,7 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let identite = SlicePoses::identity(&stacks);
-        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig {
+        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig { skip_unused_reconstructions: false,
             cycles: 1, alpha: 0.01, cg_max_iterations: 30, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: 0,
             leave_slice_out_window: 0, pose_outlier_window: fenetre, pose_outlier_max_mm: mm, pose_outlier_max_deg: deg,
         };
@@ -2696,10 +2696,10 @@ mod tests {
     /// relancées : le test de câblage de bout en bout (sans relance, pour la durée) ne les couvre pas, celui-ci si.
     #[test]
     fn the_pipeline_maps_every_setting_to_the_loop_config() {
-        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, ..Default::default() };
+        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, s2v_skip_unused_reconstructions: true, ..Default::default() };
         for (sans_la_coupe, par_lots) in [(true, false), (false, true), (true, true)] {
             let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, s2v_batched: par_lots, ..base.clone() };
-            let attendu = align::LoopConfig {
+            let attendu = align::LoopConfig { skip_unused_reconstructions: sans_la_coupe,
                 cycles: 4, alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3,
                 robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, batched: par_lots, ..RobustConfig::new(0.7) },
                 leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
@@ -2820,7 +2820,7 @@ mod tests {
         // (b) coupe-volume
         let config_v = ReconstructionConfig { motion: Motion::SliceToVolume, s2v_cycles: 1, ..config.clone() };
         let sortie_v = reconstruct(&stacks, &config_v, &device).unwrap();
-        let boucle = |sans_la_coupe: bool| align::LoopConfig {
+        let boucle = |sans_la_coupe: bool| align::LoopConfig { skip_unused_reconstructions: false,
             cycles: 1, alpha: config.alpha, cg_max_iterations: config.cg_max_iterations, cg_tolerance: config.cg_tolerance,
             robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, ..RobustConfig::new(config.s2v_suspect_ncc) },
             leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 1 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 1 } else { 0 },
@@ -3159,6 +3159,50 @@ mod tests {
                 assert_eq!(ecart(&parallele.poses, &encore.poses), 0.0, "deux exécutions parallèles diffèrent");
             }
         }
+    }
+
+    /// Reconstructions inutiles sautées (critères fixés avant, blobs, 2 stacks, 2 cycles) : (a) quand TOUS les cycles recalent « sans la coupe », les poses finales avec `skip_unused_reconstructions` sont IDENTIQUES (1e-9) à celles de la boucle
+    /// complète, car ce recalage ne lit pas le volume du cycle ; (b) le volume final égale celui de la boucle complète à 2e-2 près en relatif (départ à froid contre départ à chaud de la dernière reconstruction) ; (c) l'observateur
+    /// n'est appelé qu'aux reconstructions faites : seulement la dernière (cycle 2) dans le cas (a), contre 3 appels sans le saut ; (d) si seulement 1 cycle sur 2 est « sans la coupe », le cycle 1 (recalé contre le volume du cycle) et
+    /// le cycle 2 sont reconstruits, pas le cycle 0 (aucune égalité de poses n'est alors attendue : le cycle 1 lit un volume qui dépend du départ) ; (e) avec plus de cycles « sans la coupe » que de cycles, la dernière reconstruction est quand même faite.
+    #[test]
+    fn skipping_the_unused_reconstructions_keeps_the_poses() {
+        let t = Temp::new("loop_saut");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks: Vec<Stack> = simuler_blobs(&t, &volume, &modeles, &vraies)[..2].to_vec(); // deux stacks suffisent (et le test est plus court)
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
+        let robuste = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, lr_decay: 0.93, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 1, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
+        let boucle = |saute: bool, loso: usize| align::LoopConfig {
+            cycles: 2, alpha: 0.01, cg_max_iterations: 300, cg_tolerance: 1e-6, robust: robuste, leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: loso,
+            leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0, skip_unused_reconstructions: saute,
+        };
+        let (mut appels_complet, mut appels_saut, mut appels_partiel) = (Vec::new(), Vec::new(), Vec::new());
+        let complet = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(false, 2), &device, |c, _, _| appels_complet.push(c)).unwrap();
+        let saut = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 2), &device, |c, _, _| appels_saut.push(c)).unwrap();
+        // (a) poses identiques
+        let ecart = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (complet.poses.get(si, k) - saut.poses.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        assert!(ecart < 1e-9, "poses différentes : {ecart}");
+        // (b) volume final
+        let norme = complet.volume.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let diff = complet.volume.iter().zip(saut.volume.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+        println!("poses : écart {ecart:.1e} ; volume final : écart relatif {diff:.2e} ; observateur {appels_complet:?} contre {appels_saut:?}");
+        assert!(diff < 2e-2, "volume final : écart relatif {diff}");
+        // (c) observateur
+        assert_eq!(appels_complet, vec![0, 1, 2]);
+        assert_eq!(appels_saut, vec![2]);
+        assert_eq!(saut.cg_iterations.len(), 1);
+        // (d) 2 cycles sur 3 « sans la coupe »
+        align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 1), &device, |c, _, _| appels_partiel.push(c)).unwrap();
+        assert_eq!(appels_partiel, vec![1, 2]);
+        // (e) plus de cycles « sans la coupe » que de cycles : la dernière reconstruction est toujours faite (sinon la boucle n'aurait aucun volume à rendre)
+        let mut appels_debord = Vec::new();
+        let debord = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 5), &device, |c, _, _| appels_debord.push(c)).unwrap();
+        assert_eq!(appels_debord, vec![2]);
+        assert!(debord.volume.iter().all(|v| v.is_finite()));
     }
 
     /// Recalage par lots (critères fixés avant, jeu de blobs sur CPU, mêmes réglages que le test du parallèle) : (a) avec `batched = true` mêmes coupes recalées et mêmes nombres de recalages (relances comprises) qu'avec
@@ -3929,7 +3973,7 @@ mod tests {
             start_amplitude_mm: std::env::var("MEDOXIDE_START_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()),
             ..RobustConfig::new(0.9)
         };
-        let config = align::LoopConfig { cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
@@ -4132,7 +4176,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -4208,7 +4252,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();

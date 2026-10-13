@@ -613,6 +613,9 @@ pub struct LoopConfig {
     pub cg_max_iterations: usize,
     /// Tolérance relative du gradient conjugué.
     pub cg_tolerance: f64,
+    /// Saute les reconstructions **inutiles** : avec `leave_one_slice_out_cycles`, la référence de chaque coupe est calculée à partir des autres coupes (adjoint normalisé), pas à partir du volume reconstruit du cycle ;
+    /// ce volume ne servirait qu'à amorcer la reconstruction suivante. Si `true`, les cycles concernés ne reconstruisent pas (et n'appellent pas l'observateur) : seule la dernière reconstruction est faite.
+    pub skip_unused_reconstructions: bool,
     /// Réglages du recalage de chaque coupe.
     pub robust: RobustConfig,
     /// Nombre de premiers cycles où chaque stack est recalé contre une reconstruction faite **sans lui** (avec les poses courantes des autres
@@ -646,7 +649,7 @@ pub struct LoopResult {
     pub volume: Array3<f64>,
     /// Rapport du recalage de chaque cycle (`config.cycles` rapports).
     pub cycles: Vec<AlignmentReport>,
-    /// Itérations du gradient conjugué de chaque reconstruction (`config.cycles + 1` valeurs).
+    /// Itérations du gradient conjugué de chaque reconstruction faite (`config.cycles + 1` valeurs, moins celles sautées par `skip_unused_reconstructions`).
     pub cg_iterations: Vec<usize>,
     /// Nombre de poses remplacées par la médiane locale après chaque recalage (`config.cycles` valeurs ; vide si le rejet est désactivé).
     pub pose_replacements: Vec<usize>,
@@ -676,18 +679,26 @@ pub fn reconstruct_with_motion_correction(
     let mut hors_stack: Vec<Option<Array3<f64>>> = vec![None; stacks.len()]; // démarrage à chaud de chaque reconstruction « sans le stack s »
     let (mut rapports, mut iterations, mut remplacements) = (Vec::new(), Vec::new(), Vec::new());
     for c in 0..=config.cycles {
-        let probleme = ReconstructionProblem::with_poses(grid, stacks, &poses, config.alpha)?;
-        let depart = x.take().unwrap_or_else(|| probleme.initial_guess());
-        let resultat = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance);
-        iterations.push(resultat.iterations);
-        observateur(c, &resultat.x, &poses);
+        // Avec la référence « sans la coupe », le volume reconstruit d'un cycle intermédiaire ne sert pas au recalage : on peut le sauter (seule la dernière reconstruction est utile).
+        let inutile = config.skip_unused_reconstructions && c < config.cycles && c < config.leave_one_slice_out_cycles;
+        let resultat = if inutile {
+            None
+        } else {
+            let probleme = ReconstructionProblem::with_poses(grid, stacks, &poses, config.alpha)?;
+            let depart = x.take().unwrap_or_else(|| probleme.initial_guess());
+            let resultat = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance);
+            iterations.push(resultat.iterations);
+            observateur(c, &resultat.x, &poses);
+            Some(resultat)
+        };
         if c < config.cycles {
             let rapport = if c < config.leave_one_slice_out_cycles {
                 register_slices_leave_window_out(grid, stacks, &poses, config.leave_slice_out_window, config.coarse_sigma_voxels, config.robust, device)?
             } else if c < config.leave_one_stack_out_cycles {
                 recaler_sans_soi_meme(grid, stacks, &poses, config, device, &mut hors_stack)?
             } else {
-                let reference = Volume::new(resultat.x.mapv(|v| v as f32), grid.affine)?;
+                let x_cycle = &resultat.as_ref().expect("reconstruction faite hors du cas `inutile`").x;
+                let reference = Volume::new(x_cycle.mapv(|v| v as f32), grid.affine)?;
                 register_slices_coarse_to_fine(stacks, &poses, &reference, config.coarse_sigma_voxels, config.robust, device)?
             };
             poses = rapport.poses.clone();
@@ -698,7 +709,9 @@ pub fn reconstruct_with_motion_correction(
             }
             rapports.push(rapport);
         }
-        x = Some(resultat.x);
+        if let Some(r) = resultat {
+            x = Some(r.x);
+        }
     }
     Ok(LoopResult { poses, volume: x.expect("au moins une reconstruction"), cycles: rapports, cg_iterations: iterations, pose_replacements: remplacements })
 }
