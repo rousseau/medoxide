@@ -125,7 +125,7 @@ critère, atteint 0,727 : la comparaison n'est pas neutre pour lui.
 | Méthode | Un sujet, 3 stacks |
 |---|---|
 | medoxide `s2s` (mouvement + reconstruction) | 150 s |
-| medoxide `s2v` | 12 à 21 minutes (17 minutes mesurées avec la commande) |
+| medoxide `s2v` | 8 à 17 minutes (le recalage des coupes est parallèle ; à charge égale, il est environ 20 % plus rapide qu'en série) |
 | SVRTK (Docker, arm64) | 1 à 3 minutes |
 | NeSVoR (CPU, 2 stacks) | 3 à 5 minutes |
 

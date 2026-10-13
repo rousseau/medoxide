@@ -3122,6 +3122,45 @@ mod tests {
         assert!(matches!(align::register_slices_leave_slice_out(&grille, &stacks, &SlicePoses::identity(&stacks[..1]), RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
     }
 
+    /// Recalage « sans la fenêtre » en parallèle (critères fixés avant, jeu de blobs, poses de départ perturbées, recalage court : l'égalité ne dépend pas de la convergence) : (a) pour (fenêtre, σ) = (0, 0), (2, 0), (0, 1) la
+    /// version parallèle égale l'implémentation en série (somme de la fenêtre par glissement) : mêmes coupes recalées et mêmes nombres de recalages, poses à 1e-6 près (toute entrée de la matrice, mm), NCC à 1e-6 près ;
+    /// (b) deux exécutions parallèles donnent des poses IDENTIQUES au bit près ; (c) les coupes non recalées gardent exactement leur pose.
+    #[test]
+    fn the_parallel_leave_window_out_registration_equals_the_serial_one() {
+        let t = Temp::new("loso_parallele");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
+        let config = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 1, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
+        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        for (fenetre, sigma) in [(0usize, 0.0), (2, 0.0), (0, 1.0)] {
+            let parallele = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
+            let serie = align::register_slices_leave_window_out_en_serie(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
+            assert_eq!(parallele.slices.len(), serie.slices.len());
+            for (p, q) in parallele.slices.iter().zip(&serie.slices) {
+                assert_eq!((p.stack, p.slice, p.registered, p.runs), (q.stack, q.slice, q.registered, q.runs), "(fenêtre {fenetre}, σ {sigma})");
+                assert!((p.ncc_first - q.ncc_first).abs() < 1e-6 && (p.ncc_final - q.ncc_final).abs() < 1e-6, "NCC différentes : {p:?} contre {q:?}");
+            }
+            let e = ecart(&parallele.poses, &serie.poses);
+            println!("(fenêtre {fenetre}, σ {sigma}) : {} coupes recalées, écart de poses parallèle/série {e:.2e}", parallele.slices.iter().filter(|r| r.registered).count());
+            assert!(e < 1e-6, "(fenêtre {fenetre}, σ {sigma}) : écart de poses {e}");
+            assert!(parallele.slices.iter().filter(|r| r.registered).count() >= 20, "trop peu de coupes recalées");
+            // (c) coupes non recalées : pose inchangée
+            for r in parallele.slices.iter().filter(|r| !r.registered) {
+                assert_eq!(parallele.poses.get(r.stack, r.slice), depart.get(r.stack, r.slice));
+            }
+            if fenetre == 0 && sigma == 0.0 {
+                // (b) déterminisme
+                let encore = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
+                assert_eq!(ecart(&parallele.poses, &encore.poses), 0.0, "deux exécutions parallèles diffèrent");
+            }
+        }
+    }
+
     /// MESURE (temporaire) : où la référence sans la coupe échoue-t-elle ?
     #[test]
     #[ignore = "mesure temporaire"]

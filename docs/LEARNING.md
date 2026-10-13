@@ -1360,4 +1360,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-13 — Paralléliser le recalage des coupes : `Send` / `Sync`, et pourquoi le gain reste petit
+
+- **Quoi (Rust)** : `rayon` (`par_iter().map(…).collect()`) lance une tâche par coupe ; le compilateur n'accepte que si les données partagées sont `Sync` (lisibles depuis plusieurs threads) et les résultats `Send` (transmissibles entre threads). Ici le `Device` de Burn avec différentiation automatique et les tenseurs passent ce contrôle : on peut construire des graphes de calcul distincts depuis plusieurs threads. `collect` rend les résultats **dans l'ordre des tâches** : le résultat ne dépend donc pas du nombre de threads (poses identiques au bit près à la version en série, vérifié par test).
+- **Quoi (méthode)** : une **comparaison contrôlée** (ancien et nouveau code alternés, mêmes conditions) a montré un gain de **×1,21** (109 → 90 s, 133 → 110 s par cycle), alors que deux mesures prises à des moments différents suggéraient ×2 : la charge de la machine fait varier les durées de 40 % d'une passe à l'autre. Règle retenue : ne comparer que des passes alternées dans le même créneau.
+- **Pourquoi le gain est petit** : l'échantillonnage de la pile d'appels (`sample`) montre ~36 % du temps actif passé dans `swtch_pri` (des threads qui cèdent la main en boucle) et dans un verrou `parking_lot` : le **serveur de différentiation automatique de Burn est partagé** et les threads s'y disputent l'accès ; le taux d'occupation reste à ~4 cœurs sur 12 et la durée d'un cycle ne dépend presque pas du nombre de threads (85 à 110 s de 4 à 12 threads). Le coût dominant du recalage est le **grand nombre de petites opérations** (une coupe = des centaines d'opérations sur de petits tenseurs, répétées 120 fois), pas le calcul. La piste suivante est de **regrouper les coupes dans un seul calcul par lots** (tenseurs `[coupes, pixels, …]`), ce qui amortit ce coût fixe et convient aussi au GPU.
+- **Où** : `crates/medoxide-svr/src/align.rs` (`register_slices_leave_window_out` parallèle ; l'ancienne version en série sert d'oracle de test), test `the_parallel_leave_window_out_registration_equals_the_serial_one` (écart 0 avec la version en série, 8 mutants sur 8 détectés).
+
+---
+
 *(à compléter à la prochaine étape)*

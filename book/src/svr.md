@@ -49,7 +49,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--motion` | Principe | Durée | À retenir |
 |---|---|---|---|
 | `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 2 à 3 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
-| `s2v` | Chaque coupe est recalée contre un volume reconstruit **qui ne la contient pas**, puis le volume est reconstruit avec les nouvelles poses, en boucle. | environ 12 à 21 minutes pour 3 stacks (17 minutes sur un sujet réel de 98 coupes) | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
+| `s2v` | Chaque coupe est recalée contre un volume reconstruit **qui ne la contient pas**, puis le volume est reconstruit avec les nouvelles poses, en boucle. | environ 8 à 17 minutes pour 3 stacks (98 coupes) : le temps varie du simple au double selon la charge de la machine | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
 et la reconstruction du volume est la même.

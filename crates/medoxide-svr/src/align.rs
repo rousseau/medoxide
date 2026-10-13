@@ -4,6 +4,7 @@
 use burn::prelude::Device;
 use nalgebra::{Matrix4, Vector3};
 use ndarray::{Array3, ArrayView2, Axis};
+use rayon::prelude::*;
 
 use crate::diff::{pose_to_matrix, register_slice_robust, rotation_scale_mm, RobustConfig, VolumeTensors};
 use crate::recon::{adjoint_sums, normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses, SUPPORT_MIN};
@@ -163,6 +164,73 @@ pub fn register_slices_leave_window_out(
         return Err(SvrError::InvalidBlur);
     }
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
+    let geometrie = grid.zeros();
+    // Chaque coupe est une tâche indépendante (sa référence, son recalage) : on les lance en parallèle. `collect` garde l'ordre des tâches, donc le résultat ne dépend pas du nombre de threads.
+    let taches: Vec<(usize, usize)> = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).collect();
+    let resultats: Vec<(Matrix4<f64>, SliceReport)> = taches
+        .par_iter()
+        .map(|&(si, k)| {
+            let stack = &stacks[si];
+            let courante = *poses.get(si, k);
+            let Some(preparee) = preparer_coupe(stack, k, courante) else {
+                return (Matrix4::identity(), SliceReport { stack: si, slice: k, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 });
+            };
+            // référence : adjoint normalisé de toutes les coupes sauf la fenêtre `|j − k| ≤ window` du même stack (somme de la fenêtre recalculée ici, sans glissement entre coupes)
+            let masque = stack.brain_mask().expect("vérifié").voxels();
+            let nz = stack.dim().2;
+            let (mut somme_n, mut somme_d) = (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims));
+            for j in k.saturating_sub(window)..=(k + window).min(nz - 1) {
+                let coupe = stack.slice(j).expect("coupe existante").with_motion(*poses.get(si, j));
+                let (n, d) = contribution_de_la_coupe(&geometrie, &coupe, masque.index_axis(Axis(2), j));
+                somme_n += &n;
+                somme_d += &d;
+            }
+            let image = reference_sans_la_coupe(&numerateur, &denominateur, &somme_n, &somme_d);
+            let reference = Volume::new(image, grid.affine).expect("l'affine d'une grille est inversible");
+            let (delta, rapport) = if coarse_sigma_voxels > 0.0 {
+                // gros vers fin : une passe contre la référence floutée de cette coupe, puis une passe contre la référence nette depuis la pose de la première
+                let floue = reference.blurred(coarse_sigma_voxels).expect("σ validé");
+                let (d1, rapport1) = recaler_preparee(&preparee, si, k, &VolumeTensors::new(&floue, device), config, device);
+                match preparer_coupe(stack, k, d1 * courante) {
+                    Some(deuxieme) => {
+                        let (d2, rapport2) = recaler_preparee(&deuxieme, si, k, &VolumeTensors::new(&reference, device), config, device);
+                        (d2 * d1, rapport2)
+                    }
+                    None => (d1, rapport1),
+                }
+            } else {
+                recaler_preparee(&preparee, si, k, &VolumeTensors::new(&reference, device), config, device)
+            };
+            (delta, rapport)
+        })
+        .collect();
+    let mut nouvelles = poses.clone();
+    let mut rapports = Vec::with_capacity(resultats.len());
+    for (&(si, k), (delta, rapport)) in taches.iter().zip(resultats) {
+        if rapport.registered {
+            nouvelles.set(si, k, delta * poses.get(si, k));
+        }
+        rapports.push(rapport);
+    }
+    Ok(AlignmentReport { poses: nouvelles, slices: rapports })
+}
+
+/// Implémentation **en série** de [`register_slices_leave_window_out`] (somme de la fenêtre mise à jour par glissement, coupes l'une après l'autre) : l'oracle des tests de la version parallèle.
+#[cfg(test)]
+pub(crate) fn register_slices_leave_window_out_en_serie(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    window: usize,
+    coarse_sigma_voxels: f64,
+    config: RobustConfig,
+    device: &Device,
+) -> Result<AlignmentReport, SvrError> {
+    verifier_entrees(stacks, poses)?;
+    if !(coarse_sigma_voxels >= 0.0) || !coarse_sigma_voxels.is_finite() {
+        return Err(SvrError::InvalidBlur);
+    }
+    let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let mut nouvelles = poses.clone();
     let mut rapports = Vec::new();
     for (si, stack) in stacks.iter().enumerate() {
@@ -195,6 +263,7 @@ pub fn register_slices_leave_window_out(
     Ok(AlignmentReport { poses: nouvelles, slices: rapports })
 }
 
+#[cfg(test)]
 /// Pour chaque coupe `k` du stack `si` (dans l'ordre), appelle `f(k, Some(référence))` si `veut(k)` (la référence : `(N − Σ nⱼ)/(D − Σ dⱼ)` sur la fenêtre `|j − k| ≤ window` du même stack,
 /// 0 là où le support restant est < [`SUPPORT_MIN`]), sinon `f(k, None)`. `numerateur` et `denominateur` sont les sommes `N` et `D` de toutes les coupes de tous les stacks à `poses`.
 pub(crate) fn parcourir_references_sans_fenetre(
