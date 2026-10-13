@@ -129,6 +129,8 @@ donc plus petit que dans le tableau** : environ +0,02 sur le sujet calme (0,877 
 sur le sujet agité (0,774 à 0,830 contre 0,717). Le juge ne mesure pas la netteté : SVRTK est visiblement plus net
 que nos volumes à α = 0,1.
 
+**Les sujets très agités, à netteté égale.** Pour écarter le biais de lissage, nous comparons `s2s` et « sans correction » sur la **frontière juge / netteté** (plusieurs valeurs de α pour chaque méthode, et pour chaque valeur de `s2s` le juge de « sans correction » interpolé à la même netteté) : agité 2 : `s2s` +0,005 (équivalent) ; agité 3 : −0,016 (moins bon). Le biais de lissage n'explique donc pas l'échec. En revanche, avec **trois** stacks (usage réel), les images de `s2s` et `s2v` montrent plus de structure que « sans correction » (anneau cortical, ventricules), et la concordance aux intersections des poses est nettement meilleure que celle des poses d'en-tête : le protocole à deux stacks, très peu contraint pour un fœtus très agité, est probablement trop dur pour trancher.
+
 **Concordance aux intersections** (mesure neutre du mouvement : les intensités de deux coupes qui se croisent
 doivent concorder le long de leur droite d'intersection ; trois stacks, mesurée sur les paires de coupes entre le
 2ᵉ et le 3ᵉ stack, moyenne sur les six sujets) :
