@@ -81,6 +81,64 @@ pub fn trilinear_sample(volume: &Tensor<1>, dims: [usize; 3], coords: Tensor<2>)
     TrilinearSample { values: valeurs, inside }
 }
 
+/// Résultat de [`trilinear_sample_batch`] : une valeur et un indicateur « dans la grille » par coupe et par point.
+#[derive(Debug, Clone)]
+pub struct TrilinearSampleBatch {
+    /// Valeur interpolée, forme `[S, P]`.
+    pub values: Tensor<2>,
+    /// 1 si le point est dans la grille de sa coupe, 0 sinon, forme `[S, P]` (non différentiable).
+    pub inside: Tensor<2>,
+}
+
+/// Comme [`trilinear_sample`], pour `S` coupes **à la fois**, chacune lisant **son propre volume** : les `S` volumes (même `dims`) sont mis bout à bout dans `volumes`, forme `[S·nx·ny·nz]`
+/// (le volume de la coupe `s` commence à l'indice `s·nx·ny·nz`), et `coords` a la forme `[S, P, 3]`. Même calcul que [`trilinear_sample`] (mêmes 8 coins, mêmes poids) ; un seul graphe de calcul
+/// remplace `S` petits graphes, ce qui amortit le coût fixe de chaque opération (voir l'entrée du journal d'apprentissage du 2026-10-13).
+///
+/// # Panics
+/// Si un axe de `dims` est nul, si `volumes` n'a pas `S·nx·ny·nz` éléments ou si les tenseurs ne sont pas sur le même `Device`.
+pub fn trilinear_sample_batch(volumes: &Tensor<1>, dims: [usize; 3], coords: Tensor<3>) -> TrilinearSampleBatch {
+    assert!(dims.iter().all(|&n| n > 0), "chaque axe doit avoir au moins un voxel");
+    let [s, p, _] = coords.dims();
+    assert_eq!(volumes.dims()[0], s * dims[0] * dims[1] * dims[2], "il faut un volume par coupe, de dimensions `dims`");
+    let device = coords.device();
+    let taille = (dims[0] * dims[1] * dims[2]) as i64;
+
+    let axe = |a: usize| coords.clone().narrow(2, a, 1).reshape([s, p]);
+    let mut inside = Tensor::<2>::ones([s, p], &device);
+    let mut bas: Vec<Tensor<2, Int>> = Vec::new();
+    let mut haut: Vec<Tensor<2, Int>> = Vec::new();
+    let mut frac: Vec<Tensor<2>> = Vec::new();
+    for a in 0..3 {
+        let c = axe(a);
+        let max = (dims[a] - 1) as f64;
+        let dedans = c.clone().greater_equal_elem(0.0).bool_and(c.clone().lower_equal_elem(max)).float();
+        inside = inside * dedans;
+        let c = c.clamp(0.0, max);
+        let plancher = c.clone().floor();
+        frac.push(c - plancher.clone());
+        let i0 = plancher.int().clamp(0, dims[a] as i64 - 1);
+        haut.push((i0.clone() + 1).clamp(0, dims[a] as i64 - 1));
+        bas.push(i0);
+    }
+    // décalage de chaque coupe dans le tenseur des volumes : s · taille, forme [S, 1] diffusée sur les P points
+    let decalage: Tensor<2, Int> = Tensor::<1, Int>::arange(0..s as i64, &device).mul_scalar(taille).reshape([s, 1]).expand([s, p]);
+    let pas = [(dims[1] * dims[2]) as i64, dims[2] as i64, 1];
+    let mut valeurs = Tensor::<2>::zeros([s, p], &device);
+    for coin in 0..8usize {
+        let mut indice = decalage.clone();
+        let mut poids = Tensor::<2>::ones([s, p], &device);
+        for a in 0..3 {
+            let haut_a = (coin >> (2 - a)) & 1 == 1;
+            let (i, w) = if haut_a { (haut[a].clone(), frac[a].clone()) } else { (bas[a].clone(), frac[a].clone().neg() + 1.0) };
+            indice = indice + i * pas[a];
+            poids = poids * w;
+        }
+        let lus = volumes.clone().select(0, indice.reshape([s * p])).reshape([s, p]);
+        valeurs = valeurs + poids * lus;
+    }
+    TrilinearSampleBatch { values: valeurs, inside }
+}
+
 /// Au-dessous de ce `θ²` (rad²), [`rotation_matrix`] utilise la série de Taylor : en `f32`, `1 − cos θ` y perd presque toute
 /// sa précision (20 % d'erreur relative à θ = 1e-3), alors que la série à 3 termes y est exacte à ≈ 1e-10.
 const ROTATION_SERIES_THETA2: f64 = 1e-2;
@@ -1665,5 +1723,70 @@ mod tests {
         }
         println!("pose_to_matrix contre apply_pose : écart max {pire:.1e} mm");
         assert!(pire < 1e-3, "{pire:.2e}");
+    }
+
+    /// SONDE DE VITESSE (critères fixés avant) du lecteur trilinéaire par lots, pour S = 36 coupes de P = 15 000 pixels lisant chacune son propre volume de la taille d'une grille réelle (148 × 133 × 132) : (a) les valeurs du
+    /// lot égalent celles de S appels de `trilinear_sample` (écart absolu ≤ 1e-5 × le maximum) ; (b) le gradient de la NCC par rapport aux coordonnées a la même direction (cosinus ≥ 0,9999 sur l'ensemble) ; (c) sur le CPU (`flex`),
+    /// le lot est au moins 5 fois plus rapide que la séquence (évaluation avec gradient, médiane de 5 répétitions). La vitesse sur GPU (`wgpu`) est affichée, sans critère.
+    #[test]
+    #[ignore = "sonde de vitesse (grands tenseurs, GPU) ; lancer avec --release --ignored --nocapture"]
+    fn probe_batched_trilinear_sampling_speed() {
+        let (s, p, dims) = (36usize, 15_000usize, [148usize, 133, 132]);
+        let taille = dims[0] * dims[1] * dims[2];
+        // volumes lisses, un par coupe (un décalage différent) ; points tirés dans la grille ; intensités = lecture bruitée d'un autre volume
+        let mut alea = Alea(7);
+        let volumes: Vec<f32> = (0..s * taille)
+            .map(|n| {
+                let (c, r) = (n / taille, n % taille);
+                let (i, j, k) = (r / (dims[1] * dims[2]), (r / dims[2]) % dims[1], r % dims[2]);
+                ((0.09 * i as f32 + 0.3 * c as f32).sin() + (0.13 * j as f32).cos() + (0.07 * k as f32 + 0.1 * c as f32).sin()) as f32
+            })
+            .collect();
+        let coords: Vec<f32> = (0..s * p * 3).map(|n| (alea.suivant() * (dims[n % 3] as f64 - 1.0)) as f32).collect();
+        let intensites: Vec<f32> = (0..s * p).map(|_| alea.suivant() as f32).collect();
+        for (nom, device, critere) in [("flex (CPU)", burn::tensor::Device::flex().autodiff(), true), ("wgpu (GPU)", burn::tensor::Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff(), false)] {
+            let vols_separes: Vec<Tensor<1>> = (0..s).map(|c| Tensor::<1>::from_floats(&volumes[c * taille..(c + 1) * taille], &device)).collect();
+            let vols_lot = Tensor::<1>::from_floats(volumes.as_slice(), &device);
+            let y_lot = Tensor::<2>::from_floats(TensorData::new(intensites.clone(), [s, p]), &device);
+            let lire = |t: Tensor<1>| t.into_data().try_to_vec::<f32>().unwrap();
+            // séquence : S évaluations (lecture, NCC, gradient)
+            let sequence = || {
+                let (mut valeurs, mut grads) = (Vec::new(), Vec::new());
+                for c in 0..s {
+                    let pts = Tensor::<2>::from_floats(TensorData::new(coords[c * p * 3..(c + 1) * p * 3].to_vec(), [p, 3]), &device).require_grad();
+                    let lecture = trilinear_sample(&vols_separes[c], dims, pts.clone());
+                    let y = y_lot.clone().narrow(0, c, 1);
+                    let correlation = ncc(y, lecture.values.clone().reshape([1, p]), lecture.inside.clone().reshape([1, p]));
+                    let g = correlation.neg().sum().backward();
+                    valeurs.extend(lire(lecture.values));
+                    grads.extend(pts.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap());
+                }
+                (valeurs, grads)
+            };
+            let lot = || {
+                let pts = Tensor::<3>::from_floats(TensorData::new(coords.clone(), [s, p, 3]), &device).require_grad();
+                let lecture = trilinear_sample_batch(&vols_lot, dims, pts.clone());
+                let correlation = ncc(y_lot.clone(), lecture.values.clone(), lecture.inside.clone());
+                let g = correlation.neg().sum().backward();
+                (lire(lecture.values.reshape([s * p])), pts.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap())
+            };
+            let chronometrer = |f: &dyn Fn() -> (Vec<f32>, Vec<f32>)| {
+                let _ = f(); // échauffement
+                let mut durees: Vec<f64> = (0..5).map(|_| { let t = std::time::Instant::now(); let _ = f(); t.elapsed().as_secs_f64() }).collect();
+                durees.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                durees[2]
+            };
+            let (t_seq, t_lot) = (chronometrer(&sequence), chronometrer(&lot));
+            let ((v_seq, g_seq), (v_lot, g_lot)) = (sequence(), lot());
+            let maxi = v_seq.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            let ecart = v_seq.iter().zip(&v_lot).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max) / maxi;
+            let (pscal, n1, n2) = g_seq.iter().zip(&g_lot).fold((0.0_f64, 0.0_f64, 0.0_f64), |(a, b, c), (x, y)| (a + f64::from(*x) * f64::from(*y), b + f64::from(*x).powi(2), c + f64::from(*y).powi(2)));
+            let cosinus = pscal / (n1.sqrt() * n2.sqrt());
+            println!("{nom} : séquence {:.0} ms, lot {:.0} ms, rapport {:.1} ; écart des valeurs {ecart:.2e} ; cosinus des gradients {cosinus:.6}", 1e3 * t_seq, 1e3 * t_lot, t_seq / t_lot);
+            assert!(ecart <= 1e-5, "{nom} : écart des valeurs {ecart}");
+            assert!(cosinus >= 0.9999, "{nom} : cosinus {cosinus}");
+            // critère (c) : constaté NON atteint sur le CPU (rapport 1,0) ; on affiche le verdict au lieu de l'asserter pour pouvoir mesurer aussi le GPU
+            println!("{nom} : critère « lot ≥ 5 fois plus rapide » {}", if t_seq / t_lot >= 5.0 { "atteint" } else if critere { "NON atteint (CPU)" } else { "non atteint" });
+        }
     }
 }

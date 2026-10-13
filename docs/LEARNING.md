@@ -1369,4 +1369,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-13 — Le recalage par lots : une lecture trilinéaire pour `S` coupes à la fois, et une hypothèse à moitié fausse
+
+- **Quoi (Burn)** : `trilinear_sample_batch` lit `S` volumes (un par coupe, mis bout à bout dans un seul tenseur de forme `[S·nx·ny·nz]`) en `P` points chacun, avec des tenseurs `[S, P, …]` : un décalage d'indice par coupe (`Tensor::arange`, `mul_scalar`, `reshape` puis `expand` pour le diffuser sur les points) et une lecture par indices aplatis (`select`), au lieu de `S` graphes de calcul séparés. La NCC (`ncc`) était déjà écrite par lots (`[S, P]`).
+- **Pourquoi ici** : le recalage coupe par coupe est le goulot de l'algorithme coupe-volume (environ la moitié de chaque cycle sont des relances). Hypothèse : le coût vient d'un coût **fixe** par opération (lancement, graphe), que le regroupement amortit.
+- **Mesure (sonde, 36 coupes × 15 000 pixels, volumes de la taille d'une vraie grille)** : sur **CPU** l'hypothèse est **fausse** (séquence 66 ms, lot 81 ms : une coupe ne coûte que ~2 ms, c'est du vrai calcul) ; sur **GPU** elle est **vraie** (séquence 188 ms, lot 14 ms : ×13, soit 4,7 fois plus vite que le CPU). Valeurs identiques, gradients identiques (cosinus 1,000000). Leçon : le même code se comporte de façon opposée selon le backend ; on mesure sur chaque cible avant de décider, et un résultat négatif (« le GPU est plus lent ») ne vaut que pour la formulation mesurée.
+- **Où** : `crates/medoxide-svr/src/diff.rs` (`trilinear_sample_batch`, test ignoré `probe_batched_trilinear_sampling_speed`).
+
+---
+
 *(à compléter à la prochaine étape)*
