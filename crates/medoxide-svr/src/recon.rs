@@ -291,6 +291,8 @@ pub struct ReconstructionProblem<'a> {
     domain: Array3<bool>,
     initial: Array3<f32>,
     support: Array3<f32>,
+    /// Poids par arête de la régularisation (`None` : tous égaux à 1, la régularisation de Tikhonov).
+    edge_weights: Option<EdgeWeights>,
 }
 
 impl<'a> ReconstructionProblem<'a> {
@@ -315,7 +317,7 @@ impl<'a> ReconstructionProblem<'a> {
         }
         let init = normalized_adjoint_with_poses(grid, stacks, poses)?;
         let domain = init.support.mapv(|s| s >= SUPPORT_MIN);
-        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, poses: poses.clone(), domain, initial: init.image, support: init.support })
+        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, poses: poses.clone(), domain, initial: init.image, support: init.support, edge_weights: None })
     }
 
     /// Voxels inconnus du problème.
@@ -377,7 +379,7 @@ impl<'a> ReconstructionProblem<'a> {
                 (g1, d1 + d2)
             })
             .unwrap_or_else(|| (Array3::<f64>::zeros(dims), 0.0));
-        let regularization = regularization(x, &self.domain, self.grid.resolution_mm, self.alpha, &mut gradient);
+        let regularization = regularization(x, &self.domain, self.grid.resolution_mm, self.alpha, self.edge_weights.as_ref(), &mut gradient);
         for (g, &d) in gradient.iter_mut().zip(self.domain.iter()) {
             if !d {
                 *g = 0.0;
@@ -410,6 +412,24 @@ fn dot(a: &Array3<f64>, b: &Array3<f64>) -> f64 {
 impl<'a> ReconstructionProblem<'a> {
     /// **Produit `H p`** de la partie quadratique `H = Σ AₖᵀMₖAₖ + α GᵀG` avec `p` : le gradient de l'objectif privé de ses données (`y = 0`)
     /// évalué en `p`. Symétrique et défini positif sur le domaine.
+    /// Fixe les poids par arête de la régularisation (`None` : Tikhonov). Le problème reste quadratique pour ces poids ; [`ReconstructionProblem::conjugate_gradient`] le résout.
+    pub fn set_edge_weights(&mut self, weights: Option<EdgeWeights>) {
+        self.edge_weights = weights;
+    }
+
+    /// **Reconstruction préservant les contours** (Huber par moindres carrés repondérés itérés) : une première résolution de Tikhonov depuis `x0`, puis `outer` repondérations (poids de Huber de [`EdgeWeights::huber`] pour l'image courante, seuil
+    /// `kappa × médiane`) suivies chacune d'une résolution par gradient conjugué (`max_iterations`, `tolerance`) à partir de l'image précédente. `outer = 0` : Tikhonov seul. Laisse le problème avec les derniers poids.
+    pub fn conjugate_gradient_edge_preserving(&mut self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64, outer: usize, kappa: f64) -> CgResult {
+        self.edge_weights = None;
+        let mut resultat = self.conjugate_gradient(x0, max_iterations, tolerance);
+        for _ in 0..outer {
+            let poids = EdgeWeights::huber(&resultat.x, &self.domain, kappa);
+            self.edge_weights = Some(poids);
+            resultat = self.conjugate_gradient(&resultat.x, max_iterations, tolerance);
+        }
+        resultat
+    }
+
     pub fn normal_operator(&self, p: &Array3<f64>) -> Array3<f64> {
         self.evaluate_with(p, false).gradient
     }
@@ -470,9 +490,9 @@ impl<'a> ReconstructionProblem<'a> {
     }
 }
 
-/// `(α/2) ‖G x‖²` pour le gradient discret `G` (différences avant divisées par `h`, paires de voxels tous deux dans `domaine`) ;
-/// ajoute son gradient `α GᵀG x` à `gradient`.
-fn regularization(x: &Array3<f64>, domaine: &Array3<bool>, h: f64, alpha: f64, gradient: &mut Array3<f64>) -> f64 {
+/// `(α/2) Σ w · d²` sur les arêtes `a → b` (différences avant `d = (x_b − x_a) / h`, les deux voxels dans `domaine`), où `w` est le poids de l'arête (1 sans `poids` : `(α/2) ‖G x‖²`, `G` le gradient discret) ;
+/// ajoute son gradient à `gradient`. Les poids sont **fixés** : la valeur reste quadratique en `x`.
+fn regularization(x: &Array3<f64>, domaine: &Array3<bool>, h: f64, alpha: f64, poids: Option<&EdgeWeights>, gradient: &mut Array3<f64>) -> f64 {
     let (nx, ny, nz) = x.dim();
     let mut valeur = 0.0;
     for axe in 0..3 {
@@ -483,15 +503,78 @@ fn regularization(x: &Array3<f64>, domaine: &Array3<bool>, h: f64, alpha: f64, g
                     let (a, b) = ([i, j, k], [i + pas[0], j + pas[1], k + pas[2]]);
                     if domaine[a] && domaine[b] {
                         let d = x[b] - x[a];
-                        valeur += 0.5 * alpha * d * d / (h * h);
-                        gradient[b] += alpha * d / (h * h);
-                        gradient[a] -= alpha * d / (h * h);
+                        let w = poids.map_or(1.0, |p| p.by_axis[axe][a]);
+                        valeur += 0.5 * alpha * w * d * d / (h * h);
+                        gradient[b] += alpha * w * d / (h * h);
+                        gradient[a] -= alpha * w * d / (h * h);
                     }
                 }
             }
         }
     }
     valeur
+}
+
+/// Poids de chaque **arête** (voxel `a` vers son voisin `a + eₐₓₑ`) de la régularisation : `by_axis[axe][a]` pour l'arête qui part de `a` dans la direction `axe`. Un poids de 1 partout est la régularisation de Tikhonov ;
+/// des poids plus petits sur les arêtes où la différence est grande laissent les contours (voir [`EdgeWeights::huber`]).
+#[derive(Debug, Clone)]
+pub struct EdgeWeights {
+    by_axis: [Array3<f64>; 3],
+}
+
+impl EdgeWeights {
+    /// Tous les poids à 1 (la régularisation de Tikhonov).
+    pub fn ones(dims: (usize, usize, usize)) -> EdgeWeights {
+        EdgeWeights { by_axis: [Array3::ones(dims), Array3::ones(dims), Array3::ones(dims)] }
+    }
+
+    /// **Poids de Huber** (moindres carrés repondérés itérés) pour l'image courante `x` : sur une arête de différence `d = x_b − x_a`, le poids vaut 1 si `|d| ≤ δ` (zone lisse ou bruitée : pénalité quadratique) et `δ / |d|` sinon
+    /// (contour : pénalité linéaire, donc moins aplatie), avec `δ = kappa ×` la médiane des `|d|` (les poids ne dépendent donc pas du pas de la grille) sur les arêtes dont les deux voxels sont dans `domain` (l'échelle du bruit du volume courant). Si cette médiane est nulle, tous les poids valent 1.
+    pub fn huber(x: &Array3<f64>, domain: &Array3<bool>, kappa: f64) -> EdgeWeights {
+        let dims = x.dim();
+        let (nx, ny, nz) = dims;
+        let difference = |axe: usize, i: usize, j: usize, k: usize| -> Option<f64> {
+            let pas = [usize::from(axe == 0), usize::from(axe == 1), usize::from(axe == 2)];
+            let (a, b) = ([i, j, k], [i + pas[0], j + pas[1], k + pas[2]]);
+            (b[0] < nx && b[1] < ny && b[2] < nz && domain[a] && domain[b]).then(|| (x[b] - x[a]).abs())
+        };
+        let mut valeurs: Vec<f64> = Vec::new();
+        for axe in 0..3 {
+            for i in 0..nx {
+                for j in 0..ny {
+                    for k in 0..nz {
+                        if let Some(d) = difference(axe, i, j, k) {
+                            valeurs.push(d);
+                        }
+                    }
+                }
+            }
+        }
+        let mut poids = EdgeWeights::ones(dims);
+        if valeurs.is_empty() {
+            return poids;
+        }
+        let milieu = valeurs.len() / 2;
+        let mediane = *valeurs.select_nth_unstable_by(milieu, |a, b| a.partial_cmp(b).unwrap()).1;
+        let delta = kappa * mediane;
+        if !(delta > 0.0) || !delta.is_finite() {
+            return poids;
+        }
+        for axe in 0..3 {
+            for i in 0..nx {
+                for j in 0..ny {
+                    for k in 0..nz {
+                        if let Some(d) = difference(axe, i, j, k) {
+                            if d > delta {
+                                poids.by_axis[axe][[i, j, k]] = delta / d;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        poids
+    }
 }
 
 #[cfg(test)]
@@ -991,7 +1074,7 @@ mod tests {
         let (c, h, alpha) = (1.5, 2.0, 0.4);
         let x = Array3::from_shape_fn((nx, ny, nz), |(i, _, _)| c * i as f64);
         let mut g = Array3::<f64>::zeros((nx, ny, nz));
-        let valeur = regularization(&x, &domaine, h, alpha, &mut g);
+        let valeur = regularization(&x, &domaine, h, alpha, None, &mut g);
         // G = (différence de valeurs entre voisins) / h : la rampe a une pente c/h par mm. Paires selon x : (nx-1)·ny·nz, chacune de valeur
         // ½ α (c/h)² ; les autres axes : 0.
         let attendue = 0.5 * alpha * (c / h).powi(2) * ((nx - 1) * ny * nz) as f64;
@@ -1011,7 +1094,7 @@ mod tests {
         let mut troue = domaine.clone();
         troue[[2, 1, 0]] = false;
         let mut g2 = Array3::<f64>::zeros((nx, ny, nz));
-        let v2 = regularization(&x, &troue, h, alpha, &mut g2);
+        let v2 = regularization(&x, &troue, h, alpha, None, &mut g2);
         // le voxel (2,1,0) a 2 paires selon x (de valeur ½ α (c/h)² chacune) ; ses paires selon y et z ont une différence nulle
         let retirees_x = 2.0 * 0.5 * alpha * (c / h).powi(2);
         assert!((v2 - (attendue - retirees_x)).abs() < 1e-12, "{v2}");
@@ -1181,7 +1264,7 @@ mod tests {
                 volume.back_project(&coupe, &coupe.psf(), residu.view(), &mut gradient);
             }
         }
-        let reg = regularization(x, &probleme.domain, probleme.grid.resolution_mm, probleme.alpha, &mut gradient);
+        let reg = regularization(x, &probleme.domain, probleme.grid.resolution_mm, probleme.alpha, None, &mut gradient);
         for (g, &d) in gradient.iter_mut().zip(probleme.domain.iter()) {
             if !d {
                 *g = 0.0;
@@ -2775,6 +2858,29 @@ mod tests {
         assert!(matches!(sortie.write_poses(&stacks[..2], &tsv), Err(SvrError::PoseMismatch)));
     }
 
+    /// Reconstruction préservant les contours dans la chaîne (critère fixé avant, blobs, 2 stacks) : `reconstruct_with_poses` avec `edge_kappa > 0` égale EXACTEMENT l'appel direct de `conjugate_gradient_edge_preserving` (mêmes α, κ, nombre de
+    /// repondérations, itérations, tolérance) et diffère de la reconstruction de Tikhonov ; avec `edge_kappa = 0` elle égale la reconstruction de Tikhonov.
+    #[test]
+    fn the_pipeline_reconstruction_can_preserve_edges() {
+        use crate::pipeline::{reconstruct_with_poses, ReconstructionConfig};
+        let t = Temp::new("pipeline_contours");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let stacks: Vec<Stack> = stacks[..2].to_vec();
+        let poses = vraies.select(&[0, 1]);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let config = ReconstructionConfig { alpha: 0.7, edge_kappa: 1.5, edge_outer: 2, cg_max_iterations: 25, cg_tolerance: 1e-6, ..Default::default() };
+        let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
+        let mut p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap();
+        let x0 = p.initial_guess();
+        let direct = p.conjugate_gradient_edge_preserving(&x0, 25, 1e-6, 2, 1.5).x;
+        assert_eq!(obtenu, direct, "pipeline et appel direct différents");
+        let tikhonov = reconstruct_with_poses(&grille, &stacks, &poses, &ReconstructionConfig { edge_kappa: 0.0, ..config.clone() }).unwrap();
+        let q = ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap();
+        let tik_direct = q.conjugate_gradient(&q.initial_guess(), 25, 1e-6).x;
+        assert_eq!(tikhonov, tik_direct);
+        assert!(obtenu != tikhonov, "les contours doivent changer la reconstruction");
+    }
+
     /// Choix du device (critère fixé avant) : `DeviceKind::Cpu` donne un device `Flex` et `DeviceKind::Wgpu` un device `Wgpu`, tous deux avec autodiff (la construction ne lance aucun calcul, donc
     /// le test ne demande pas de GPU).
     #[test]
@@ -3159,6 +3265,146 @@ mod tests {
                 assert_eq!(ecart(&parallele.poses, &encore.poses), 0.0, "deux exécutions parallèles diffèrent");
             }
         }
+    }
+
+    /// Régularisation à poids par arête (critères fixés avant) : (a) `Some(poids à 1)` donne EXACTEMENT la valeur et le gradient de `None` ; (b) pour des poids quelconques, le gradient égale les différences finies centrées de la valeur (écart relatif < 1e-8 sur
+    /// 8 voxels : la valeur est quadratique, donc le schéma est exact à l'arrondi) ; (c) les poids de Huber valent 1 sur les arêtes de différence ≤ δ et δ/|d| au-delà, dans ]0, 1], et un seuil nul ou un domaine vide donnent des poids à 1 ;
+    /// (d) `outer = 0` rend EXACTEMENT la solution de Tikhonov, κ immense la rend à 1e-6 près (relatif, solutions convergées), un petit κ la modifie (> 1e-4).
+    #[test]
+    fn the_edge_weighted_regularization_is_consistent_and_huber_weights_are_correct() {
+        let dims = (9usize, 8usize, 7usize);
+        let domaine = Array3::from_shape_fn(dims, |(i, j, k)| !(i == 4 && j == 4 && k == 3));
+        let mut alea = Alea(21);
+        let x = Array3::from_shape_fn(dims, |_| alea.suivant() * 100.0);
+        let poids = EdgeWeights { by_axis: [0, 1, 2].map(|_| Array3::from_shape_fn(dims, |_| 0.1 + alea.suivant())) };
+        let (h, alpha) = (0.8, 0.07);
+        // (a)
+        let (mut g_none, mut g_un) = (Array3::<f64>::zeros(dims), Array3::<f64>::zeros(dims));
+        let v_none = regularization(&x, &domaine, h, alpha, None, &mut g_none);
+        let v_un = regularization(&x, &domaine, h, alpha, Some(&EdgeWeights::ones(dims)), &mut g_un);
+        assert_eq!(v_none, v_un);
+        assert_eq!(g_none, g_un);
+        // (a') poids nuls sur l'axe 1 seulement : la valeur est la somme des termes des axes 0 et 2 (calculée à la main)
+        let un_axe = EdgeWeights { by_axis: [Array3::ones(dims), Array3::zeros(dims), Array3::ones(dims)] };
+        let mut g_axe = Array3::<f64>::zeros(dims);
+        let v_axe = regularization(&x, &domaine, h, alpha, Some(&un_axe), &mut g_axe);
+        let mut attendu_axe = 0.0;
+        for axe in [0usize, 2] {
+            let pas = [usize::from(axe == 0), usize::from(axe == 1), usize::from(axe == 2)];
+            for ((i, j, k), _) in x.indexed_iter() {
+                let (a, b) = ([i, j, k], [i + pas[0], j + pas[1], k + pas[2]]);
+                if b[0] < dims.0 && b[1] < dims.1 && b[2] < dims.2 && domaine[a] && domaine[b] {
+                    attendu_axe += 0.5 * alpha * (x[b] - x[a]).powi(2) / (h * h);
+                }
+            }
+        }
+        assert!((v_axe - attendu_axe).abs() <= 1e-9 * attendu_axe, "poids par axe : {v_axe} contre {attendu_axe}");
+        // (b)
+        let mut g = Array3::<f64>::zeros(dims);
+        let _ = regularization(&x, &domaine, h, alpha, Some(&poids), &mut g);
+        for idx in [[0, 0, 0], [4, 4, 2], [3, 4, 3], [8, 7, 6], [5, 2, 4], [1, 6, 5], [4, 3, 3], [2, 2, 2]] {
+            let eps = 1e-3;
+            let (mut plus, mut moins) = (x.clone(), x.clone());
+            plus[idx] += eps;
+            moins[idx] -= eps;
+            let (mut ga, mut gb) = (Array3::<f64>::zeros(dims), Array3::<f64>::zeros(dims));
+            let fd = (regularization(&plus, &domaine, h, alpha, Some(&poids), &mut ga) - regularization(&moins, &domaine, h, alpha, Some(&poids), &mut gb)) / (2.0 * eps);
+            let attendu = g[idx];
+            assert!((fd - attendu).abs() <= 1e-8 * attendu.abs().max(1.0), "voxel {idx:?} : différences finies {fd}, gradient {attendu}");
+        }
+        // (c) poids de Huber : image en escalier (pas de 10 sur le plan i = 4) plus un petit bruit
+        let escalier = Array3::from_shape_fn(dims, |(i, j, k)| if i >= 5 { 100.0 } else { 0.0 } + 0.01 * ((i * 3 + j * 5 + k * 7) % 11) as f64);
+        let tout = Array3::from_elem(dims, true);
+        let w = EdgeWeights::huber(&escalier, &tout, 3.0);
+        assert!(w.by_axis.iter().all(|a| a.iter().all(|&v| v > 0.0 && v <= 1.0)));
+        let marche = w.by_axis[0][[4, 3, 3]]; // arête de i = 4 à i = 5 : la marche de 100
+        assert!(marche < 0.05, "la marche doit avoir un petit poids : {marche}");
+        assert_eq!(w.by_axis[1][[2, 3, 3]], 1.0, "une arête lisse garde le poids 1");
+        // valeurs exactes sur une ligne de voxels (h = 1 puis h = 2) : x = [0, 1, 4, 7, 17] → différences 1, 3, 3, 10 → médiane (rang 2) 3 ; κ = 1 → δ = 3 : poids 1, 1, 1, 3/10
+        let ligne = Array3::from_shape_vec((5, 1, 1), vec![0.0, 1.0, 4.0, 7.0, 17.0]).unwrap();
+        let toute = Array3::from_elem((5, 1, 1), true);
+        let exact = EdgeWeights::huber(&ligne, &toute, 1.0);
+        assert_eq!((0..4).map(|i| exact.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(), vec![1.0, 1.0, 1.0, 0.3]);
+        let exact2 = EdgeWeights::huber(&ligne, &toute, 0.5); // δ = 1,5 : poids 1, 1,5/3, 1,5/3, 0,15
+        assert_eq!((0..4).map(|i| exact2.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(), vec![1.0, 0.5, 0.5, 0.15]);
+        let sans_mediane = EdgeWeights::huber(&Array3::from_elem(dims, 5.0), &tout, 3.0);
+        assert!(sans_mediane.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)), "médiane nulle : poids à 1");
+        let vide = EdgeWeights::huber(&escalier, &Array3::from_elem(dims, false), 3.0);
+        assert!(vide.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)), "domaine vide : poids à 1");
+        // (d) κ immense = Tikhonov
+        let t = Temp::new("huber_kappa");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 0.5, 0.5, 91);
+        let stacks: Vec<Stack> = simuler_blobs(&t, &volume, &modeles, &vraies)[..2].to_vec();
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let mut probleme = ReconstructionProblem::with_poses(&grille, &stacks, &vraies.select(&[0, 1]), 1.0).unwrap();
+        let tik = probleme.conjugate_gradient(&probleme.initial_guess(), 200, 1e-9).x;
+        let zero_tour = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 0, 3.0).x;
+        assert_eq!(tik, zero_tour, "outer = 0 doit redonner Tikhonov exactement");
+        let relatif = |a: &Array3<f64>, b: &Array3<f64>| (a - b).mapv(|v| v * v).sum().sqrt() / b.mapv(|v| v * v).sum().sqrt();
+        // une repondération = Tikhonov, poids de Huber de CETTE solution, nouvelle résolution depuis elle (implémentation manuelle)
+        probleme.set_edge_weights(None);
+        let r0 = probleme.conjugate_gradient(&probleme.initial_guess(), 200, 1e-9);
+        probleme.set_edge_weights(Some(EdgeWeights::huber(&r0.x, &probleme.domain, 0.5)));
+        let manuel = probleme.conjugate_gradient(&r0.x, 200, 1e-9).x;
+        let une_fois = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 1, 0.5).x;
+        assert_eq!(manuel, une_fois, "une repondération doit égaler l'implémentation manuelle");
+        let gros_kappa = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 1e12).x;
+        assert!(relatif(&gros_kappa, &tik) < 1e-6, "κ immense doit redonner Tikhonov : {:.2e}", relatif(&gros_kappa, &tik));
+        let petit_kappa = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 0.5).x;
+        assert!(relatif(&petit_kappa, &tik) > 1e-4, "un petit κ doit changer la solution : {:.2e}", relatif(&petit_kappa, &tik));
+    }
+
+    /// RÉGULARISATION PRÉSERVANT LES CONTOURS sur l'atlas simulé (critère fixé avant : au PSNR réglé de chaque méthode, Huber dépasse Tikhonov d'au moins 0,5 dB sur le jeu d'ÉVALUATION). Réglage sur STA21 (bruit 5 %) : Tikhonov sur α ∈ {0,01 ; 0,03 ; 0,1 ; 0,3 ; 1},
+    /// Huber (3 repondérations) sur α ∈ {0,03 ; 0,1 ; 0,3} × κ ∈ {1,5 ; 3 ; 6}, chaque méthode retenue à son PSNR maximal ; évaluation de ces deux réglages sur STA31. Affiche aussi la netteté (gradient moyen relatif à l'atlas).
+    /// À lancer en `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "données locales ; très longue"]
+    fn edge_preserving_regularization_on_the_atlas() {
+        let preparer = |nom: &str| {
+            let (atlas, stacks) = stacks_atlas_simules(nom, 5);
+            let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
+            let init = normalized_adjoint(&grille, &stacks).unwrap();
+            let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
+            (stacks, grille, c)
+        };
+        let huber = |grille: &GridSpec, stacks: &[Stack], alpha: f64, kappa: f64| {
+            let t = std::time::Instant::now();
+            let mut p = ReconstructionProblem::new(grille, stacks, alpha).unwrap();
+            let x0 = p.initial_guess();
+            let r = p.conjugate_gradient_edge_preserving(&x0, 200, 1e-4, 3, kappa);
+            (r.x, r.iterations, *r.residual_history.last().unwrap(), t.elapsed().as_secs_f64())
+        };
+        let (stacks, grille, c) = preparer("STA21");
+        println!("RÉGLAGE sur STA21 : {} voxels de comparaison", c.voxels.len());
+        let mut tik = (f64::MIN, 0.0);
+        for alpha in [0.01, 0.03, 0.1, 0.3, 1.0] {
+            let (x, it, res, t) = reconstruire(&grille, &stacks, alpha);
+            let q = ligne_qualite(&format!("Tikhonov α = {alpha}"), &c, &x, it, res, t);
+            if q.1 > tik.0 {
+                tik = (q.1, alpha);
+            }
+        }
+        let mut hub = (f64::MIN, 0.0, 0.0);
+        for alpha in [0.03, 0.1, 0.3] {
+            for kappa in [1.5, 3.0, 6.0] {
+                let (x, it, res, t) = huber(&grille, &stacks, alpha, kappa);
+                let q = ligne_qualite(&format!("Huber α = {alpha}, κ = {kappa}"), &c, &x, it, res, t);
+                if q.1 > hub.0 {
+                    hub = (q.1, alpha, kappa);
+                }
+            }
+        }
+        println!("retenus sur STA21 : Tikhonov α = {} ({:.2} dB) ; Huber α = {}, κ = {} ({:.2} dB)", tik.1, tik.0, hub.1, hub.2, hub.0);
+        let (stacks, grille, c) = preparer("STA31");
+        println!("ÉVALUATION sur STA31 : {} voxels de comparaison", c.voxels.len());
+        let (x, it, res, t) = reconstruire(&grille, &stacks, tik.1);
+        let q_tik = ligne_qualite("Tikhonov", &c, &x, it, res, t);
+        let (x, it, res, t) = huber(&grille, &stacks, hub.1, hub.2);
+        let q_hub = ligne_qualite("Huber", &c, &x, it, res, t);
+        println!("gain de Huber sur Tikhonov : PSNR {:+.2} dB (critère ≥ 0,5), NCC {:+.4}, netteté {:.3} contre {:.3}", q_hub.1 - q_tik.1, q_hub.0 - q_tik.0, q_hub.2, q_tik.2);
+        assert!(q_hub.1 - q_tik.1 >= 0.5, "gain de PSNR {}", q_hub.1 - q_tik.1);
     }
 
     /// Reconstructions inutiles sautées (critères fixés avant, blobs, 2 stacks, 2 cycles) : (a) quand TOUS les cycles recalent « sans la coupe », les poses finales avec `skip_unused_reconstructions` sont IDENTIQUES (1e-9) à celles de la boucle

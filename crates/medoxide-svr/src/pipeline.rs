@@ -76,6 +76,11 @@ pub struct ReconstructionConfig {
     pub cg_max_iterations: usize,
     /// Tolérance relative du gradient conjugué.
     pub cg_tolerance: f64,
+    /// Reconstruction préservant les contours : seuil de Huber relatif `κ` (`δ = κ ×` la médiane des différences entre voxels voisins) ; 0 : régularisation de Tikhonov seule. Voir
+    /// [`crate::recon::ReconstructionProblem::conjugate_gradient_edge_preserving`].
+    pub edge_kappa: f64,
+    /// Nombre de repondérations de Huber (avec `edge_kappa > 0`).
+    pub edge_outer: usize,
     /// Coupe-coupe : nombre de balayages (chaque balayage recale toutes les coupes une fois).
     pub s2s_sweeps: usize,
     /// Coupe-volume : nombre de cycles « recaler puis reconstruire ».
@@ -102,6 +107,8 @@ impl Default for ReconstructionConfig {
             resolution_mm: 0.8,
             margin_mm: 10.0,
             alpha: 0.1,
+            edge_kappa: 0.0,
+            edge_outer: 3,
             cg_max_iterations: 300,
             cg_tolerance: 1e-4,
             s2s_sweeps: 3,
@@ -191,7 +198,9 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
         Motion::SliceToVolume => {
             let loop_config = loop_config(config);
             let result = reconstruct_with_motion_correction(&grid, stacks, &header_poses, loop_config, device, |_, _, _| {})?;
-            Ok(ReconstructionOutput { grid, volume: result.volume, poses: result.poses })
+            // la boucle rend une reconstruction de Tikhonov ; avec `edge_kappa > 0`, la reconstruction finale est refaite préservant les contours, aux poses finales
+            let volume = if config.edge_kappa > 0.0 { reconstruct_with_poses(&grid, stacks, &result.poses, config)? } else { result.volume };
+            Ok(ReconstructionOutput { grid, volume, poses: result.poses })
         }
     }
 }
@@ -218,6 +227,11 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
 
 /// Volume reconstruit sur `grid` avec des poses données : gradient conjugué (réglages `alpha`, `cg_max_iterations` et `cg_tolerance` de `config`) depuis l'adjoint normalisé.
 pub(crate) fn reconstruct_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: &ReconstructionConfig) -> Result<Array3<f64>, SvrError> {
-    let problem = ReconstructionProblem::with_poses(grid, stacks, poses, config.alpha)?;
-    Ok(problem.conjugate_gradient(&problem.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x)
+    let mut problem = ReconstructionProblem::with_poses(grid, stacks, poses, config.alpha)?;
+    let x0 = problem.initial_guess();
+    if config.edge_kappa > 0.0 {
+        Ok(problem.conjugate_gradient_edge_preserving(&x0, config.cg_max_iterations, config.cg_tolerance, config.edge_outer, config.edge_kappa).x)
+    } else {
+        Ok(problem.conjugate_gradient(&x0, config.cg_max_iterations, config.cg_tolerance).x)
+    }
 }

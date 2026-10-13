@@ -82,6 +82,9 @@ enum SvrAction {
         /// Poids de la régularisation (lissage)
         #[arg(long, default_value_t = ReconstructionConfig::default().alpha)]
         alpha: f64,
+        /// Reconstruction préservant les contours (Huber) : seuil relatif κ (0 : lissage de Tikhonov seul) ; un contour est une différence entre voxels voisins supérieure à κ fois la différence médiane
+        #[arg(long, default_value_t = ReconstructionConfig::default().edge_kappa)]
+        edge_kappa: f64,
         /// Avec `--motion s2s` : nombre de balayages de toutes les coupes
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_sweeps)]
         s2s_sweeps: usize,
@@ -240,8 +243,8 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, s2s_sweeps, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, s2s_sweeps, s2v_cycles, ..Default::default() };
+        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, edge_kappa, s2s_sweeps, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, edge_kappa, s2s_sweeps, s2v_cycles, ..Default::default() };
             svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {

@@ -164,6 +164,15 @@ La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur *
 
 Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains étaient plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01** : elle a été refaite (tableau ci-dessus). **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
 
+## Régularisation préservant les contours
+
+L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tikhonov par celle de Huber (quadratique pour les petites différences entre voxels voisins, linéaire au-delà, résolue par moindres carrés repondérés itérés), pour lisser le bruit sans aplatir les contours. Les briques sont testées (poids égaux à 1 : identique à Tikhonov au bit près ; gradient égal aux différences finies ; poids de Huber exacts sur des cas calculés à la main ; κ immense : solution de Tikhonov).
+
+- **Atlas simulé (vérité connue)**, réglage sur un atlas (STA21) et évaluation sur un autre (STA31), bruit de 5 % : Huber gagne **+2,1 dB de PSNR** (30,4 contre 28,3 dB) et +0,010 de NCC sur Tikhonov, avec une netteté plus proche de la vérité (0,996 contre 1,157). Réserve : l'optimum de Huber est au bord de la grille essayée.
+- **Données réelles**, sujets de réglage (juge hors échantillon + indicateur de netteté `S` : gradient moyen du volume légèrement lissé, normalisé par l'intensité médiane du tissu ; `S` a été validé par dose-réponse sur des volumes floutés, après l'échec d'une première normalisation) : **aucun gain sur la frontière juge / netteté de Tikhonov**. Sujet calme : Tikhonov à α = 0,05 (juge 0,881, netteté 0,109) domine Huber à α = 0,1 et κ = 4 (0,878 ; 0,101). Sujet très agité : Huber à α = 0,3 et κ = 4 (0,714 ; 0,037) égale Tikhonov à la même netteté ; Huber à α = 0,1 est légèrement en dessous.
+
+L'option reste donc désactivée par défaut. Les deux mesures (juge et `S`) sont des substituts, et le juge favorise le lissage : un gain de netteté réel n'est pas exclu, mais il n'est pas démontré. Autre constat : l'optimum de Tikhonov sur l'atlas simulé (α = 0,01) est dix fois plus petit que sur données réelles (0,1), une nouvelle illustration du fait que les simulations ne prédisent pas le réel.
+
 ## Limites
 
 - **Six sujets d'un seul jeu**, un seul contraste (TRUFI) : rien ne montre que medoxide soit meilleur que SVRTK

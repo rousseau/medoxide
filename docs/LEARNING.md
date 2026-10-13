@@ -1395,4 +1395,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-13 — Une méthode qui gagne en simulation et pas sur le réel : poids par arête, IRLS, et une frontière à deux axes
+
+- **Quoi (Rust)** : `Option<EdgeWeights>` : `None` garde le chemin existant **identique au bit près** ; les poids sont lus arête par arête dans la même boucle que la pénalité quadratique, donc la valeur reste quadratique en `x` pour des poids fixés et le gradient conjugué s'applique. Un test compare `Some(poids à 1)` à `None` par `assert_eq!` sur des `f64` (égalité exacte, pas de tolérance).
+- **Quoi (méthode)** : (1) **moindres carrés repondérés itérés** (IRLS) pour Huber : résoudre un problème quadratique, recalculer les poids `δ/|d|` des arêtes où la différence `d` dépasse `δ = κ × médiane`, recommencer ; (2) un indicateur de netteté doit être **validé par dose-réponse** avant usage : le premier (gradient au 95ᵉ centile normalisé par le 99,5ᵉ centile) a échoué (non monotone sous flou) ; le second (gradient moyen du volume légèrement lissé, normalisé par la médiane) passe ; (3) comparer deux méthodes par **frontière** (juge, netteté) et non par un seul score : en baissant simplement α, Tikhonov gagne aussi en netteté ; Huber n'est utile que s'il est au-dessus de cette frontière. Il ne l'est pas sur nos données réelles, alors qu'il gagne +2,1 dB sur l'atlas simulé.
+- **Leçon** : un résultat de simulation (même avec vérité connue) ne dispense pas du test sur le réel ; et un test de mutation a révélé deux défauts de test que la couverture de lignes ne montre pas (le test de différences finies vérifiait la cohérence interne, pas **quel** poids est lu ; un paramètre `h` redondant car les poids sont invariants d'échelle).
+- **Où** : `crates/medoxide-svr/src/recon.rs` (`EdgeWeights`, `regularization`, `conjugate_gradient_edge_preserving`), `crates/medoxide-svr/src/pipeline.rs` (`edge_kappa`, `edge_outer`), option `--edge-kappa` de `medx svr recon`.
+
+---
+
 *(à compléter à la prochaine étape)*
