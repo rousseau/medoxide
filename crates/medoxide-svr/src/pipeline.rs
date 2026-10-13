@@ -69,6 +69,8 @@ pub struct ReconstructionConfig {
     /// Marge ajoutée autour de la boîte des masques cérébraux pour définir la grille, en mm.
     pub margin_mm: f64,
     /// Poids `α` de la régularisation de la reconstruction (voir [`crate::recon::ReconstructionProblem`]).
+    /// Défaut 0,1 : choisi par le juge hors échantillon sur deux sujets de réglage (meilleure moyenne), puis vérifié sur quatre autres sujets (gain moyen de NCC +0,036 sur 0,01, qui laissait un hachurage et des valeurs négatives).
+    /// L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité).
     pub alpha: f64,
     /// Itérations maximales du gradient conjugué à chaque reconstruction.
     pub cg_max_iterations: usize,
@@ -99,7 +101,7 @@ impl Default for ReconstructionConfig {
             motion: Motion::SliceToSlice,
             resolution_mm: 0.8,
             margin_mm: 10.0,
-            alpha: 0.01,
+            alpha: 0.1,
             cg_max_iterations: 300,
             cg_tolerance: 1e-4,
             s2s_sweeps: 3,

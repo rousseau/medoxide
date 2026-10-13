@@ -3909,6 +3909,8 @@ mod tests {
         let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
         let cycles: usize = std::env::var("MEDOXIDE_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
         let etiquette = std::env::var("MEDOXIDE_ETIQUETTE").unwrap_or_default();
+        // MEDOXIDE_ALPHA : poids de la régularisation (ALPHA_CHOISI = 0,01 par défaut : la valeur historique de ce test)
+        let alpha: f64 = std::env::var("MEDOXIDE_ALPHA").ok().map_or(ALPHA_CHOISI, |v| v.trim().parse().unwrap());
         let sortie = sortie_reelle();
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
@@ -3949,7 +3951,7 @@ mod tests {
                 recalees.iter().map(|s| s.ncc_first).sum::<f64>() / recalees.len() as f64, recalees.iter().map(|s| s.ncc_final).sum::<f64>() / recalees.len() as f64,
                 recalees.iter().map(|s| s.correction_rms_mm).sum::<f64>() / recalees.len() as f64
             );
-            let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &rapport.poses, ALPHA_CHOISI).unwrap();
+            let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &rapport.poses, alpha).unwrap();
             let x = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4).x;
             ecrire_image_grille(&sortie.join(format!("ours_s2s{etiquette}.nii.gz")), &x, &grille);
             let mut lignes = Vec::new();
@@ -3964,7 +3966,7 @@ mod tests {
             return;
         }
         let debut = std::time::Instant::now();
-        let sans = ReconstructionProblem::with_poses(&grille, &stacks, &identite, ALPHA_CHOISI).unwrap();
+        let sans = ReconstructionProblem::with_poses(&grille, &stacks, &identite, alpha).unwrap();
         let x0 = sans.conjugate_gradient(&sans.initial_guess(), 300, 1e-4).x;
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
@@ -3973,7 +3975,7 @@ mod tests {
             start_amplitude_mm: std::env::var("MEDOXIDE_START_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()),
             ..RobustConfig::new(0.9)
         };
-        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles, alpha: alpha, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })

@@ -40,7 +40,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--motion` | Estimation du mouvement : `s2s` (coupe-coupe) ou `s2v` (coupe-volume). | `s2s` |
 | `--device` | Où se font les calculs : `cpu` ou `wgpu` (GPU). | CPU, voir [ci-dessous](#cpu-ou-gpu) |
 | `--resolution-mm` | Côté des voxels du volume reconstruit. | 0,8 |
-| `--alpha` | Poids de la régularisation (lissage) : plus il est grand, plus le volume est lisse. | 0,01 |
+| `--alpha` | Poids de la régularisation (lissage) : plus il est grand, plus le volume est lisse. Trop faible, le volume garde un hachurage régulier et des valeurs négatives ; trop fort, il devient flou. L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité). | 0,1 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 

@@ -85,7 +85,7 @@ Le volume est discrétisé sur une grille isotrope (0,8 mm par défaut) autour d
 > ½ Σ ‖ m · (A x − y) ‖² + (α / 2) ‖ G x ‖²
 
 où `A` est l'opérateur d'acquisition de chaque coupe, `y` ses pixels, `m` son masque et `G` le gradient du
-volume (régularisation de Tikhonov d'ordre 1, `α` = 0,01 par défaut). La solution est calculée par
+volume (régularisation de Tikhonov d'ordre 1, `α` = 0,1 par défaut, voir [Validation](validation.md#choix-de-la-régularisation-α)). La solution est calculée par
 **gradient conjugué** sur les équations normales, à partir de l'adjoint normalisé. Nous avons comparé six
 optimiseurs sur cet objectif (gradient conjugué, plus forte pente, Barzilai-Borwein, Jacobi, Adam et L-BFGS
 de Burn) : le gradient conjugué est le plus précis.

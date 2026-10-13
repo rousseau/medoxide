@@ -131,6 +131,26 @@ critère, atteint 0,727 : la comparaison n'est pas neutre pour lui.
 | SVRTK (Docker, arm64) | 1 à 3 minutes |
 | NeSVoR (CPU, 2 stacks) | 3 à 5 minutes |
 
+## Choix de la régularisation α
+
+Notre premier réglage (α = 0,01) avait été fait sur du bruit simulé. Sur données réelles, il laissait un **hachurage régulier** (période de 2 à 3 voxels) et des valeurs négatives (jusqu'à −30 % du maximum) absents des reconstructions de SVRTK. Nous avons réglé α avec le juge hors échantillon (mêmes repliements, `s2s`, deux stacks pour reconstruire), en séparant **sujets de réglage** et **sujets d'évaluation**.
+
+| Sujet de réglage | α = 0,01 | 0,03 | 0,05 | 0,1 | 0,2 | 0,3 | 0,5 |
+|---|---|---|---|---|---|---|---|
+| calme | 0,862 | 0,878 | **0,881** | 0,877 | 0,863 | 0,851 | |
+| très agité | 0,630 | 0,675 | | 0,703 | 0,712 | 0,716 | **0,717** |
+
+La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur **quatre autres sujets** (deux calmes, deux agités), NCC moyenne du juge :
+
+| Sujet | α = 0,01 | α = 0,1 | gain |
+|---|---|---|---|
+| calme 2 | 0,894 | 0,909 | +0,015 |
+| calme 3 | 0,857 | 0,875 | +0,017 |
+| agité 1 | 0,727 | 0,774 | +0,048 |
+| agité 3 | 0,627 | 0,691 | +0,064 |
+
+Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains sont plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01**. **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
+
 ## Limites
 
 - **Six sujets d'un seul jeu**, un seul contraste (TRUFI) : rien ne montre que medoxide soit meilleur que SVRTK
