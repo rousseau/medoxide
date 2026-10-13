@@ -82,6 +82,9 @@ enum SvrAction {
         /// Poids de la régularisation (lissage)
         #[arg(long, default_value_t = ReconstructionConfig::default().alpha)]
         alpha: f64,
+        /// Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit (1 : tous les voxels touchés ; 2 : supprime les « languettes » vues par un seul stack)
+        #[arg(long, default_value_t = ReconstructionConfig::default().min_stack_coverage)]
+        min_stack_coverage: usize,
         /// Reconstruction préservant les contours (Huber) : seuil relatif κ (0 : lissage de Tikhonov seul) ; un contour est une différence entre voxels voisins supérieure à κ fois la différence médiane
         #[arg(long, default_value_t = ReconstructionConfig::default().edge_kappa)]
         edge_kappa: f64,
@@ -243,8 +246,8 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, edge_kappa, s2s_sweeps, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, edge_kappa, s2s_sweeps, s2v_cycles, ..Default::default() };
+        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2v_cycles, ..Default::default() };
             svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {

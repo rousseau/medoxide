@@ -311,12 +311,36 @@ impl<'a> ReconstructionProblem<'a> {
     /// # Erreurs
     /// Celles de [`ReconstructionProblem::new`], plus [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
     pub fn with_poses(grid: &GridSpec, stacks: &'a [Stack], poses: &SlicePoses, alpha: f64) -> Result<ReconstructionProblem<'a>, SvrError> {
+        ReconstructionProblem::with_poses_covered(grid, stacks, poses, alpha, 1)
+    }
+
+    /// Comme [`ReconstructionProblem::with_poses`], mais le domaine est restreint aux voxels atteints par **au moins `min_stacks` stacks** (support du stack ≥ [`SUPPORT_MIN`] ; `min_stacks` est ramené au nombre de stacks, et 0 ou 1 ne
+    /// restreint rien). Un voxel réellement dans le cerveau est vu par chaque plan ; une zone vue par un seul stack est hors du cerveau ou une coupe mal placée (« languette » qui dépasse du volume).
+    ///
+    /// # Erreurs
+    /// Celles de [`ReconstructionProblem::with_poses`].
+    pub fn with_poses_covered(grid: &GridSpec, stacks: &'a [Stack], poses: &SlicePoses, alpha: f64, min_stacks: usize) -> Result<ReconstructionProblem<'a>, SvrError> {
         // `!(a >= 0.0)` est vrai aussi pour NaN.
         if !(alpha >= 0.0) || !alpha.is_finite() {
             return Err(SvrError::InvalidRegularization);
         }
         let init = normalized_adjoint_with_poses(grid, stacks, poses)?;
-        let domain = init.support.mapv(|s| s >= SUPPORT_MIN);
+        let mut domain = init.support.mapv(|s| s >= SUPPORT_MIN);
+        let requis = min_stacks.min(stacks.len());
+        if requis >= 2 {
+            let mut compte = Array3::<usize>::zeros(grid.dims);
+            for s in 0..stacks.len() {
+                let support = normalized_adjoint_with_poses(grid, &stacks[s..s + 1], &poses.select(&[s]))?.support;
+                for (c, &v) in compte.iter_mut().zip(support.iter()) {
+                    if v >= SUPPORT_MIN {
+                        *c += 1;
+                    }
+                }
+            }
+            for (d, &c) in domain.iter_mut().zip(compte.iter()) {
+                *d = *d && c >= requis;
+            }
+        }
         Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, poses: poses.clone(), domain, initial: init.image, support: init.support, edge_weights: None })
     }
 
@@ -2258,7 +2282,7 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let identite = SlicePoses::identity(&stacks);
-        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig { skip_unused_reconstructions: false,
+        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false,
             cycles: 1, alpha: 0.01, cg_max_iterations: 30, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: 0,
             leave_slice_out_window: 0, pose_outlier_window: fenetre, pose_outlier_max_mm: mm, pose_outlier_max_deg: deg,
         };
@@ -2779,10 +2803,10 @@ mod tests {
     /// relancées : le test de câblage de bout en bout (sans relance, pour la durée) ne les couvre pas, celui-ci si.
     #[test]
     fn the_pipeline_maps_every_setting_to_the_loop_config() {
-        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, s2v_skip_unused_reconstructions: true, ..Default::default() };
+        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, s2v_skip_unused_reconstructions: true, min_stack_coverage: 3, ..Default::default() };
         for (sans_la_coupe, par_lots) in [(true, false), (false, true), (true, true)] {
             let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, s2v_batched: par_lots, ..base.clone() };
-            let attendu = align::LoopConfig { skip_unused_reconstructions: sans_la_coupe,
+            let attendu = align::LoopConfig { min_stack_coverage: 3, skip_unused_reconstructions: sans_la_coupe,
                 cycles: 4, alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3,
                 robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, batched: par_lots, ..RobustConfig::new(0.7) },
                 leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
@@ -2809,7 +2833,7 @@ mod tests {
         let relatif = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / b.iter().map(|v| v * v).sum::<f64>().sqrt();
         let mut volumes = Vec::new();
         for (alpha, max, tol) in [(0.02, 2, 1e-12), (0.02, 300, 0.5)] {
-            let config = ReconstructionConfig { alpha, cg_max_iterations: max, cg_tolerance: tol, ..Default::default() };
+            let config = ReconstructionConfig { alpha, cg_max_iterations: max, cg_tolerance: tol, min_stack_coverage: 1, ..Default::default() };
             let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
             let ecart = relatif(&obtenu, &direct(alpha, max, tol));
             assert!(ecart < 1e-9, "(alpha {alpha}, max {max}, tol {tol}) : écart relatif {ecart:.2e}");
@@ -2868,7 +2892,7 @@ mod tests {
         let stacks: Vec<Stack> = stacks[..2].to_vec();
         let poses = vraies.select(&[0, 1]);
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
-        let config = ReconstructionConfig { alpha: 0.7, edge_kappa: 1.5, edge_outer: 2, cg_max_iterations: 25, cg_tolerance: 1e-6, ..Default::default() };
+        let config = ReconstructionConfig { alpha: 0.7, edge_kappa: 1.5, edge_outer: 2, cg_max_iterations: 25, cg_tolerance: 1e-6, min_stack_coverage: 1, ..Default::default() };
         let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
         let mut p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap();
         let x0 = p.initial_guess();
@@ -2918,7 +2942,7 @@ mod tests {
         assert_eq!(sortie.grid, grille);
         let directes = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, ..Default::default() }, &device).unwrap().poses;
         assert_eq!(ecart_poses(&sortie.poses, &directes), 0.0, "poses coupe-coupe différentes de l'appel direct");
-        let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &directes, config.alpha).unwrap();
+        let probleme = ReconstructionProblem::with_poses_covered(&grille, &stacks, &directes, config.alpha, config.min_stack_coverage).unwrap();
         let attendu = probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x;
         let norme = attendu.iter().map(|v| v * v).sum::<f64>().sqrt();
         let ecart = sortie.volume.iter().zip(attendu.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
@@ -2926,7 +2950,7 @@ mod tests {
         // (b) coupe-volume
         let config_v = ReconstructionConfig { motion: Motion::SliceToVolume, s2v_cycles: 1, ..config.clone() };
         let sortie_v = reconstruct(&stacks, &config_v, &device).unwrap();
-        let boucle = |sans_la_coupe: bool| align::LoopConfig { skip_unused_reconstructions: false,
+        let boucle = |sans_la_coupe: bool| align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false,
             cycles: 1, alpha: config.alpha, cg_max_iterations: config.cg_max_iterations, cg_tolerance: config.cg_tolerance,
             robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, ..RobustConfig::new(config.s2v_suspect_ncc) },
             leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 1 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 1 } else { 0 },
@@ -3407,6 +3431,149 @@ mod tests {
         assert!(q_hub.1 - q_tik.1 >= 0.5, "gain de PSNR {}", q_hub.1 - q_tik.1);
     }
 
+    /// DIAGNOSTIC (sans critère) des résidus par coupe sur DONNÉES RÉELLES : pour chaque coupe de tous les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`), simule la coupe à sa pose (`MEDOXIDE_POSES`, fichier de `--poses`)
+    /// depuis le volume `MEDOXIDE_VOLUME` (NIfTI) sur les pixels de son masque, et écrit sur la sortie standard une ligne `COUPE stack coupe pixels_masque déplacement_rms_mm ncc rmse_relatif` : la corrélation entre la coupe simulée et la coupe réelle
+    /// (les coupes dont le volume est incohérent avec les données ont une corrélation basse).
+    #[test]
+    #[ignore = "données réelles locales"]
+    fn diagnose_slice_residuals_on_real_data() {
+        let tous = stacks_reels();
+        let poses = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).expect("volume illisible"));
+        for (si, stack) in tous.iter().enumerate() {
+            let masque = stack.brain_mask().expect("masque").voxels();
+            for coupe in stack.slices() {
+                let k = coupe.index();
+                let m = masque.index_axis(Axis(2), k);
+                let pixels = m.iter().filter(|&&v| v).count();
+                let posee = coupe.with_motion(*poses.get(si, k));
+                let sim = volume.simulate_slice_masked(&posee, &posee.psf(), m);
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                for ((i, j), &v) in m.indexed_iter() {
+                    if v && sim.coverage[[i, j]] >= 0.99 {
+                        a.push(f64::from(posee.data()[[i, j]]));
+                        b.push(f64::from(sim.values[[i, j]]));
+                    }
+                }
+                let corr = if a.len() >= 20 { correlation(&a, &b) } else { f64::NAN };
+                let rmse = if a.len() >= 20 {
+                    let moy = a.iter().sum::<f64>() / a.len() as f64;
+                    ((a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt()) / moy.max(1e-9)
+                } else {
+                    f64::NAN
+                };
+                // déplacement quadratique moyen des pixels de masque par rapport à la pose d'en-tête
+                let (mut somme, mut n) = (0.0, 0usize);
+                for ((i, j), &v) in m.indexed_iter() {
+                    if v {
+                        let p0 = coupe.pixel_to_world(i as f64, j as f64);
+                        let p1 = posee.pixel_to_world(i as f64, j as f64);
+                        somme += (p1 - p0).norm_squared();
+                        n += 1;
+                    }
+                }
+                let deplacement = if n > 0 { (somme / n as f64).sqrt() } else { 0.0 };
+                println!("COUPE\t{si}\t{k}\t{pixels}\t{deplacement:.2}\t{corr:.4}\t{rmse:.4}");
+            }
+        }
+    }
+
+    /// DIAGNOSTIC (sans critère) : pour un sujet réel et les poses `MEDOXIDE_POSES`, nombre de stacks (0 à 3) dont le support atteint chaque voxel du domaine de la reconstruction (grille de `medx svr recon`), écrit dans `MEDOXIDE_SORTIE` (NIfTI), avec
+    /// le décompte des voxels du domaine couverts par 1, 2 ou 3 stacks sur la sortie standard.
+    #[test]
+    #[ignore = "données réelles locales"]
+    fn diagnose_stack_coverage_on_real_data() {
+        let tous = stacks_reels();
+        let poses = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let grille = reconstruction_grid(&tous, 0.8, 10.0).unwrap();
+        let mut compte = Array3::<f64>::zeros(grille.dims);
+        let mut total = Array3::<f64>::zeros(grille.dims);
+        for si in 0..tous.len() {
+            let un = std::slice::from_ref(&tous[si]);
+            let support = normalized_adjoint_with_poses(&grille, un, &poses.select(&[si])).unwrap().support;
+            for (c, &v) in compte.iter_mut().zip(support.iter()) {
+                if v >= SUPPORT_MIN {
+                    *c += 1.0;
+                }
+            }
+        }
+        let tot = normalized_adjoint_with_poses(&grille, &tous, &poses).unwrap().support;
+        for (t, &v) in total.iter_mut().zip(tot.iter()) {
+            *t = if v >= SUPPORT_MIN { 1.0 } else { 0.0 };
+        }
+        let (mut n1, mut n2, mut n3, mut n4) = (0usize, 0usize, 0usize, 0usize);
+        for (c, &d) in compte.iter().zip(total.iter()) {
+            if d > 0.0 {
+                match *c as usize {
+                    0 | 1 => n1 += 1,
+                    2 => n2 += 1,
+                    3 => n3 += 1,
+                    _ => n4 += 1,
+                }
+            }
+        }
+        println!("DOMAINE : {} voxels ; couverts par 1 stack : {n1} ; par 2 : {n2} ; par 3 : {n3} ; par 4 ou plus : {n4}", n1 + n2 + n3 + n4);
+        ecrire_image_grille(Path::new(&std::env::var("MEDOXIDE_SORTIE").expect("MEDOXIDE_SORTIE")), &(&compte * &total), &grille);
+    }
+
+    /// Couverture minimale par les stacks (critères fixés avant, blobs, 3 stacks, une coupe du stack 0 volontairement déplacée de 25 mm) : (a) `with_poses_covered(…, 1)` a EXACTEMENT le domaine de `with_poses` ; (b) pour `min_stacks` = 2 et 3, un voxel est dans le
+    /// domaine si et seulement s'il est dans le domaine complet ET atteint par au moins `min_stacks` stacks (comptage indépendant, un support par stack) ; (c) la coupe déplacée crée des voxels atteints par un seul stack (le domaine à 1 stack est strictement plus
+    /// grand que celui à 2) ; (d) `min_stacks` supérieur au nombre de stacks est ramené à ce nombre ; (e) sur le domaine à 2 stacks, la reconstruction de ces voxels n'est pas modifiée par la suppression des zones à un stack lorsque aucune coupe n'est déplacée.
+    #[test]
+    fn the_stack_coverage_rule_trims_the_domain_correctly() {
+        let t = Temp::new("couverture");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let mut deplacees = vraies.clone();
+        let k = 5;
+        deplacees.set(0, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(25.0, 0.0, 0.0), &Vector3::zeros()) * vraies.get(0, k));
+        let compte_independant = |poses: &SlicePoses| {
+            let mut c = Array3::<usize>::zeros(grille.dims);
+            for si in 0..stacks.len() {
+                let support = normalized_adjoint_with_poses(&grille, &stacks[si..si + 1], &poses.select(&[si])).unwrap().support;
+                for (n, &v) in c.iter_mut().zip(support.iter()) {
+                    if v >= SUPPORT_MIN {
+                        *n += 1;
+                    }
+                }
+            }
+            c
+        };
+        let complet = ReconstructionProblem::with_poses(&grille, &stacks, &deplacees, 0.1).unwrap();
+        // (a)
+        assert_eq!(ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 1).unwrap().domain(), complet.domain());
+        assert_eq!(ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 0).unwrap().domain(), complet.domain());
+        // (b)
+        let compte = compte_independant(&deplacees);
+        for requis in [2usize, 3] {
+            let p = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, requis).unwrap();
+            for (idx, &d) in p.domain().indexed_iter() {
+                assert_eq!(d, complet.domain()[idx] && compte[idx] >= requis, "voxel {idx:?} : couverture {} pour min_stacks = {requis}", compte[idx]);
+            }
+        }
+        // (c) la coupe déplacée donne des voxels à un seul stack
+        let deux = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 2).unwrap();
+        let (n_complet, n_deux) = (complet.domain().iter().filter(|&&v| v).count(), deux.domain().iter().filter(|&&v| v).count());
+        assert!(n_complet > n_deux + 20, "la coupe déplacée devrait ajouter des voxels à un seul stack : {n_complet} contre {n_deux}");
+        // (d)
+        let beaucoup = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 99).unwrap();
+        let trois = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 3).unwrap();
+        assert_eq!(beaucoup.domain(), trois.domain());
+        // (e) sans coupe déplacée, la restriction à 2 stacks retire peu de voxels et la solution sur le domaine commun reste proche : écart relatif < 5e-2 sur les voxels des deux domaines
+        let a = ReconstructionProblem::with_poses(&grille, &stacks, &vraies, 1.0).unwrap();
+        let b = ReconstructionProblem::with_poses_covered(&grille, &stacks, &vraies, 1.0, 2).unwrap();
+        let xa = a.conjugate_gradient(&a.initial_guess(), 60, 1e-6).x;
+        let xb = b.conjugate_gradient(&b.initial_guess(), 60, 1e-6).x;
+        let (mut num, mut den) = (0.0, 0.0);
+        for (idx, &d) in b.domain().indexed_iter() {
+            if d {
+                num += (xa[idx] - xb[idx]).powi(2);
+                den += xa[idx].powi(2);
+            }
+        }
+        assert!((num / den).sqrt() < 5e-2, "la solution sur le domaine commun change trop : {:.2e}", (num / den).sqrt());
+    }
+
     /// Reconstructions inutiles sautées (critères fixés avant, blobs, 2 stacks, 2 cycles) : (a) quand TOUS les cycles recalent « sans la coupe », les poses finales avec `skip_unused_reconstructions` sont IDENTIQUES (1e-9) à celles de la boucle
     /// complète, car ce recalage ne lit pas le volume du cycle ; (b) le volume final égale celui de la boucle complète à 2e-2 près en relatif (départ à froid contre départ à chaud de la dernière reconstruction) ; (c) l'observateur
     /// n'est appelé qu'aux reconstructions faites : seulement la dernière (cycle 2) dans le cas (a), contre 3 appels sans le saut ; (d) si seulement 1 cycle sur 2 est « sans la coupe », le cycle 1 (recalé contre le volume du cycle) et
@@ -3423,7 +3590,7 @@ mod tests {
         let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
         let robuste = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, lr_decay: 0.93, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 1, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
         let boucle = |saute: bool, loso: usize| align::LoopConfig {
-            cycles: 2, alpha: 0.01, cg_max_iterations: 300, cg_tolerance: 1e-6, robust: robuste, leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: loso,
+            min_stack_coverage: 1, cycles: 2, alpha: 0.01, cg_max_iterations: 300, cg_tolerance: 1e-6, robust: robuste, leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: loso,
             leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0, skip_unused_reconstructions: saute,
         };
         let (mut appels_complet, mut appels_saut, mut appels_partiel) = (Vec::new(), Vec::new(), Vec::new());
@@ -4221,7 +4388,7 @@ mod tests {
             start_amplitude_mm: std::env::var("MEDOXIDE_START_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()),
             ..RobustConfig::new(0.9)
         };
-        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles, alpha: alpha, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles, alpha: alpha, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
             println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
         })
@@ -4424,7 +4591,7 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
         let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
@@ -4500,7 +4667,7 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { skip_unused_reconstructions: false, cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();

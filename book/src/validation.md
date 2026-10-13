@@ -164,6 +164,12 @@ La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur *
 
 Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains étaient plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01** : elle a été refaite (tableau ci-dessus). **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
 
+## Zones vues par un seul stack
+
+Sur les sujets très agités, les volumes montraient des « languettes » rectangulaires qui dépassent du cerveau et un liseré extérieur : ce sont des zones **vues par un seul stack** (environ 15 % du domaine pour le sujet agité examiné), alors qu'un voxel réellement dans le cerveau est atteint par chaque plan. Une première hypothèse (des coupes non recalées de bord) a été **infirmée** : elles ne représentent que 0,4 % des pixels de masque, et aucune des 59 coupes recalées n'a une corrélation simulée/réelle sous 0,7. La règle retenue (`--min-stack-coverage 2`, défaut) ne reconstruit que les voxels atteints par au moins deux stacks.
+
+Vérifié sur le sujet agité à trois stacks (`s2s` et `s2v`) : les poses sont **identiques**, aucun voxel du nouveau volume n'est couvert par un seul stack (contre 14 à 15 % avant), et le volume change **près du bord retiré seulement** (écart relatif 24 % à moins de 2 voxels, 0,8 % à 4-8 voxels, 0,08 % au-delà de 8 voxels). La règle est testée de façon indépendante (comptage par stack, coupe volontairement éloignée de 25 mm, 8 mutants sur 8 détectés). **Le juge hors échantillon ne peut pas arbitrer cette règle** : il lit le volume aux pixels des coupes testées, et un domaine réduit y met des zéros ; les évaluations du juge ci-dessus ont été faites avant la règle.
+
 ## Régularisation préservant les contours
 
 L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tikhonov par celle de Huber (quadratique pour les petites différences entre voxels voisins, linéaire au-delà, résolue par moindres carrés repondérés itérés), pour lisser le bruit sans aplatir les contours. Les briques sont testées (poids égaux à 1 : identique à Tikhonov au bit près ; gradient égal aux différences finies ; poids de Huber exacts sur des cas calculés à la main ; κ immense : solution de Tikhonov).

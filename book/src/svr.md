@@ -41,6 +41,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--device` | Où se font les calculs : `cpu` ou `wgpu` (GPU). | CPU, voir [ci-dessous](#cpu-ou-gpu) |
 | `--resolution-mm` | Côté des voxels du volume reconstruit. | 0,8 |
 | `--alpha` | Poids de la régularisation (lissage) : plus il est grand, plus le volume est lisse. Trop faible, le volume garde un hachurage régulier et des valeurs négatives ; trop fort, il devient flou. L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité). | 0,1 |
+| `--min-stack-coverage` | Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit. Avec 2 (défaut), les zones vues par un seul stack, souvent des coupes mal placées qui forment des « languettes » hors du cerveau, ne sont pas reconstruites ; 1 : tous les voxels touchés. | 2 |
 | `--edge-kappa` | **Expérimental.** Reconstruction préservant les contours (Huber, trois repondérations) : seuil relatif κ, un contour étant une différence entre voxels voisins supérieure à κ fois la différence médiane ; 0 : lissage de Tikhonov seul. Sur données réelles, aucun gain démontré (voir [Validation](validation.md#régularisation-préservant-les-contours)). | 0 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |

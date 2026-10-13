@@ -76,6 +76,8 @@ pub struct ReconstructionConfig {
     pub cg_max_iterations: usize,
     /// Tolérance relative du gradient conjugué.
     pub cg_tolerance: f64,
+    /// Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit (les zones vues par un seul stack, souvent des coupes mal placées, forment des « languettes » hors du cerveau) ; 0 ou 1 : aucune restriction.
+    pub min_stack_coverage: usize,
     /// Reconstruction préservant les contours : seuil de Huber relatif `κ` (`δ = κ ×` la médiane des différences entre voxels voisins) ; 0 : régularisation de Tikhonov seule. Voir
     /// [`crate::recon::ReconstructionProblem::conjugate_gradient_edge_preserving`].
     pub edge_kappa: f64,
@@ -107,6 +109,7 @@ impl Default for ReconstructionConfig {
             resolution_mm: 0.8,
             margin_mm: 10.0,
             alpha: 0.1,
+            min_stack_coverage: 2,
             edge_kappa: 0.0,
             edge_outer: 3,
             cg_max_iterations: 300,
@@ -210,6 +213,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
     let cycles = config.s2v_cycles;
     LoopConfig {
         skip_unused_reconstructions: config.s2v_skip_unused_reconstructions && config.s2v_leave_slice_out,
+        min_stack_coverage: config.min_stack_coverage,
         cycles,
         alpha: config.alpha,
         cg_max_iterations: config.cg_max_iterations,
@@ -227,7 +231,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
 
 /// Volume reconstruit sur `grid` avec des poses données : gradient conjugué (réglages `alpha`, `cg_max_iterations` et `cg_tolerance` de `config`) depuis l'adjoint normalisé.
 pub(crate) fn reconstruct_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: &ReconstructionConfig) -> Result<Array3<f64>, SvrError> {
-    let mut problem = ReconstructionProblem::with_poses(grid, stacks, poses, config.alpha)?;
+    let mut problem = ReconstructionProblem::with_poses_covered(grid, stacks, poses, config.alpha, config.min_stack_coverage)?;
     let x0 = problem.initial_guess();
     if config.edge_kappa > 0.0 {
         Ok(problem.conjugate_gradient_edge_preserving(&x0, config.cg_max_iterations, config.cg_tolerance, config.edge_outer, config.edge_kappa).x)

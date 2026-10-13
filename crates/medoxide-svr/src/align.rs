@@ -613,6 +613,8 @@ pub struct LoopConfig {
     pub cg_max_iterations: usize,
     /// Tolérance relative du gradient conjugué.
     pub cg_tolerance: f64,
+    /// Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit ([`ReconstructionProblem::with_poses_covered`]) ; 0 ou 1 : aucune restriction. Concerne les reconstructions du domaine complet (la dernière, et celles lues par le recalage).
+    pub min_stack_coverage: usize,
     /// Saute les reconstructions **inutiles** : avec `leave_one_slice_out_cycles`, la référence de chaque coupe est calculée à partir des autres coupes (adjoint normalisé), pas à partir du volume reconstruit du cycle ;
     /// ce volume ne servirait qu'à amorcer la reconstruction suivante. Si `true`, les cycles concernés ne reconstruisent pas (et n'appellent pas l'observateur) : seule la dernière reconstruction est faite.
     pub skip_unused_reconstructions: bool,
@@ -684,7 +686,7 @@ pub fn reconstruct_with_motion_correction(
         let resultat = if inutile {
             None
         } else {
-            let probleme = ReconstructionProblem::with_poses(grid, stacks, &poses, config.alpha)?;
+            let probleme = ReconstructionProblem::with_poses_covered(grid, stacks, &poses, config.alpha, config.min_stack_coverage)?;
             let depart = x.take().unwrap_or_else(|| probleme.initial_guess());
             let resultat = probleme.conjugate_gradient(&depart, config.cg_max_iterations, config.cg_tolerance);
             iterations.push(resultat.iterations);
