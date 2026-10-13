@@ -2697,11 +2697,11 @@ mod tests {
     #[test]
     fn the_pipeline_maps_every_setting_to_the_loop_config() {
         let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, ..Default::default() };
-        for sans_la_coupe in [true, false] {
-            let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, ..base.clone() };
+        for (sans_la_coupe, par_lots) in [(true, false), (false, true), (true, true)] {
+            let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, s2v_batched: par_lots, ..base.clone() };
             let attendu = align::LoopConfig {
                 cycles: 4, alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3,
-                robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, ..RobustConfig::new(0.7) },
+                robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, batched: par_lots, ..RobustConfig::new(0.7) },
                 leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
                 leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
             };
@@ -3157,6 +3157,44 @@ mod tests {
                 // (b) déterminisme
                 let encore = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
                 assert_eq!(ecart(&parallele.poses, &encore.poses), 0.0, "deux exécutions parallèles diffèrent");
+            }
+        }
+    }
+
+    /// Recalage par lots (critères fixés avant, jeu de blobs sur CPU, mêmes réglages que le test du parallèle) : (a) avec `batched = true` mêmes coupes recalées et mêmes nombres de recalages (relances comprises) qu'avec
+    /// `batched = false`, poses à 1e-3 près (toute entrée de matrice, mm) et NCC à 1e-4 près, pour les fenêtres 0 et 2 ; (b) deux exécutions par lots donnent des poses identiques au bit près ; (c) avec du gros-vers-fin
+    /// (σ > 0), l'option `batched` est ignorée (même résultat qu'en coupe par coupe).
+    #[test]
+    fn the_batched_registration_equals_the_per_slice_one() {
+        let t = Temp::new("loso_lots");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
+        let base = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, lr_decay: 0.93, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 2, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
+        let lots = RobustConfig { batched: true, ..base };
+        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        for (fenetre, sigma) in [(0usize, 0.0), (2, 0.0), (0, 1.0)] {
+            let seul = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, base, &device).unwrap();
+            let lot = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device).unwrap();
+            assert_eq!(seul.slices.len(), lot.slices.len());
+            for (a, b) in seul.slices.iter().zip(&lot.slices) {
+                assert_eq!((a.stack, a.slice, a.registered, a.runs), (b.stack, b.slice, b.registered, b.runs), "(fenêtre {fenetre}, σ {sigma}) : {a:?} contre {b:?}");
+                assert!((a.ncc_first - b.ncc_first).abs() < 1e-4 && (a.ncc_final - b.ncc_final).abs() < 1e-4, "NCC différentes : {a:?} contre {b:?}");
+            }
+            let e = ecart(&seul.poses, &lot.poses);
+            let relancees = lot.slices.iter().filter(|r| r.runs > 1).count();
+            println!("(fenêtre {fenetre}, σ {sigma}) : {} coupes recalées dont {relancees} relancées, écart de poses lot / coupe par coupe {e:.2e}", lot.slices.iter().filter(|r| r.registered).count());
+            assert!(e < 1e-3, "(fenêtre {fenetre}, σ {sigma}) : écart de poses {e}");
+            if sigma == 0.0 {
+                assert!(relancees >= 10, "trop peu de relances pour tester le second lot : {relancees}");
+            }
+            if fenetre == 0 && sigma == 0.0 {
+                let encore = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device).unwrap();
+                assert_eq!(ecart(&lot.poses, &encore.poses), 0.0, "deux exécutions par lots diffèrent");
             }
         }
     }

@@ -142,6 +142,8 @@ fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path,
         }
         let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
         let kind = device.map_or_else(|| medoxide_svr::pipeline::default_device_kind(config.motion), DeviceKind::from);
+        // sur GPU, le recalage coupe-volume se fait par lots (bien plus rapide) ; sur CPU, le lot n'apporte rien
+        let config = &ReconstructionConfig { s2v_batched: kind == DeviceKind::Wgpu, ..config.clone() };
         eprintln!("{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}", stacks.len(), config.motion, match kind { DeviceKind::Wgpu => "GPU (wgpu)", DeviceKind::Cpu => "CPU (flex)" });
         let sortie_reconstruction = medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
         sortie_reconstruction.write_volume(sortie)?;

@@ -87,6 +87,8 @@ pub struct ReconstructionConfig {
     /// Coupe-volume : chaque coupe est recalée contre une reconstruction qui **ne la contient pas** (`true`, la meilleure option mesurée sur données réelles),
     /// ou contre une reconstruction faite sans son stack entier (`false`, l'ancienne boucle).
     pub s2v_leave_slice_out: bool,
+    /// Coupe-volume : recaler toutes les coupes d'un stack par lots (voir [`crate::diff::register_slices_robust_batch`]). Même calcul ; bien plus rapide sur GPU, sans gain sur CPU.
+    pub s2v_batched: bool,
 }
 
 impl Default for ReconstructionConfig {
@@ -104,6 +106,7 @@ impl Default for ReconstructionConfig {
             s2v_start_amplitude_mm: 5.0,
             s2v_suspect_ncc: 0.9,
             s2v_leave_slice_out: true,
+            s2v_batched: false,
         }
     }
 }
@@ -196,7 +199,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
         alpha: config.alpha,
         cg_max_iterations: config.cg_max_iterations,
         cg_tolerance: config.cg_tolerance,
-        robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, ..RobustConfig::new(config.s2v_suspect_ncc) },
+        robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, batched: config.s2v_batched, ..RobustConfig::new(config.s2v_suspect_ncc) },
         leave_one_stack_out_cycles: if config.s2v_leave_slice_out { 0 } else { cycles },
         coarse_sigma_voxels: 0.0,
         leave_one_slice_out_cycles: if config.s2v_leave_slice_out { cycles } else { 0 },

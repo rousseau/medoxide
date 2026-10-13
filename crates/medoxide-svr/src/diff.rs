@@ -97,9 +97,20 @@ pub struct TrilinearSampleBatch {
 /// # Panics
 /// Si un axe de `dims` est nul, si `volumes` n'a pas `S·nx·ny·nz` éléments ou si les tenseurs ne sont pas sur le même `Device`.
 pub fn trilinear_sample_batch(volumes: &Tensor<1>, dims: [usize; 3], coords: Tensor<3>) -> TrilinearSampleBatch {
+    let s = coords.dims()[0];
+    let device = coords.device();
+    trilinear_sample_rows(volumes, dims, s, coords, Tensor::<1, Int>::arange(0..s as i64, &device))
+}
+
+/// Comme [`trilinear_sample_batch`], mais chaque **ligne** `r` de `coords` (`[R, P, 3]`) lit le volume numéro `volume_of_row[r]` parmi les `n_volumes` de `volumes` : plusieurs lignes (par exemple les
+/// départs multiples d'une même coupe) partagent ainsi un volume sans le recopier.
+///
+/// # Panics
+/// Si un axe de `dims` est nul ou si `volumes` n'a pas `n_volumes·nx·ny·nz` éléments.
+pub(crate) fn trilinear_sample_rows(volumes: &Tensor<1>, dims: [usize; 3], n_volumes: usize, coords: Tensor<3>, volume_of_row: Tensor<1, Int>) -> TrilinearSampleBatch {
     assert!(dims.iter().all(|&n| n > 0), "chaque axe doit avoir au moins un voxel");
     let [s, p, _] = coords.dims();
-    assert_eq!(volumes.dims()[0], s * dims[0] * dims[1] * dims[2], "il faut un volume par coupe, de dimensions `dims`");
+    assert_eq!(volumes.dims()[0], n_volumes * dims[0] * dims[1] * dims[2], "il faut un volume par coupe, de dimensions `dims`");
     let device = coords.device();
     let taille = (dims[0] * dims[1] * dims[2]) as i64;
 
@@ -120,8 +131,8 @@ pub fn trilinear_sample_batch(volumes: &Tensor<1>, dims: [usize; 3], coords: Ten
         haut.push((i0.clone() + 1).clamp(0, dims[a] as i64 - 1));
         bas.push(i0);
     }
-    // décalage de chaque coupe dans le tenseur des volumes : s · taille, forme [S, 1] diffusée sur les P points
-    let decalage: Tensor<2, Int> = Tensor::<1, Int>::arange(0..s as i64, &device).mul_scalar(taille).reshape([s, 1]).expand([s, p]);
+    // décalage de la ligne r dans le tenseur des volumes : volume_of_row[r] · taille, forme [R, 1] diffusée sur les P points
+    let decalage: Tensor<2, Int> = volume_of_row.mul_scalar(taille).reshape([s, 1]).expand([s, p]);
     let pas = [(dims[1] * dims[2]) as i64, dims[2] as i64, 1];
     let mut valeurs = Tensor::<2>::zeros([s, p], &device);
     for coin in 0..8usize {
@@ -198,6 +209,51 @@ pub fn apply_pose(points: Tensor<2>, pivot: Tensor<1>, params: Tensor<1>, rotati
     let r = rotation_matrix(phi / rotation_scale_mm);
     let pivot = pivot.reshape([1, 3]);
     (points - pivot.clone()).matmul(r.transpose()) + pivot + t
+}
+
+/// Comme [`rotation_matrix`], pour `R` vecteurs de rotation à la fois : `omega` de forme `[R, 3]`, résultat `[R, 3, 3]` (une matrice par ligne). Même formule de Rodrigues, mêmes séries de Taylor pour les petits angles,
+/// choisies **ligne par ligne**.
+pub fn rotation_matrix_batch(omega: Tensor<2>) -> Tensor<3> {
+    let device = omega.device();
+    let r = omega.dims()[0];
+    let generateurs = Tensor::<4>::from_floats(
+        TensorData::new(
+            vec![
+                0.0_f32, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, // E_x
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, // E_y
+                0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, // E_z
+            ],
+            [1, 3, 3, 3],
+        ),
+        &device,
+    );
+    // K[r] = somme des omega[r, i] · E_i : forme [R, 3, 3]
+    let k: Tensor<3> = (generateurs * omega.clone().reshape([r, 3, 1, 1])).sum_dim(1).reshape([r, 3, 3]);
+
+    let th2 = (omega.clone() * omega).sum_dim(1); // [R, 1]
+    let petit = th2.clone().lower_elem(ROTATION_SERIES_THETA2);
+    let th2_sur = th2.clone().mask_where(petit.clone(), Tensor::<2>::ones([r, 1], &device));
+    let th = th2_sur.clone().sqrt();
+    let a_exacte = th.clone().sin() / th.clone();
+    let b_exacte = (th.cos().neg() + 1.0) / th2_sur;
+    let th4 = th2.clone() * th2.clone();
+    let a_serie = th2.clone().neg() / 6.0 + th4.clone() / 120.0 + 1.0;
+    let b_serie = th2.neg() / 24.0 + th4 / 720.0 + 0.5;
+    let a = a_exacte.mask_where(petit.clone(), a_serie).reshape([r, 1, 1]);
+    let b = b_exacte.mask_where(petit, b_serie).reshape([r, 1, 1]);
+
+    let identite = Tensor::<3>::from_floats(TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [1, 3, 3]), &device);
+    identite + a * k.clone() + b * k.clone().matmul(k)
+}
+
+/// Comme [`apply_pose`], pour `R` lignes à la fois : `points` `[R, P, 3]`, `pivot` `[R, 3]`, `params` `[R, 6]`, `rotation_scale_mm` `[R, 1]` (une échelle de rotation par ligne). Rend `[R, P, 3]`.
+pub fn apply_pose_batch(points: Tensor<3>, pivot: Tensor<2>, params: Tensor<2>, rotation_scale_mm: Tensor<2>) -> Tensor<3> {
+    let r = points.dims()[0];
+    let phi = params.clone().narrow(1, 0, 3);
+    let t = params.narrow(1, 3, 3).reshape([r, 1, 3]);
+    let rot = rotation_matrix_batch(phi / rotation_scale_mm);
+    let pivot = pivot.reshape([r, 1, 3]);
+    (points - pivot.clone()).matmul(rot.swap_dims(1, 2)) + pivot + t
 }
 
 /// Échelle de la rotation, en mm : `√(2/3) · r_rms`, où `r_rms` est la distance quadratique moyenne des `points` au `pivot`.
@@ -335,6 +391,182 @@ pub fn register_slice(
     RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
 }
 
+/// Les `n` volumes de référence d'un lot de coupes (un par coupe, de même grille), sur le `Device` : voxels de tous les volumes mis bout à bout, et l'inverse de l'affine (monde → indices de voxel) commun.
+pub struct BatchVolumes {
+    data: Tensor<1>,
+    dims: [usize; 3],
+    count: usize,
+    inverse_linear: Tensor<2>,
+    inverse_offset: Tensor<1>,
+}
+
+impl BatchVolumes {
+    /// `voxels` : les `count` volumes bout à bout (chacun dans l'ordre standard d'un `Array3`, de la taille de `geometry`) ; `geometry` donne les dimensions et l'affine communes.
+    ///
+    /// # Panics
+    /// Si `voxels` n'a pas `count` fois le nombre de voxels de `geometry`.
+    pub fn new(voxels: &[f32], count: usize, geometry: &Volume, device: &Device) -> BatchVolumes {
+        let (nx, ny, nz) = geometry.dim();
+        assert_eq!(voxels.len(), count * nx * ny * nz, "il faut `count` volumes de la taille de la géométrie");
+        let inverse = &geometry.inverse;
+        let lineaire: Vec<f32> = (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| inverse[(r, c)] as f32).collect();
+        let decalage: Vec<f32> = (0..3).map(|r| inverse[(r, 3)] as f32).collect();
+        BatchVolumes {
+            data: Tensor::<1>::from_floats(voxels, device),
+            dims: [nx, ny, nz],
+            count,
+            inverse_linear: Tensor::<2>::from_floats(TensorData::new(lineaire, [3, 3]), device),
+            inverse_offset: Tensor::<1>::from_floats(decalage.as_slice(), device),
+        }
+    }
+}
+
+/// Une coupe à recaler dans un lot : positions monde de ses pixels de masque (à sa pose courante), intensités, pivot et échelle de rotation.
+pub struct BatchSlice<'a> {
+    /// Positions monde des pixels de masque, mm.
+    pub points: &'a [Vector3<f64>],
+    /// Intensités de ces pixels.
+    pub intensities: &'a [f64],
+    /// Pivot de la rotation, mm.
+    pub pivot: Vector3<f64>,
+    /// Échelle de la rotation, mm (voir [`rotation_scale_mm`]).
+    pub rotation_scale_mm: f64,
+}
+
+/// Les données d'un lot de coupes, **complétées** au même nombre de pixels `P` (le plus grand du lot) : un pixel de complément est une copie du premier point de sa coupe, de poids nul, donc sans effet sur la NCC ni sur le gradient.
+pub struct BatchSlices {
+    points: Tensor<3>,
+    intensities: Tensor<2>,
+    weights: Tensor<2>,
+    pivot: Tensor<2>,
+    scale: Tensor<2>,
+}
+
+impl BatchSlices {
+    /// Assemble le lot.
+    ///
+    /// # Panics
+    /// Si une coupe n'a aucun pixel, ou si ses positions et ses intensités n'ont pas le même nombre d'éléments.
+    pub fn new(slices: &[BatchSlice], device: &Device) -> BatchSlices {
+        let r = slices.len();
+        let p = slices.iter().map(|s| s.points.len()).max().unwrap_or(0);
+        let (mut pts, mut ints, mut poids) = (Vec::with_capacity(r * p * 3), Vec::with_capacity(r * p), Vec::with_capacity(r * p));
+        let (mut pivots, mut echelles) = (Vec::with_capacity(r * 3), Vec::with_capacity(r));
+        for s in slices {
+            assert!(!s.points.is_empty() && s.points.len() == s.intensities.len(), "une coupe doit avoir autant de positions que d'intensités, et au moins un pixel");
+            for n in 0..p {
+                let reel = n < s.points.len();
+                let q = if reel { &s.points[n] } else { &s.points[0] };
+                pts.extend([q.x as f32, q.y as f32, q.z as f32]);
+                ints.push(if reel { s.intensities[n] as f32 } else { 0.0 });
+                poids.push(if reel { 1.0_f32 } else { 0.0 });
+            }
+            pivots.extend([s.pivot.x as f32, s.pivot.y as f32, s.pivot.z as f32]);
+            echelles.push(s.rotation_scale_mm as f32);
+        }
+        BatchSlices {
+            points: Tensor::<3>::from_floats(TensorData::new(pts, [r, p, 3]), device),
+            intensities: Tensor::<2>::from_floats(TensorData::new(ints, [r, p]), device),
+            weights: Tensor::<2>::from_floats(TensorData::new(poids, [r, p]), device),
+            pivot: Tensor::<2>::from_floats(TensorData::new(pivots, [r, 3]), device),
+            scale: Tensor::<2>::from_floats(TensorData::new(echelles, [r, 1]), device),
+        }
+    }
+
+    /// Nombre de coupes du lot.
+    pub fn len(&self) -> usize {
+        self.points.dims()[0]
+    }
+
+    /// Les coupes `rows` (avec répétitions possibles) comme un nouveau lot : sert à lancer plusieurs départs d'une même coupe.
+    fn select(&self, rows: &[usize]) -> BatchSlices {
+        let device = self.points.device();
+        let idx = Tensor::<1, Int>::from_ints(rows.iter().map(|&r| r as i64).collect::<Vec<_>>().as_slice(), &device);
+        BatchSlices {
+            points: self.points.clone().select(0, idx.clone()),
+            intensities: self.intensities.clone().select(0, idx.clone()),
+            weights: self.weights.clone().select(0, idx.clone()),
+            pivot: self.pivot.clone().select(0, idx.clone()),
+            scale: self.scale.clone().select(0, idx),
+        }
+    }
+}
+
+/// Les paramètres de pose de `R` lignes, dans un `Module` (forme `[R, 6]`) : l'optimiseur met à jour chaque élément indépendamment des autres.
+#[derive(Module, Debug)]
+pub(crate) struct PoseBatchModule {
+    pub(crate) params: Param<Tensor<2>>,
+}
+
+/// NCC de chaque ligne `[R]` pour les poses `params` `[R, 6]` : la chaîne de [`slice_ncc`] pour `R` lignes à la fois ; la ligne `r` lit le volume `volume_of_row[r]`.
+fn batch_ncc(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row: &Tensor<1, Int>, params: Tensor<2>) -> Tensor<1> {
+    let [r, p, _] = slices.points.dims();
+    let deplaces = apply_pose_batch(slices.points.clone(), slices.pivot.clone(), params, slices.scale.clone());
+    let voxels = deplaces.reshape([r * p, 3]).matmul(volumes.inverse_linear.clone().transpose()).reshape([r, p, 3]) + volumes.inverse_offset.clone().reshape([1, 1, 3]);
+    let lecture = trilinear_sample_rows(&volumes.data, volumes.dims, volumes.count, voxels, volume_of_row.clone());
+    ncc(slices.intensities.clone(), lecture.values, slices.weights.clone() * lecture.inside)
+}
+
+/// **Recale `R` lignes à la fois** (Adam sur un seul tenseur `[R, 6]`) : la ligne `r` part de `initial[r]` et cherche la pose de NCC maximale contre le volume `volume_of_row[r]`, avec les réglages `config` (hors `initial`).
+/// Chaque ligne évolue comme [`register_slice`] : la perte est la somme des `−NCC` de chaque ligne (donc le gradient d'une ligne ne dépend pas des autres) et Adam agit élément par élément. Rend les poses finales et les NCC finales.
+///
+/// # Panics
+/// Si `initial` et `volume_of_row` n'ont pas autant d'éléments que `slices` de coupes.
+pub fn register_rows(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row: &[usize], initial: &[[f64; 6]], config: RegistrationConfig) -> (Vec<[f64; 6]>, Vec<f64>) {
+    let r = slices.len();
+    assert!(initial.len() == r && volume_of_row.len() == r, "une pose de départ et un volume par ligne");
+    let device = slices.points.device();
+    let depart: Vec<f32> = initial.iter().flat_map(|p| p.iter().map(|&v| v as f32)).collect();
+    let mut module = PoseBatchModule { params: Param::from_tensor(Tensor::<2>::from_floats(TensorData::new(depart, [r, 6]), &device)) };
+    let volume_idx = Tensor::<1, Int>::from_ints(volume_of_row.iter().map(|&v| v as i64).collect::<Vec<_>>().as_slice(), &device);
+    let mut optimiseur = AdamConfig::new().init();
+    let mut pas = config.learning_rate;
+    for _ in 0..config.iterations {
+        let correlation = batch_ncc(volumes, slices, &volume_idx, module.params.val());
+        let gradients = correlation.neg().sum().backward(); // perte = somme des −NCC
+        let gradients = GradientsParams::from_grads(gradients, &module);
+        module = optimiseur.step(pas, module, gradients);
+        pas *= config.lr_decay;
+    }
+    let finales = module.params.val();
+    let ncc_finale: Vec<f32> = batch_ncc(volumes, slices, &volume_idx, finales.clone()).into_data().try_to_vec::<f32>().unwrap();
+    let params: Vec<f32> = finales.into_data().try_to_vec::<f32>().unwrap();
+    let poses = (0..r).map(|i| std::array::from_fn(|c| f64::from(params[i * 6 + c]))).collect();
+    (poses, ncc_finale.iter().map(|&v| f64::from(v)).collect())
+}
+
+/// **Recalage robuste de `R` coupes à la fois** : comme [`register_slice_robust`] pour chaque coupe (premier recalage depuis `config.base.initial` ; si sa NCC finale est inférieure à `config.suspect_ncc`, relance depuis les
+/// `config.extra_starts` poses de départ déterministes, et garde la pose de NCC finale la plus haute), mais le premier recalage de toutes les coupes forme un lot, puis les relances de toutes les coupes suspectes en forment un autre.
+/// La coupe `r` lit le volume `r` de `volumes`. Rend un [`RobustResult`] par coupe.
+pub fn register_slices_robust_batch(volumes: &BatchVolumes, slices: &BatchSlices, config: RobustConfig) -> Vec<RobustResult> {
+    let r = slices.len();
+    let toutes: Vec<usize> = (0..r).collect();
+    let (poses, nccs) = register_rows(volumes, slices, &toutes, &vec![config.base.initial; r], config.base);
+    let mut resultats: Vec<RobustResult> = (0..r).map(|i| RobustResult { params: poses[i], ncc: nccs[i], first_ncc: nccs[i], runs: 1 }).collect();
+    let suspectes: Vec<usize> = (0..r).filter(|&i| nccs[i] < config.suspect_ncc).collect();
+    let departs = departs_deterministes(config.extra_starts, config.start_amplitude_mm, config.seed);
+    if suspectes.is_empty() || departs.is_empty() {
+        return resultats;
+    }
+    // une ligne par (coupe suspecte, départ), dans cet ordre : les départs d'une coupe sont consécutifs
+    let (mut lignes, mut initiaux) = (Vec::new(), Vec::new());
+    for &i in &suspectes {
+        for d in &departs {
+            lignes.push(i);
+            initiaux.push(*d);
+        }
+    }
+    let (poses2, nccs2) = register_rows(volumes, &slices.select(&lignes), &lignes, &initiaux, config.base);
+    for (n, &i) in lignes.iter().enumerate() {
+        resultats[i].runs += 1;
+        if nccs2[n] > resultats[i].ncc {
+            resultats[i].ncc = nccs2[n];
+            resultats[i].params = poses2[n];
+        }
+    }
+    resultats
+}
+
 /// Réglages de [`register_slice_robust`].
 #[derive(Debug, Clone, Copy)]
 pub struct RobustConfig {
@@ -350,6 +582,9 @@ pub struct RobustConfig {
     pub start_amplitude_mm: f64,
     /// Graine du tirage (déterministe : mêmes départs pour la même graine).
     pub seed: u64,
+    /// Recaler toutes les coupes d'un stack **par lots** ([`register_slices_robust_batch`]) au lieu d'une à la fois : même calcul, bien plus rapide sur GPU, sans gain sur CPU. Pris en compte par
+    /// [`crate::align::register_slices_leave_window_out`] (sans gros-vers-fin) ; ignoré ailleurs.
+    pub batched: bool,
 }
 
 /// Résultat de [`register_slice_robust`].
@@ -440,7 +675,7 @@ impl RobustConfig {
     /// Recalage robuste par défaut : `RegistrationConfig::DEFAULT`, relance depuis 6 départs dans ±5 mm si la NCC finale est inférieure à
     /// `suspect_ncc`, graine 8675309 (celle du diagnostic). Le seuil dépend du montage : voir [`RobustConfig::suspect_ncc`].
     pub fn new(suspect_ncc: f64) -> RobustConfig {
-        RobustConfig { base: RegistrationConfig::DEFAULT, suspect_ncc, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309 }
+        RobustConfig { base: RegistrationConfig::DEFAULT, suspect_ncc, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309, batched: false }
     }
 }
 
@@ -1535,7 +1770,7 @@ mod tests {
         }
     }
 
-    const ROBUSTE_REEL: RobustConfig = RobustConfig { base: CONFIG_RECALAGE, suspect_ncc: 0.64, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309 };
+    const ROBUSTE_REEL: RobustConfig = RobustConfig { base: CONFIG_RECALAGE, suspect_ncc: 0.64, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309, batched: false };
 
     /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est
     /// jamais inférieure à celle du premier recalage.
@@ -1788,5 +2023,54 @@ mod tests {
             // critère (c) : constaté NON atteint sur le CPU (rapport 1,0) ; on affiche le verdict au lieu de l'asserter pour pouvoir mesurer aussi le GPU
             println!("{nom} : critère « lot ≥ 5 fois plus rapide » {}", if t_seq / t_lot >= 5.0 { "atteint" } else if critere { "NON atteint (CPU)" } else { "non atteint" });
         }
+    }
+
+    /// Pose par lots (critère fixé avant) : `apply_pose_batch` égale `apply_pose` appelé coupe par coupe (écart ≤ 1e-4 mm) pour 6 lignes dont une rotation nulle, une rotation minuscule (série de Taylor), une de θ² juste sous le seuil de la
+    /// série et des rotations ordinaires, avec des pivots et des échelles de rotation différents ; le lot est aussi différentiable (gradient fini).
+    #[test]
+    fn the_batched_pose_equals_the_per_slice_pose() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let (r, p) = (6usize, 40usize);
+        let mut alea = Alea(3);
+        let points: Vec<f32> = (0..r * p * 3).map(|_| (alea.suivant() * 100.0 - 50.0) as f32).collect();
+        let pivots: Vec<f32> = (0..r * 3).map(|_| (alea.suivant() * 10.0 - 5.0) as f32).collect();
+        let echelles: Vec<f32> = (0..r).map(|i| 20.0 + 7.0 * i as f32).collect();
+        // lignes : nulle, minuscule, juste sous le seuil de la série (θ² = 9e-3), puis ordinaires
+        let rotations = [[0.0_f32; 3], [1e-4, -2e-4, 1e-4], [0.06, 0.05, 0.04], [0.3, -0.2, 0.5], [1.0, 0.4, -0.7], [0.02, 0.0, 0.0]];
+        let params: Vec<f32> = (0..r).flat_map(|i| rotations[i].iter().map(|v| v * echelles[i]).chain([1.5 - i as f32, -2.0 + 0.5 * i as f32, 0.3 * i as f32]).collect::<Vec<f32>>()).collect();
+        let pts3 = Tensor::<3>::from_floats(TensorData::new(points.clone(), [r, p, 3]), &device);
+        let lot = apply_pose_batch(
+            pts3,
+            Tensor::<2>::from_floats(TensorData::new(pivots.clone(), [r, 3]), &device),
+            Tensor::<2>::from_floats(TensorData::new(params.clone(), [r, 6]), &device).require_grad(),
+            Tensor::<2>::from_floats(TensorData::new(echelles.clone(), [r, 1]), &device),
+        );
+        let lot = lot.into_data().try_to_vec::<f32>().unwrap();
+        let mut pire = 0.0_f32;
+        for i in 0..r {
+            let seul = apply_pose(
+                Tensor::<2>::from_floats(TensorData::new(points[i * p * 3..(i + 1) * p * 3].to_vec(), [p, 3]), &device),
+                Tensor::<1>::from_floats(&pivots[i * 3..(i + 1) * 3], &device),
+                Tensor::<1>::from_floats(&params[i * 6..(i + 1) * 6], &device),
+                f64::from(echelles[i]),
+            );
+            let seul = seul.into_data().try_to_vec::<f32>().unwrap();
+            for (a, b) in seul.iter().zip(&lot[i * p * 3..(i + 1) * p * 3]) {
+                pire = pire.max((a - b).abs());
+            }
+        }
+        println!("écart maximal lot / coupe par coupe : {pire:.2e} mm");
+        assert!(pire <= 1e-4, "écart {pire}");
+        // différentiable : gradient fini et non nul pour une rotation non nulle
+        let pa = Tensor::<2>::from_floats(TensorData::new(params, [r, 6]), &device).require_grad();
+        let sortie = apply_pose_batch(
+            Tensor::<3>::from_floats(TensorData::new(points, [r, p, 3]), &device),
+            Tensor::<2>::from_floats(TensorData::new(pivots, [r, 3]), &device),
+            pa.clone(),
+            Tensor::<2>::from_floats(TensorData::new(echelles, [r, 1]), &device),
+        );
+        let g = sortie.powf_scalar(2.0).sum().backward();
+        let g = pa.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap();
+        assert!(g.iter().all(|v| v.is_finite()) && g.iter().any(|v| v.abs() > 1e-3), "gradient : {g:?}");
     }
 }
