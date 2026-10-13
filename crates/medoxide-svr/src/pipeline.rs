@@ -83,6 +83,12 @@ pub struct ReconstructionConfig {
     pub edge_kappa: f64,
     /// Nombre de repondérations de Huber (avec `edge_kappa > 0`).
     pub edge_outer: usize,
+    /// Coupe-coupe, gros vers fin : écart type (pixels) du flou des coupes pour les premiers balayages, qui élargit la portée de capture ; 0 : pas de passe grossière.
+    pub s2s_coarse_sigma_pixels: f64,
+    /// Coupe-coupe : nombre de balayages avec les images floutées (avec `s2s_coarse_sigma_pixels > 0`), à chaque niveau.
+    pub s2s_coarse_sweeps: usize,
+    /// Coupe-coupe : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau) ; 1 : un seul niveau.
+    pub s2s_coarse_levels: usize,
     /// Coupe-coupe : nombre de balayages (chaque balayage recale toutes les coupes une fois).
     pub s2s_sweeps: usize,
     /// Coupe-volume : nombre de cycles « recaler puis reconstruire ».
@@ -115,6 +121,9 @@ impl Default for ReconstructionConfig {
             cg_max_iterations: 300,
             cg_tolerance: 1e-4,
             s2s_sweeps: 3,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_coarse_sweeps: 2,
+            s2s_coarse_levels: 1,
             s2v_cycles: 6,
             s2v_extra_starts: 6,
             s2v_start_amplitude_mm: 5.0,
@@ -193,8 +202,7 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
     let header_poses = SlicePoses::identity(stacks);
     match config.motion {
         Motion::SliceToSlice => {
-            let s2s = S2sConfig { sweeps: config.s2s_sweeps, ..Default::default() };
-            let poses = register_slices_s2s(stacks, &header_poses, &s2s, device)?.poses;
+            let poses = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?.poses;
             let volume = reconstruct_with_poses(&grid, stacks, &poses, config)?;
             Ok(ReconstructionOutput { grid, volume, poses })
         }
@@ -237,5 +245,16 @@ pub(crate) fn reconstruct_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &
         Ok(problem.conjugate_gradient_edge_preserving(&x0, config.cg_max_iterations, config.cg_tolerance, config.edge_outer, config.edge_kappa).x)
     } else {
         Ok(problem.conjugate_gradient(&x0, config.cg_max_iterations, config.cg_tolerance).x)
+    }
+}
+
+/// Réglages du recalage coupe-coupe correspondant à `config`.
+pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
+    S2sConfig {
+        sweeps: config.s2s_sweeps,
+        coarse_sigma_pixels: config.s2s_coarse_sigma_pixels,
+        coarse_sweeps: config.s2s_coarse_sweeps,
+        coarse_levels: config.s2s_coarse_levels,
+        ..Default::default()
     }
 }

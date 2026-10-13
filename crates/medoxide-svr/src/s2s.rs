@@ -7,6 +7,7 @@ use burn::module::Param;
 use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
+use ndarray::{Array2, ArrayView2};
 
 use crate::diff::{ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
@@ -79,12 +80,52 @@ pub struct SliceAtlas {
     entries: Vec<Vec<(usize, [usize; 2])>>,
 }
 
+/// Flou gaussien 2D séparable d'une coupe **dans son masque** (convolution normalisée) : `flou(image · masque) / flou(masque)`, pour que le fond (hors masque) n'entre pas dans les pixels voisins. `sigma_pixels` = 0 : l'image telle quelle.
+/// Les bords de la coupe sont traités par répétition du pixel de bord. Un pixel de masque dont le voisinage n'a aucun poids garde sa valeur.
+pub(crate) fn blur_slice_in_mask(image: ArrayView2<f32>, masque: ArrayView2<bool>, sigma_pixels: f64) -> Array2<f32> {
+    if sigma_pixels <= 0.0 {
+        return image.to_owned();
+    }
+    let rayon = (3.0 * sigma_pixels).ceil() as isize;
+    let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma_pixels).powi(2)).exp()).collect();
+    // pas de normalisation du noyau : elle s'annulerait dans le rapport signal / masque
+    let mut valeurs = image.mapv(|v| f64::from(v));
+    let mut poids = masque.mapv(|m| if m { 1.0_f64 } else { 0.0 });
+    valeurs.zip_mut_with(&poids, |v, &w| *v *= w);
+    for axe in 0..2 {
+        for tableau in [&mut valeurs, &mut poids] {
+            for mut ligne in tableau.lanes_mut(ndarray::Axis(axe)) {
+                let n = ligne.len() as isize;
+                let source: Vec<f64> = ligne.iter().copied().collect();
+                for (i, v) in ligne.iter_mut().enumerate() {
+                    *v = noyau.iter().enumerate().map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize]).sum();
+                }
+            }
+        }
+    }
+    let mut sortie = image.to_owned();
+    for ((i, j), v) in sortie.indexed_iter_mut() {
+        if masque[[i, j]] && poids[[i, j]] > 1e-12 {
+            *v = (valeurs[[i, j]] / poids[[i, j]]) as f32;
+        }
+    }
+    sortie
+}
+
 impl SliceAtlas {
     /// Construit l'atlas de `stacks` (masques requis) sur `device`.
     ///
     /// # Erreurs
     /// [`SvrError::NoMask`] si un stack n'a pas de masque.
     pub fn new(stacks: &[Stack], device: &Device) -> Result<SliceAtlas, SvrError> {
+        SliceAtlas::new_blurred(stacks, device, 0.0)
+    }
+
+    /// Comme [`SliceAtlas::new`], mais chaque coupe est floutée dans son masque (écart type `sigma_pixels`, voir [`blur_slice_in_mask`]) : des profils plus lisses élargissent le bassin d'attraction du recalage (gros vers fin).
+    ///
+    /// # Erreurs
+    /// [`SvrError::NoMask`] si un stack n'a pas de masque.
+    pub fn new_blurred(stacks: &[Stack], device: &Device, sigma_pixels: f64) -> Result<SliceAtlas, SvrError> {
         let (mut images, mut masks, mut entries) = (Vec::new(), Vec::new(), Vec::new());
         for stack in stacks {
             let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?.voxels();
@@ -92,9 +133,10 @@ impl SliceAtlas {
             let mut e = Vec::with_capacity(nz);
             for k in 0..nz {
                 e.push((images.len(), [nx, ny]));
+                let lisse = blur_slice_in_mask(stack.data().index_axis(ndarray::Axis(2), k), masque.index_axis(ndarray::Axis(2), k), sigma_pixels);
                 for i in 0..nx {
                     for j in 0..ny {
-                        images.push(stack.data()[[i, j, k]]);
+                        images.push(lisse[[i, j]]);
                         masks.push(if masque[[i, j, k]] { 1.0_f32 } else { 0.0 });
                     }
                 }
@@ -405,11 +447,17 @@ pub struct S2sConfig {
     pub intersection: IntersectionConfig,
     /// Graine de l'ordre des coupes (déterministe).
     pub seed: u64,
+    /// Gros vers fin : écart type (en pixels) du flou des coupes pour les `coarse_sweeps` premiers balayages, qui précèdent les `sweeps` balayages sur les images nettes (0 : pas de passe grossière).
+    pub coarse_sigma_pixels: f64,
+    /// Nombre de balayages avec les images floutées (avec `coarse_sigma_pixels > 0`), à chaque niveau.
+    pub coarse_sweeps: usize,
+    /// Nombre de niveaux grossiers : le niveau `l` (0 = le plus grossier) floute avec `coarse_sigma_pixels / 2^l` ; 1 : un seul niveau.
+    pub coarse_levels: usize,
 }
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1 }
     }
 }
 
@@ -424,6 +472,19 @@ fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
         ordre.swap(i, (etat % (i as u64 + 1)) as usize);
     }
     ordre
+}
+
+/// Calendrier des balayages de [`register_slices_s2s`] : une liste de `(écart type du flou en pixels, nombre de balayages, net)`. D'abord les niveaux grossiers (`coarse_levels` niveaux, le flou `coarse_sigma_pixels` divisé par 2 à chaque niveau,
+/// `coarse_sweeps` balayages chacun ; `coarse_levels` = 0 compte pour 1), seulement si `coarse_sigma_pixels > 0` et `coarse_sweeps > 0` ; puis `sweeps` balayages sur les images nettes (`net = true`, les seuls à alimenter le rapport).
+pub(crate) fn sweep_schedule(config: &S2sConfig) -> Vec<(f64, usize, bool)> {
+    let mut niveaux = Vec::new();
+    if config.coarse_sigma_pixels > 0.0 && config.coarse_sweeps > 0 {
+        for l in 0..config.coarse_levels.max(1) {
+            niveaux.push((config.coarse_sigma_pixels / 2f64.powi(l as i32), config.coarse_sweeps, false));
+        }
+    }
+    niveaux.push((0.0, config.sweeps, true));
+    niveaux
 }
 
 /// **Estimation du mouvement coupe-coupe, sans reconstruction** : `config.sweeps` balayages sur toutes les coupes de tous les stacks, dans un ordre aléatoire (graine `config.seed`, ordre différent à chaque
@@ -441,30 +502,39 @@ fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
 /// [`SvrError::NoMask`] si un stack n'a pas de masque ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
 pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
     verifier_entrees(stacks, poses)?;
-    let atlas = SliceAtlas::new(stacks, device)?;
     let coupes: Vec<(usize, usize)> = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).collect();
     let mut courantes = poses.clone();
     let mut rapports: Vec<SliceReport> =
         coupes.iter().map(|&(stack, slice)| SliceReport { stack, slice, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }).collect();
-    for balayage in 0..config.sweeps {
-        for &n in &ordre_aleatoire(coupes.len(), config.seed + balayage as u64) {
-            let (si, k) = coupes[n];
-            let courante = *courantes.get(si, k);
-            let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
-            let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
-            let pivot = Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], device);
-            let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
-            let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
-            let rapport = &mut rapports[n];
-            rapport.registered = true;
-            rapport.runs += 1;
-            rapport.ncc_first = avant;
-            rapport.ncc_final = avant;
-            if apres >= avant {
-                courantes.set(si, k, pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante);
-                rapport.ncc_final = apres;
+    let niveaux = sweep_schedule(config);
+    let mut decalage_graine = 0u64;
+    for (sigma, balayages, net) in niveaux {
+        let atlas = SliceAtlas::new_blurred(stacks, device, sigma)?;
+        for balayage in 0..balayages {
+            for &n in &ordre_aleatoire(coupes.len(), config.seed + decalage_graine + balayage as u64) {
+                let (si, k) = coupes[n];
+                let courante = *courantes.get(si, k);
+                let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
+                let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+                let pivot = Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], device);
+                let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
+                let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
+                if net {
+                    let rapport = &mut rapports[n];
+                    rapport.registered = true;
+                    rapport.runs += 1;
+                    rapport.ncc_first = avant;
+                    rapport.ncc_final = avant;
+                    if apres >= avant {
+                        rapport.ncc_final = apres;
+                    }
+                }
+                if apres >= avant {
+                    courantes.set(si, k, pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante);
+                }
             }
         }
+        decalage_graine += balayages as u64;
     }
     for (n, &(si, k)) in coupes.iter().enumerate() {
         if let Some(depart) = preparer_coupe(&stacks[si], k, *poses.get(si, k)) {

@@ -91,6 +91,15 @@ enum SvrAction {
         /// Avec `--motion s2s` : nombre de balayages de toutes les coupes
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_sweeps)]
         s2s_sweeps: usize,
+        /// Avec `--motion s2s` : écart type (en pixels) du flou des coupes pour des balayages préliminaires du gros vers le fin, qui élargissent la portée de capture (0 : aucun)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_sigma_pixels)]
+        s2s_coarse_sigma: f64,
+        /// Avec `--s2s-coarse-sigma` : nombre de balayages sur les coupes floutées
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_sweeps)]
+        s2s_coarse_sweeps: usize,
+        /// Avec `--s2s-coarse-sigma` : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_levels)]
+        s2s_coarse_levels: usize,
         /// Avec `--motion s2v` : nombre de cycles « recaler puis reconstruire »
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_cycles)]
         s2v_cycles: usize,
@@ -246,8 +255,8 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2v_cycles, ..Default::default() };
+        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2v_cycles, ..Default::default() };
             svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {

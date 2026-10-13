@@ -3574,6 +3574,77 @@ mod tests {
         assert!((num / den).sqrt() < 5e-2, "la solution sur le domaine commun change trop : {:.2e}", (num / den).sqrt());
     }
 
+    /// Calendrier du gros vers fin du coupe-coupe (critères fixés avant, valeurs exactes) : sans flou (σ = 0), un seul niveau net de `sweeps` balayages ; σ = 6, 2 niveaux, 2 balayages grossiers, 3 balayages nets : (6, 2), (3, 2), (0, 3 net) ; `coarse_levels` = 0 compte pour 1 ;
+    /// `coarse_sweeps` = 0 supprime les niveaux grossiers ; 3 niveaux : 8, 4, 2. Et la correspondance des réglages du pipeline : chaque champ `s2s_*` de `ReconstructionConfig` se retrouve dans `S2sConfig`.
+    #[test]
+    fn the_coarse_schedule_and_the_pipeline_s2s_settings_are_exact() {
+        use crate::pipeline::{s2s_config, ReconstructionConfig};
+        use crate::s2s::{sweep_schedule, S2sConfig};
+        let base = S2sConfig { sweeps: 3, ..Default::default() };
+        assert_eq!(sweep_schedule(&base), vec![(0.0, 3, true)]);
+        let deux = S2sConfig { coarse_sigma_pixels: 6.0, coarse_sweeps: 2, coarse_levels: 2, ..base };
+        assert_eq!(sweep_schedule(&deux), vec![(6.0, 2, false), (3.0, 2, false), (0.0, 3, true)]);
+        assert_eq!(sweep_schedule(&S2sConfig { coarse_levels: 0, ..deux }), vec![(6.0, 2, false), (0.0, 3, true)]);
+        assert_eq!(sweep_schedule(&S2sConfig { coarse_sweeps: 0, ..deux }), vec![(0.0, 3, true)]);
+        assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, ..Default::default() };
+        assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
+    }
+
+    /// Flou d'une coupe dans son masque (critères fixés avant) : (a) `sigma = 0` rend l'image telle quelle ; (b) une image constante reste constante dans le masque, quel que soit le masque et quel que soit σ ; (c) un pixel hors du masque ne contribue à AUCUN
+    /// pixel de masque (changer ses valeurs ne change pas la sortie dans le masque) et sa valeur de sortie est inchangée ; (d) avec un masque plein, une impulsion unité donne un noyau gaussien (somme 1 loin des bords, valeur centrale
+    /// 1/(2πσ²) à 1 % près pour σ = 3) ; (e) un σ plus grand lisse davantage (la variance de l'image diminue).
+    #[test]
+    fn the_slice_blur_is_exact_and_respects_the_mask() {
+        use crate::s2s::blur_slice_in_mask;
+        use ndarray::Array2;
+        let (nx, ny) = (41usize, 37usize);
+        let plein = Array2::from_elem((nx, ny), true);
+        let mut alea = Alea(5);
+        let bruit = Array2::from_shape_fn((nx, ny), |_| alea.suivant() as f32);
+        assert_eq!(blur_slice_in_mask(bruit.view(), plein.view(), 0.0), bruit);
+        // (b)
+        let constante = Array2::from_elem((nx, ny), 7.5_f32);
+        let demi = Array2::from_shape_fn((nx, ny), |(i, j)| i + j > 20 && i < 35);
+        for sigma in [1.0, 2.5, 6.0] {
+            for masque in [&plein, &demi] {
+                let b = blur_slice_in_mask(constante.view(), masque.view(), sigma);
+                assert!(b.indexed_iter().filter(|(idx, _)| masque[*idx]).all(|(_, &v)| (v - 7.5).abs() < 1e-4), "constante non conservée (σ = {sigma})");
+            }
+        }
+        // (c)
+        let mut modifiee = bruit.clone();
+        for ((i, j), v) in modifiee.indexed_iter_mut() {
+            if !demi[[i, j]] {
+                *v += 1000.0;
+            }
+        }
+        let (a, b) = (blur_slice_in_mask(bruit.view(), demi.view(), 2.0), blur_slice_in_mask(modifiee.view(), demi.view(), 2.0));
+        for ((i, j), (&va, &vb)) in a.indexed_iter().zip(b.iter()).map(|(((i, j), x), y)| (((i, j)), (x, y))) {
+            if demi[[i, j]] {
+                assert!((va - vb).abs() < 1e-3, "un pixel hors masque a contribué en ({i},{j}) : {va} contre {vb}");
+            } else {
+                assert_eq!(vb, modifiee[[i, j]], "un pixel hors masque a été modifié en ({i},{j})");
+            }
+        }
+        // (d)
+        let mut impulsion = Array2::<f32>::zeros((nx, ny));
+        impulsion[[20, 18]] = 1.0;
+        let k = blur_slice_in_mask(impulsion.view(), plein.view(), 3.0);
+        // convolution normalisée : (impulsion ⊛ G) / (1 ⊛ G) ; loin des bords le dénominateur vaut 1
+        assert!((k.sum() - 1.0).abs() < 1e-3, "somme du noyau : {}", k.sum());
+        let attendu = 1.0 / (2.0 * std::f64::consts::PI * 9.0);
+        assert!(((f64::from(k[[20, 18]]) - attendu) / attendu).abs() < 0.01, "valeur centrale {} contre {attendu}", k[[20, 18]]);
+        // (e)
+        let variance = |x: &Array2<f32>| {
+            let m = x.mean().unwrap();
+            x.iter().map(|v| (v - m).powi(2)).sum::<f32>() / x.len() as f32
+        };
+        let (v1, v2, v3) = (variance(&bruit), variance(&blur_slice_in_mask(bruit.view(), plein.view(), 1.0)), variance(&blur_slice_in_mask(bruit.view(), plein.view(), 3.0)));
+        assert!(v1 > v2 && v2 > v3, "variances {v1} {v2} {v3}");
+    }
+
     /// Reconstructions inutiles sautées (critères fixés avant, blobs, 2 stacks, 2 cycles) : (a) quand TOUS les cycles recalent « sans la coupe », les poses finales avec `skip_unused_reconstructions` sont IDENTIQUES (1e-9) à celles de la boucle
     /// complète, car ce recalage ne lit pas le volume du cycle ; (b) le volume final égale celui de la boucle complète à 2e-2 près en relatif (départ à froid contre départ à chaud de la dernière reconstruction) ; (c) l'observateur
     /// n'est appelé qu'aux reconstructions faites : seulement la dernière (cycle 2) dans le cas (a), contre 3 appels sans le saut ; (d) si seulement 1 cycle sur 2 est « sans la coupe », le cycle 1 (recalé contre le volume du cycle) et
