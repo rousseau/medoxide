@@ -103,18 +103,31 @@ les **deux autres** stacks ; les coupes du stack mis de côté sont ensuite reca
 mieux des coupes qu'il n'a jamais vues. Une valeur par sujet (moyenne des trois repliements) : le sujet est
 l'unité statistique.
 
-| Méthode | Corrélation moyenne (6 sujets) |
-|---|---|
-| medoxide, coupe-volume (`s2v`, « sans la coupe ») | 0,768 |
-| medoxide, coupe-coupe (`s2s`) | 0,766 |
-| Sans correction du mouvement (poses d'en-tête) | 0,746 |
-| SVRTK (réglages par défaut) | 0,730 |
-| NeSVoR (réglages par défaut, sans SVoRT, CPU) | 0,708 |
+Résultats avec **α = 0,1** pour nos méthodes (voir [Choix de la régularisation α](#choix-de-la-régularisation-α) ; la première évaluation, faite avec α = 0,01, est périmée) :
 
-Par sujet : `s2s` fait mieux que ne pas corriger chez 4 sujets sur 6 et mieux que SVRTK chez 5 sur 6 ; il fait
-mieux que NeSVoR chez 6 sur 6. **Les deux sujets les plus agités** sont un échec pour toutes les méthodes qui
-corrigent le mouvement : elles prédisent moins bien que « sans correction », SVRTK et NeSVoR compris. Avec deux
-stacks seulement pour reconstruire, ce protocole est plus dur que l'usage réel (trois stacks ou plus).
+| Sujet | sans correction | `s2s` | `s2v` | SVRTK | NeSVoR |
+|---|---|---|---|---|---|
+| calme 1 | 0,853 | 0,877 | 0,873 | 0,815 | 0,855 |
+| calme 2 | 0,879 | 0,909 | 0,913 | 0,863 | 0,884 |
+| calme 3 | 0,841 | 0,875 | 0,882 | 0,827 | 0,854 |
+| agité 1 | 0,779 | 0,774 | 0,830 | 0,675 | 0,694 |
+| agité 2 | 0,703 | 0,703 | 0,626 | 0,572 | 0,403 |
+| agité 3 | 0,707 | 0,691 | 0,648 | 0,632 | 0,559 |
+| **moyenne** | 0,794 | **0,805** | 0,795 | 0,731 | 0,708 |
+
+Par sujet : `s2s` fait mieux que ne pas corriger chez 4 sujets sur 6 (en moyenne +0,011, pire sujet −0,017) ;
+`s2v` aussi chez 4 sujets sur 6 (en moyenne +0,002) mais perd 0,076 sur l'agité 2 ; les deux font mieux que SVRTK
+et que NeSVoR chez 6 sujets sur 6. **Pour les sujets les plus agités (2 et 3), aucune méthode ne fait mieux que de
+ne pas corriger** (`s2s` fait jeu égal, `s2v` et les deux autres sont en dessous). La régularisation forte profite
+aussi à « sans correction », ce qui réduit l'avantage apparent de la correction du mouvement. Avec deux stacks
+seulement pour reconstruire, ce protocole est plus dur que l'usage réel (trois stacks ou plus).
+
+**Le juge favorise le lissage.** Une NCC sur des coupes bruitées récompense un volume lisse. Contrôle : un simple flou
+gaussien de 1 voxel (0,8 mm) des volumes de SVRTK augmente leur score de **+0,04** (calme 1 : 0,815 → 0,857 ;
+agité 1 : 0,675 → 0,717 ; deux voxels : trop flou). **Face à SVRTK lissé de façon optimale, l'avantage de medoxide est
+donc plus petit que dans le tableau** : environ +0,02 sur le sujet calme (0,877 contre 0,857) et de +0,06 à +0,11
+sur le sujet agité (0,774 à 0,830 contre 0,717). Le juge ne mesure pas la netteté : SVRTK est visiblement plus net
+que nos volumes à α = 0,1.
 
 **Concordance aux intersections** (mesure neutre du mouvement : les intensités de deux coupes qui se croisent
 doivent concorder le long de leur droite d'intersection ; trois stacks, mesurée sur les paires de coupes entre le
@@ -149,7 +162,7 @@ La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur *
 | agité 1 | 0,727 | 0,774 | +0,048 |
 | agité 3 | 0,627 | 0,691 | +0,064 |
 
-Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains sont plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01**. **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
+Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains étaient plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01** : elle a été refaite (tableau ci-dessus). **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
 
 ## Limites
 

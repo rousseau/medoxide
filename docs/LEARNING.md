@@ -1387,4 +1387,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-13 — Régler un hyperparamètre sans se tromper : séparer réglage et évaluation, et contrôler le biais du juge
+
+- **Quoi (méthode)** : le quadrillage de nos volumes, « inexpliqué » depuis des jours, venait du poids de régularisation `α` (0,01, réglé sur du bruit **simulé**) : trop faible pour des données réelles. Régler `α` sur le juge hors échantillon (NCC de coupes jamais vues) a demandé trois précautions : (1) **séparer les sujets de réglage (2) et d'évaluation (4)** et fixer les critères avant (gain moyen ≥ 0,01, ≥ 3 sujets sur 4, aucun sujet à plus de −0,005) → atteints (+0,036, 4/4) ; (2) **l'unité statistique est le sujet** (moyenne des 3 repliements) ; (3) **contrôler le biais du juge** : un volume plus lisse prédit mieux des coupes bruitées sans être meilleur ; un flou de 1 voxel ajoute +0,04 aux volumes de SVRTK. L'avantage de notre méthode sur SVRTK passe donc de +0,07 (brut) à +0,02 / +0,06 (face à un SVRTK lissé de façon optimale).
+- **Leçon** : un changement de réglage (ici α de 0,01 à 0,1) invalide les comparaisons faites avant ; la comparaison à SVRTK et NeSVoR a été **refaite en entier** avec le nouveau réglage, et la conclusion a changé (la correction du mouvement apporte moins qu'on ne le croyait quand tout le monde est bien régularisé : `s2s` +0,011 en moyenne sur « sans correction », `s2v` +0,002).
+- **Où** : `crates/medoxide-svr/src/pipeline.rs` (`alpha` par défaut), `book/src/validation.md` (« Choix de la régularisation α » et évaluation sur données réelles), variable `MEDOXIDE_ALPHA` du test d'évaluation réel.
+
+---
+
 *(à compléter à la prochaine étape)*

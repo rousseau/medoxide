@@ -117,8 +117,7 @@ ne partagent pas un repère (écart de plus de 18 mm entre barycentres de masque
   non évalué).
 - **Fœtus très agités** : sur deux de nos six sujets, aucune méthode testée (la nôtre, SVRTK, NeSVoR)
   ne prédit mieux des coupes jamais vues que de ne pas corriger le mouvement.
-- **Texture** : nos volumes montrent un motif quadrillé que nous ne savons pas encore expliquer, absent des
-  reconstructions de SVRTK.
+- **Netteté** : avec α = 0,1, le hachurage régulier des premières versions a disparu, mais nos volumes sont plus lisses que ceux de SVRTK, qui préserve mieux les contours (lissage adaptatif). Baisser `--alpha` (0,03 à 0,05) rend l'image plus nette sur un sujet calme, au prix d'un peu de hachurage ; une régularisation qui préserve les contours est prévue.
 - **Un seul jeu de données** (TRUFI, six sujets) ; pas de vérité terrain sur des acquisitions réelles.
 - Seul un Mac avec CPU Apple a été testé. La commande est destinée à la **recherche**, pas à un usage
   médical ou diagnostique.
