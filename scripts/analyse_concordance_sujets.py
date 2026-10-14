@@ -6,7 +6,10 @@ Pour chaque sujet : tous les stacks TRUFI de la session (axial, coronal, sagitta
 Deux mesures (`intersection_consistency.concordance`) : toutes les paires (circulaire pour le coupe-coupe non ancré, qui l'optimise), et les paires qui n'impliquent pas le stack 0 (jamais
 utilisées par le coupe-coupe ancré). Unité statistique : le sujet. Les identifiants de sujets sont passés en arguments (aucun dans le code) ; les résultats chiffrés sont écrits dans un TSV local.
 
-Usage : python scripts/analyse_concordance_sujets.py --racine data/svr/jeu_reel_tru_haste --sujets sub-A sub-B ... --etiquettes "calme 1" "agité 1" ... [--sortie docs/svr/figures/concordance_sujets.tsv]
+Les méthodes par défaut sont celles ci-dessus ; `--methodes nom=fichier.tsv ...` les remplace (`sans correction=-` : poses d'en-tête). Une méthode `--partielles` (par exemple NiftyMIC, qui n'écrit pas de pose pour les coupes qu'il rejette) n'entre pas dans l'intersection des coupes communes : sa concordance est mesurée sur
+les coupes communes QU'ELLE A GARDÉES, et le nombre de ces coupes est écrit (ligne `coupes` du TSV) : sa concordance n'est donc pas calculée sur les mêmes coupes que les autres.
+
+Usage : python scripts/analyse_concordance_sujets.py --racine data/svr/jeu_reel_tru_haste --sujets sub-A sub-B ... --etiquettes "calme 1" "agité 1" ... [--sortie docs/svr/figures/concordance_sujets.tsv] [--methodes nom=fichier.tsv ...] [--partielles nom ...]
 """
 
 import argparse
@@ -47,20 +50,22 @@ def stacks_du_sujet(racine, sujet):
     return ([f"{anat}/{n}_T2w.nii.gz" for _, _, n in noms], [f"{racine}/derivatives/medx-fetalbet/{sujet}/{ses}/anat/{n}_desc-brain_mask.nii.gz" for _, _, n in noms])
 
 
-def mesurer(racine, sujet):
-    """{méthode: (moyenne toutes paires, moyenne paires hors stack 0, nb paires, nb paires hors stack 0)} et le nombre de coupes communes."""
+def mesurer(racine, sujet, methodes=None, partielles=()):
+    """{méthode: (moyenne toutes paires, moyenne paires hors stack 0, nb paires, nb paires hors stack 0, nb coupes)}, le nombre de coupes communes et le nombre de stacks."""
+    methodes = methodes or METHODES
     stacks, masques = stacks_du_sujet(racine, sujet)
     jeu = Jeu(stacks, masques)
-    poses = {nom: lire_poses(f"data/svr/results/{sujet}/{f}") for nom, f in METHODES if f}
+    poses = {nom: lire_poses(f"data/svr/results/{sujet}/{f}") for nom, f in methodes if f}
     # une pose égale à l'identité est une coupe non recalée : non utilisée
     poses = {nom: {k: m for k, m in p.items() if not np.allclose(m, np.eye(4), atol=1e-12)} for nom, p in poses.items()}
-    coupes = sorted(set.intersection(*[set(p) for p in poses.values()]))
+    coupes = sorted(set.intersection(*[set(p) for nom, p in poses.items() if nom not in partielles]))
     poses["sans correction"] = {k: np.eye(4) for k in coupes}
     out = {}
-    for nom, _ in METHODES:
-        tout = concordance(jeu, poses[nom], coupes)
-        hors = concordance(jeu, poses[nom], coupes, hors_stack=0)
-        out[nom] = (float(tout.mean()), float(hors.mean()), len(tout), len(hors))
+    for nom, _ in methodes:
+        utilisees = [k for k in coupes if k in poses[nom]] if nom in partielles else coupes
+        tout = concordance(jeu, poses[nom], utilisees)
+        hors = concordance(jeu, poses[nom], utilisees, hors_stack=0)
+        out[nom] = (float(tout.mean()), float(hors.mean()), len(tout), len(hors), len(utilisees))
     return out, len(coupes), len(stacks)
 
 
@@ -70,12 +75,15 @@ if __name__ == "__main__":
     parser.add_argument("--sujets", nargs="+", required=True)
     parser.add_argument("--etiquettes", nargs="+", required=True)
     parser.add_argument("--sortie", default="docs/svr/figures/concordance_sujets.tsv")
+    parser.add_argument("--methodes", nargs="+", default=None, help="nom=fichier.tsv (sans correction=- pour les poses d'en-tête)")
+    parser.add_argument("--partielles", nargs="+", default=[])
     args = parser.parse_args()
     assert len(args.sujets) == len(args.etiquettes)
-    noms = [m for m, _ in METHODES]
+    methodes = METHODES if args.methodes is None else [(m.split("=", 1)[0], None if m.split("=", 1)[1] == "-" else m.split("=", 1)[1]) for m in args.methodes]
+    noms = [m for m, _ in methodes]
     resultats = {}
     for sujet, etiquette in zip(args.sujets, args.etiquettes):
-        resultats[etiquette], n_coupes, n_stacks = mesurer(args.racine, sujet)
+        resultats[etiquette], n_coupes, n_stacks = mesurer(args.racine, sujet, methodes, args.partielles)
         print(f"{etiquette} : {n_stacks} stacks, {n_coupes} coupes communes", flush=True)
     lignes = ["sujet\tmesure\t" + "\t".join(noms)]
     for mesure, idx, titre in (("toutes", 0, "TOUTES LES PAIRES (circulaire pour coupe-coupe non ancré)"), ("hors_stack_0", 1, "PAIRES SANS LE STACK 0 (non utilisées par coupe-coupe ancré)")):
@@ -86,10 +94,14 @@ if __name__ == "__main__":
             lignes.append(f"{etiquette}\t{mesure}\t" + "\t".join(f"{x:.5f}" for x in v))
         moyennes = [np.mean([resultats[e][n][idx] for e in args.etiquettes]) for n in noms]
         print(f"{'moyenne':12}" + "".join(f"{x:19.4f}" for x in moyennes))
-        ancre = noms.index("coupe-coupe ancré")
-        for autre in ("sans correction", "SVRTK", "NeSVoR", "coupe-volume", "coupe-coupe"):
-            d = np.array([resultats[e]["coupe-coupe ancré"][idx] - resultats[e][autre][idx] for e in args.etiquettes])
-            print(f"  ancré − {autre:16}: moyenne {d.mean():+.4f} ; gagne chez {int((d > 0).sum())}/{len(d)} ; min {d.min():+.4f} ; ≥ +0,05 chez {int((d >= 0.05).sum())}/{len(d)}")
+        if "coupe-coupe ancré" in noms:
+            for autre in ("sans correction", "SVRTK", "NeSVoR", "coupe-volume", "coupe-coupe"):
+                if autre in noms:
+                    d = np.array([resultats[e]["coupe-coupe ancré"][idx] - resultats[e][autre][idx] for e in args.etiquettes])
+                    print(f"  ancré − {autre:16}: moyenne {d.mean():+.4f} ; gagne chez {int((d > 0).sum())}/{len(d)} ; min {d.min():+.4f} ; ≥ +0,05 chez {int((d >= 0.05).sum())}/{len(d)}")
+    print("\nNOMBRE DE COUPES UTILISÉES\n" + "".join(f"{e:12}" + "".join(f"{resultats[e][n][4]:19d}" for n in noms) + "\n" for e in args.etiquettes))
+    for e in args.etiquettes:
+        lignes.append(f"{e}\tcoupes\t" + "\t".join(str(resultats[e][n][4]) for n in noms))
     os.makedirs(os.path.dirname(args.sortie) or ".", exist_ok=True)
     open(args.sortie, "w").write("\n".join(lignes) + "\n")
     print("écrit :", args.sortie)

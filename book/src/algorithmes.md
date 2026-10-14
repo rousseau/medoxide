@@ -110,6 +110,12 @@ automatique de Burn**. Deux méthodes, au choix (`--motion`) :
   coupes sont recalées en 6 cycles (chaque cycle repart des poses du précédent) ; la référence ne dépendant
   pas du volume reconstruit, celui-ci n'est calculé qu'une fois, à la fin.
 
+**Alignement par stack ou par paquets (optionnel, `--s2s-block-levels`).** Les coupes d'un stack sont acquises l'une après l'autre (environ 1 s par coupe en TRUFI) : un fœtus qui bouge entre deux stacks déplace d'un bloc toutes les coupes
+d'un stack, ce que le recalage coupe par coupe ne rattrape pas au-delà d'environ 4 mm. Avant les balayages par coupe, chaque **bloc de coupes consécutives** reçoit une transformation rigide **commune** (6 paramètres autour du
+barycentre des pivots du bloc), estimée en maximisant la concordance moyenne du bloc : une recherche exhaustive (translations d'une grille de ±12 mm au pas de 4 mm, puis rotations de la même grille en mm équivalents), puis Adam. La
+transformation n'est acceptée que si la concordance du bloc ne baisse pas. Niveau 0 : le stack entier (le premier stack sert d'ancre) ; niveau *l* : 2^*l* blocs par stack, du gros vers le fin ; chaque niveau a `--s2s-block-sweeps`
+balayages (les stacks se voient entre eux avec leurs poses déjà corrigées). Il joue le rôle du recalage volume-vers-volume des stacks de NiftyMIC et de l'alignement global de SVRTK, mais avec le même critère que le recalage par coupe.
+
 ### Ce que SVRTK fait et que nous ne faisons pas (encore)
 
 SVRTK, la référence de la communauté, ajoute notamment l'alignement global des stacks, la mise à l'échelle
@@ -132,6 +138,9 @@ recale contre un volume contenant la coupe.
   SVoRT) : Xu J., Moyer D., Gagoski B., Iglesias J. E., Grant P. E., Golland P., Adalsteinsson E. *NeSVoR:
   Implicit Neural Representation for Slice-to-Volume Reconstruction in MRI*. IEEE Transactions on Medical
   Imaging, 2023. <https://doi.org/10.1109/TMI.2023.3236216>
+- **NiftyMIC**, comparé à nos résultats (utilisé comme outil externe, image Docker `renbem/niftymic`, licence BSD-3 ; recalage volume-vers-volume des stacks, puis coupe-volume hiérarchique, correction d'intensité et rejet des
+  coupes de corrélation < 0,5 puis 0,65 puis 0,8) : Ebner M., Wang G., Li W., Aertsen M., Patel P. A., Aughwane R., Melbourne A., Doel T., Dymarkowski S., De Coppi P., David A. L., Deprest J., Ourselin S., Vercauteren T.
+  *An automated framework for localization, segmentation and super-resolution reconstruction of fetal brain MRI*. NeuroImage 206:116324, 2020. <https://doi.org/10.1016/j.neuroimage.2019.116324>
 - **Atlas fœtal** utilisé pour les tests sur données simulées : Gholipour A. et al. *A normative
   spatiotemporal MRI atlas of the fetal brain for automatic segmentation and analysis of early brain
   growth*. Scientific Reports 7:476, 2017. <https://doi.org/10.1038/s41598-017-00525-w>

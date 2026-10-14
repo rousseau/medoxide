@@ -199,7 +199,76 @@ La portée de capture d'un recalage local parti de l'en-tête est donc d'environ
 
 **5. Une brique qui l'atténue : le passe-haut des profils.** Avant la corrélation, on soustrait à chaque profil son lissage gaussien (25 mm, restreint au masque) : les variations lentes d'intensité disparaissent. En simulation avec biais, ±4 : 83 % (indépendant, 65 % sans) et 59 % (lisse, **3 % sans**), et sans biais le résultat est inchangé (79 % et 73 %). Sur données réelles, le juge à quatre stacks passe de 0,818 à **0,833** (+0,015, et le repli qui échouait passe de 0,735 à 0,776) ; à deux stacks sur les six sujets, +0,002 en moyenne (5 sujets sur 6 positifs, le pire −0,007). Il est donc actif par défaut (`--s2s-highpass-mm 25`), pour environ 15 à 25 % de temps en plus. **Il ne suffit pas à rendre la passe grossière utilisable** : avec le passe-haut, la passe grossière reste mauvaise sur le réel (juge à quatre stacks 0,706, contre 0,833 pour le passe-haut seul) et en simulation avec biais (±6 : 4 %).
 
-**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. La brique suivante à évaluer est une **estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut), puis le retour à la passe grossière. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
+**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. Les mesures suivantes ([alignement par stack](#alignement-par-stack-ou-par-paquets), [comparaison avec NiftyMIC](#comparaison-avec-niftymic)) montrent que la portée est dépassée pour les **décalages de stack** (jusqu'à 8-10 mm en simulation) mais pas pour le mouvement **par coupe** intra-stack de l'agité 3, où même NiftyMIC rejette les coupes. La brique suivante à évaluer est une **estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut), puis le retour à la passe grossière. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
+
+## Combien de coupes sont mal recalées ?
+
+`medx svr recon --quality fichier.tsv` écrit, pour chaque coupe, la concordance de ses profils d'intersection avant et après le recalage (`score_avant`, `score_apres`, plus grand = mieux), le nombre de balayages où elle a été recalée et le déplacement appliqué. Peut-on s'en servir pour **compter** les coupes mal recalées (erreur de pose > 1,5 mm) sans vérité terrain ? Critères fixés avant de regarder les résultats (`scripts/analyse_qualite_coupes.py`) : (1) AUC ≥ 0,8 pour détecter une coupe mal recalée ; (2) nombre prédit à ±25 % (ou ±3 coupes) du nombre vrai **sur chaque jeu**, avec un seuil appris sur les autres jeux (validation « un jeu laissé de côté »).
+
+Mesuré sur 9 jeux simulés avec vérité connue (72 à 74 coupes chacun ; part de coupes mal recalées de 7 % à 100 %, 4 jeux sur 9 à 100 % dès ±6 mm) :
+
+| Indicateur | AUC regroupée | AUC dans un jeu (min–max) |
+|---|---|---|
+| `score_avant` | 0,95 | 0,65–0,92 |
+| `score_apres` | 0,94 | 0,50–0,93 |
+| déplacement appliqué | 0,78 | 0,64–0,88 |
+| gain (après − avant), nombre de balayages | ≈ 0,5 | — |
+
+- **Critère 1 : atteint en apparence seulement.** L'AUC regroupée est dominée par les différences **entre** jeux (concordance 0,3–0,45 quand tout est mal recalé, 0,8–0,9 quand peu le sont) ; à l'intérieur d'un jeu, l'indicateur classe les coupes de façon bien moins sûre (jusqu'à 0,50).
+- **Critère 2 : non atteint.** Avec le meilleur indicateur, 3 jeux sur 9 sont hors tolérance (30 coupes vraies mal recalées, 64 prédites ; 19 contre 10 ; 15 contre 10) : le niveau de concordance dépend du sujet (biais d'intensité, anatomie). **Le nombre n'est pas estimable de façon fiable ; le régime l'est.** Concordance moyenne ≥ 0,8 : au plus un quart des coupes mal recalées ; ≤ 0,45 : toutes.
+- **Sur les six sujets réels**, concordance moyenne après `s2s` : 0,85 à 0,89 pour les trois calmes (0 à 3 % des coupes sous 0,65), 0,76 pour l'agité 1 (12 %), 0,60 pour l'agité 2 (54 %) et 0,57 pour l'agité 3 (79 %) : les deux derniers sont, par ce critère, dans un régime où une grande partie des coupes est mal recalée.
+- **Une estimation indépendante** : NiftyMIC rejette les coupes de corrélation avec son modèle < 0,5, puis 0,65, puis 0,8 ([comparaison](#comparaison-avec-niftymic)). Il en rejette 0 sur 72 pour le sujet calme 1 (nous : 3 % sous 0,65), 12 % pour l'agité 1 (nous : 12 % ; l'AUC de notre concordance pour prédire son rejet est de 0,78), 80 % pour l'agité 2 (nous : 54 %) et 44 % pour l'agité 3 (nous : 79 %). Les deux estimations s'accordent sur le régime, pas sur le nombre.
+
+## Alignement par stack ou par paquets
+
+Les recalages locaux ont une portée d'environ ±4 mm ([ci-dessus](#pourquoi-certains-sujets-très-agités-ne-sont-pas-corrigés)). Mais le mouvement d'un fœtus agité est en grande partie un **décalage de stack entier** (jusqu'à 5-6 mm sur l'agité 1) auquel s'ajoute un mouvement par coupe plus petit. La brique `--s2s-block-levels` ([description](algorithmes.md#estimation-du-mouvement)) estime d'abord une transformation rigide **commune** par bloc de coupes consécutives (niveau 0 : le stack entier ; niveau *l* : 2^*l* blocs), par recherche exhaustive puis Adam, avant les balayages par coupe. Elle est **activée par défaut à 1 niveau** (voir la décision plus bas).
+
+**Critère fixé avant, en simulation** (stacks d'un atlas, décalage rigide par stack, sans mouvement par coupe ; `evaluate_simulated_motion.py`) : la part de coupes à ≤ 1,5 mm doit être nettement au-dessus de celle du recalage par coupe seul.
+
+| Décalage de stack, biais d'intensité | par coupe seul | 1 niveau (stack entier) | 3 niveaux |
+|---|---|---|---|
+| 5°/4 mm, biais 30 % | 3 % | **92 %** | 95 % |
+| 10°/8 mm, sans biais | 0 % | **88 %** | 88 % |
+| 10°/8 mm, biais 30 % | 0 % | 3 % | **82 %** |
+
+Critère atteint. Le biais d'intensité reste le facteur limitant : avec 10°/8 mm **et** un biais, le stack entier seul échoue (3 %) et la hiérarchie à 3 niveaux le rattrape (82 %). Sur le fantôme de blobs du test unitaire, le critère a dû être révisé explicitement (décalage de 3°/3 mm, erreur médiane ≤ 1,5 mm, au lieu de 8 mm : le fantôme est trop pauvre en structure) ; le grand décalage est jugé sur l'atlas.
+
+Le code est testé par mutation (30 mutants : grille de recherche, choix translation puis rotation, point de départ d'Adam, moyenne de la concordance, partition en blocs, ancre du premier stack, seuil de 3 coupes, garde d'acceptation, ordre de composition, pivot et échelle, câblage des options) : le premier jeu de tests n'en détectait que 16, trois tests ont été ajoutés (recherche sur une fonction synthétique, recherche contre descente courte, propriétés d'un niveau : transformation commune, égalité avec l'appel direct à 1e-17, blocs trop petits ignorés), et **29 sont détectés** ; le survivant est équivalent (`||` au lieu de `&&` dans la condition de recherche : avec une étendue nulle la grille ne contient que 0).
+
+**Sur données réelles** :
+
+- **Juge à quatre stacks, agité 1** (trois stacks pour reconstruire, α = 0,1) : défaut 0,833 ; **1 niveau 0,849** (+0,016, en hausse sur les quatre replis : +0,006, +0,002, +0,029, +0,029) ; 3 niveaux 0,847 pour un temps de calcul triple. La netteté `S` ne baisse pas (0,0781 et 0,0760 contre 0,0758).
+- **Accord des poses avec les méthodes indépendantes** : sur l'agité 1, les décalages de stack de `s2s` passent de 5,2/3,1/2,1/1,7 mm à 5,4/3,9/2,0/2,6 mm (NiftyMIC 5,7/4,1/2,1/2,6 ; SVRTK 6,0/3,9/2,0/2,6) et l'écart avec NiftyMIC de 1,1 mm (90ᵉ centile 5,1) à **0,7 mm (1,3)**. Sur l'agité 2, l'écart avec SVRTK passe de 3,2 à 2,3 mm (51 % à 37 % des coupes à plus de 3 mm) et la concordance moyenne de 0,60 à **0,68**. Sur le sujet calme, aucune régression (concordance 0,85 → 0,86 ; écart avec NiftyMIC 0,4 mm, 0 % au-delà de 3 mm).
+- **Agité 3 : toujours indécidé.** La concordance ne bouge pas (0,57 → 0,56). Avec une recherche de ±30 mm, l'alignement retrouve les décalages de SVRTK (17,7/22,4 mm contre 18,5/21,0), alors que NiftyMIC, NeSVoR et `s2s` en trouvent 4 à 5 mm ; notre concordance préfère la solution à 4-5 mm (0,57 contre 0,47), mais c'est ce que `s2s` optimise. Deux familles de solutions, et rien dans nos mesures (trois stacks, pas de vérité terrain) ne permet d'arbitrer.
+
+**Mesure ajoutée avant de décider : trois sujets calmes, juge à 2 stacks** (un stack mis de côté tour à tour, deux pour reconstruire, α = 0,1, couverture 1 ; `benchmark_variantes_s2s.py`, ordre sans/avec alterné d'un repli à l'autre). Critères fixés avant : écart du juge moyen (avec − sans blocs) ≥ −0,01 sur **chaque** sujet, netteté `S` non dégradée de plus de 5 %.
+
+| Sujet calme | Juge sans blocs | Juge avec 1 niveau | Écart (par repli) | Netteté S (avec / sans) | Temps CPU (avec / sans) |
+|---|---|---|---|---|---|
+| 1 | 0,8784 | 0,8775 | −0,001 (+0,003 ; −0,011 ; +0,005) | 101 % | 375 s / 256 s (×1,46) |
+| 2 | 0,9112 | 0,9168 | +0,006 (+0,003 ; −0,004 ; +0,017) | 102 % | 338 s / 229 s (×1,48) |
+| 3 | 0,8766 | 0,8970 | +0,020 (+0,008 ; +0,048 ; +0,005) | 102 % | 294 s / 192 s (×1,53) |
+
+Critères atteints sur les trois sujets (un seul repli, sur 9, passe sous −0,01 : −0,011). Le temps est le temps CPU (utilisateur + système), le temps mural n'ayant pas de sens sur une machine partagée.
+
+**Décision.** Brique démontrée en simulation, utile sur le sujet agité à quatre stacks (juge) et sur deux sujets agités (accord des poses), sans régression sur trois sujets calmes (juge) : **elle est activée par défaut, à 1 niveau** (stack entier), pour environ 1,5 fois le temps de calcul. Les 3 niveaux restent en option (utiles seulement en simulation avec décalage de stack **et** biais d'intensité ; sur le réel, 0,847 contre 0,849 pour trois fois plus de temps). Réserve : sur le sujet le plus agité (agité 3), l'alignement ne l'aide pas et s'éloigne du consensus de NiftyMIC et NeSVoR ; une activation conditionnelle (garder la variante de meilleure concordance finale) reste possible mais est circulaire. Les résultats des autres sections de ce chapitre qui précèdent cette décision ont été obtenus **sans** alignement par stack.
+
+## Comparaison avec NiftyMIC
+
+NiftyMIC ([Ebner et al., 2020](algorithmes.md#références)) fait un recalage volume-vers-volume des stacks (recherche jusqu'à 45°), puis un recalage coupe-volume hiérarchique, une correction d'intensité par stack et un rejet des coupes aberrantes. Il est exécuté dans Docker (image `renbem/niftymic`, amd64 émulé : 9 à 13 minutes par sujet ; convention validée sur cinq des six sujets, imposée pour le sixième dont le volume n'a pas été écrit), réglages par défaut sauf la résolution (0,8 mm) et la correction du champ de biais (désactivée) ; ses transformations par coupe (`.tfm` ITK, LPS) sont lues par `scripts/read_niftymic_poses.py`. **Convention validée par mesure**, comme pour SVRTK : la corrélation entre les pixels de masque d'une coupe et le volume de NiftyMIC échantillonné à sa pose est de 0,935 (sujet calme 1) et 0,921 (agité 1) avec la transformation par coupe lue telle quelle, contre 0,652 et 0,376 sans correction et 0,44 avec l'inverse.
+
+| Sujet | Ce que fait NiftyMIC | Accord avec les autres méthodes |
+|---|---|---|
+| Calme 1 (3 stacks) | 0 coupe rejetée sur 72 | 0,4-0,6 mm en médiane, comme entre les quatre autres |
+| Calme 2 (3 stacks) | garde 71 coupes sur 82 | non mesuré (volume et concordance seulement) |
+| Calme 3 (3 stacks) | **rejette tout le stack sagittal** (24/24) et la moitié des autres : garde 45 coupes sur 98 | non mesuré ; son volume garde des zones non recalées hors du cerveau |
+| Agité 1 (4 stacks) | 12 % de coupes rejetées | **le plus proche de `s2v` (0,7 mm, 90ᵉ centile 1,5) et de SVRTK (0,9 ; 1,9)** ; `s2s` 1,1 (5,1) ; NeSVoR 1,1 (4,2) |
+| Agité 2 (3 stacks) | rejette 80 % des coupes (au dernier seuil : 24/25, 14/26 et 21/21 coupes par stack) ; le stack sagittal n'a plus aucune transformation | impossible à comparer sur tout le sujet |
+| Agité 3 (3 stacks) | rejette tout le stack coronal ; la reconstruction finale s'arrête avant d'écrire le volume | **proche de NeSVoR** (1,7 mm, 31 % des coupes à plus de 3 mm ; décalages de stack 4,1/5,1 contre 4,6/5,3) ; SVRTK s'en écarte de 18 mm |
+
+**Concordance aux intersections, mêmes coupes pour tous** (figure de reconstructions avec tous les stacks, réglages par défaut actuels de nos méthodes ; NiftyMIC mesuré sur les coupes qu'il a gardées, qui sont les mieux recalées, donc à son avantage) : sur les coupes que NiftyMIC garde, il ne fait pas mieux que nous (calme 3 : 0,847 contre 0,881 pour notre coupe-coupe ; agité 1 : 0,797 contre 0,806 ; agité 3 : 0,749 contre 0,743 ; calmes 1 et 2 : 0,864 et 0,899 contre 0,874 et 0,902). Pour l'agité 2 il ne reste que 12 coupes, sans paire de stacks différents à mesurer. Visuellement, ses volumes sont plus texturés sur les sujets calmes, mais ils gardent des zones hors du cerveau non recalées (calme 3, agité 1) et le volume de l'agité 2 est inexploitable.
+
+Ce que cela apporte à la question « pourquoi n'arrive-t-on pas à estimer le mouvement de certaines coupes ? » : **la méthode la plus complète du lot échoue aussi** sur les deux sujets très agités et sur un sujet calme (stack sagittal rejeté en entier), et de façon explicite (il rejette les coupes ou des stacks entiers au lieu d'en proposer une pose). Sur l'agité 1, où le mouvement est à la limite de la portée, les méthodes qui font un alignement de stack (NiftyMIC, SVRTK, `s2v` avec son initialisation) s'accordent, et `s2s` s'en rapproche quand on lui ajoute l'alignement par stack. Sur l'agité 3, deux familles de solutions coexistent (décalages de stack de 4-5 mm ou de 18-22 mm). Réserve : une seule exécution par sujet, réglages par défaut ; une correction d'intensité de NiftyMIC a échoué sur un stack de l'agité 2 (bibliothèque absente de l'image Docker), le traitement a continué.
 
 ## Zones vues par un seul stack
 
@@ -235,4 +304,4 @@ Les tests sur données simulées tournent avec `cargo test -p medoxide-svr`. Les
 réelles ou volumineuses sont marqués `#[ignore]` et se lancent à la main (`cargo test --release -p medoxide-svr -- --ignored`),
 avec des variables d'environnement (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`, …) qui désignent des données
 locales. Les scripts de comparaison sont dans `scripts/` : `make_pyrecon_benchmark.py` (stacks simulés),
-`run_svrtk.py`, `run_nesvor.py`, `benchmark_real.py`, `analyse_juge_sujets.py` et `intersection_consistency.py`.
+`run_svrtk.py`, `run_nesvor.py`, `read_niftymic_poses.py`, `benchmark_real.py`, `benchmark_4stacks.py`, `benchmark_variantes_s2s.py`, `analyse_accord_poses.py`, `analyse_qualite_coupes.py`, `analyse_juge_sujets.py` et `intersection_consistency.py`.

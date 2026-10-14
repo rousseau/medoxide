@@ -40,6 +40,8 @@ parser.add_argument("--pyrecon", required=True, help="dossier ROSI du clone loca
 parser.add_argument("--atlas", required=True, help="atlas HR (NIfTI)")
 parser.add_argument("--amplitudes", type=float, nargs="+", default=[0, 2, 4, 6])
 parser.add_argument("--bruit-pct", type=int, default=5)
+parser.add_argument("--decalage-stack-mm", type=float, default=0.0, help="décalage rigide de CHAQUE STACK (translations uniformes dans ± cette valeur, mm), ajouté au mouvement de toutes ses coupes : le mouvement entre acquisitions")
+parser.add_argument("--decalage-stack-deg", type=float, default=0.0, help="idem pour les rotations (degrés)")
 parser.add_argument("--biais-pct", type=int, default=0, help="amplitude (en %) d'un champ de biais multiplicatif lisse, FIXE dans le repère du scanner (la position des coupes, pas l'anatomie), différent pour chaque stack, plus un gain global par stack de même amplitude : incohérences d'intensité basses fréquences entre stacks")
 parser.add_argument("--sortie", default="data/atlas/sim_pyrecon")
 parser.add_argument("--epaisseur-mm", type=float, default=3.5)
@@ -96,23 +98,32 @@ nom_atlas = os.path.basename(args.atlas).split(".")[0]
 for amplitude in args.amplitudes:
     prefixe = "" if args.modele == "independant" else f"_{args.modele}"
     suffixe_biais = f"_biais{args.biais_pct}" if args.biais_pct else ""
-    dossier = f"{args.sortie}/{nom_atlas}{prefixe}_mvt{int(amplitude)}_b{args.bruit_pct}{suffixe_biais}"
+    suffixe_stack = f"_stack{int(args.decalage_stack_mm)}x{int(args.decalage_stack_deg)}" if (args.decalage_stack_mm or args.decalage_stack_deg) else ""
+    dossier = f"{args.sortie}/{nom_atlas}{prefixe}_mvt{int(amplitude)}_b{args.bruit_pct}{suffixe_biais}{suffixe_stack}"
     os.makedirs(dossier, exist_ok=True)
     lignes = []
     for n, orientation in enumerate(("axial", "coronal", "sagittal")):
         random.seed(int(2000 + 10 * amplitude + n))
         simulateur.rd = random  # générateur d'origine (modèle indépendant)
         planifies = None
-        if args.modele != "independant" and amplitude > 0:
+        decalage = np.zeros(6)
+        if args.decalage_stack_mm or args.decalage_stack_deg:
+            rs = np.random.default_rng(int(9000 + 31 * n))
+            decalage = np.concatenate([rs.uniform(-1, 1, 3) * args.decalage_stack_deg, rs.uniform(-1, 1, 3) * args.decalage_stack_mm])  # (a1, a2, a3, t1, t2, t3), comme les tirages du simulateur
+        amplitude_sim = amplitude + (max(args.decalage_stack_mm, args.decalage_stack_deg) if decalage.any() else 0.0)  # étendue des tirages du simulateur
+        if (args.modele != "independant" and amplitude > 0) or decalage.any():
             axe_coupes = {"axial": 2, "coronal": 1, "sagittal": 0}[orientation]
             n_coupes = int(atlas.shape[axe_coupes] // sous_echantillonnage)
             rng = np.random.default_rng(int(7000 + 10 * amplitude + n))
-            u = uniformes_lisses(n_coupes, args.rho, args.saut, ordre_temps(n_coupes, args.modele == "lisseint"), rng)
-            simulateur.rd = SuiteDeTirages(u)
-            planifies = (2 * u - 1) * amplitude  # paramètres attendus : (2u - 1) * amplitude, dans [-amplitude, amplitude]
+            if args.modele == "independant":
+                u = rng.uniform(0.0, 1.0, size=(n_coupes, 6))
+            else:
+                u = uniformes_lisses(n_coupes, args.rho, args.saut, ordre_temps(n_coupes, args.modele == "lisseint"), rng)
+            planifies = (2 * u - 1) * amplitude + decalage  # paramètres attendus : mouvement par coupe + décalage de stack
+            simulateur.rd = SuiteDeTirages((planifies / amplitude_sim + 1.0) / 2.0)  # le simulateur lit 6 tirages par coupe et calcule -amplitude_sim + 2 * amplitude_sim * tirage
         with contextlib.redirect_stdout(io.StringIO()):  # le simulateur est bavard
             lr, lr_masque, parametres, transfos = simulateMvt(
-                atlas, [-amplitude, amplitude], [-amplitude, amplitude], sous_echantillonnage, orientation, masque_hr, motion=amplitude > 0
+                atlas, [-amplitude_sim, amplitude_sim], [-amplitude_sim, amplitude_sim], sous_echantillonnage, orientation, masque_hr, motion=amplitude_sim > 0
             )
         if planifies is not None:
             assert parametres.shape == planifies.shape and np.abs(parametres - planifies).max() < 1e-12, "paramètres rendus != planifiés"

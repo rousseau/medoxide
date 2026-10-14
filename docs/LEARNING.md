@@ -1413,4 +1413,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-14 — Partager des paramètres par bloc, chercher avant de descendre, et ne pas se laisser tromper par une AUC regroupée
+
+- **Quoi (méthode)** : (1) **un bloc de coupes = un seul jeu de 6 paramètres** : on divise le nombre d'inconnues par la taille du bloc, ce qui rend le problème bien posé pour un décalage de stack entier (le recalage par coupe, local, n'y arrive pas au-delà de ~4 mm) ; la **hiérarchie** (stack, puis 2, 4… blocs) va du gros vers le fin ; (2) une **recherche exhaustive sur une grille avant la descente de gradient** : Adam ne trouve qu'un minimum local, la grille choisit le bassin (d'abord les translations à rotation nulle, puis les rotations autour de la meilleure translation, pour éviter une grille à 6 dimensions) ; (3) **comparer à un outil externe commence par valider sa convention de transformation par mesure** (corrélation coupe/volume avec la transformation lue, son inverse et l'identité : 0,92-0,94 contre 0,38-0,65 et 0,44) ; (4) l'**AUC** (probabilité qu'une coupe mal recalée ait un moins bon indicateur qu'une bonne) et le piège de l'**AUC regroupée** : mélanger des jeux dont la part de mauvaises coupes varie de 7 à 100 % fait confondre « différence entre jeux » et « pouvoir de classer les coupes d'un jeu » (0,94 regroupée, 0,50 à 0,93 dans un jeu) ; la validation « un jeu laissé de côté » l'a montré.
+- **Quoi (Rust)** : `pub(crate) fn grille_1d` (grille symétrique contenant 0, testée par valeurs exactes) ; `block_partition` (`(b * n / blocs)..((b + 1) * n / blocs)` : partition en blocs de tailles différant d'au plus 1, sans trou ni chevauchement) ; une transformation commune composée à la pose de chaque coupe du bloc seulement si la concordance du bloc ne baisse pas.
+- **Leçon** : un résultat « indécidable » est un résultat : sur le sujet le plus agité, deux familles de solutions (décalages de stack de 4-5 mm ou de 18-22 mm) coexistent entre cinq méthodes, et nos mesures ne permettent pas d'arbitrer ; ne pas conclure à partir de ce qu'on optimise soi-même (notre concordance préfère notre solution, ce qui ne prouve rien).
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`register_block_s2s`, `block_partition`, `align_blocks`, `grille_1d`), `scripts/read_niftymic_poses.py`, `scripts/analyse_accord_poses.py`, `scripts/analyse_qualite_coupes.py`.
+
+---
+
 *(à compléter à la prochaine étape)*

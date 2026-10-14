@@ -45,6 +45,8 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--s2s-coarse-sigma`, `--s2s-coarse-sweeps`, `--s2s-coarse-levels` | **Expérimental.** Balayages préliminaires du gros vers le fin (coupes floutées de σ pixels, flou divisé par 2 à chaque niveau). Étend la portée de capture en simulation propre (de ±4 à ±8 mm), mais **dégrade nettement sur données réelles** (voir [Validation](validation.md#pourquoi-certains-sujets-très-agités-ne-sont-pas-corrigés)). | désactivé |
 | `--min-stack-coverage` | Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit. Avec 2 (défaut), les zones vues par un seul stack, souvent des coupes mal placées qui forment des « languettes » hors du cerveau, ne sont pas reconstruites ; 1 : tous les voxels touchés. | 2 |
 | `--edge-kappa` | **Expérimental.** Reconstruction préservant les contours (Huber, trois repondérations) : seuil relatif κ, un contour étant une différence entre voxels voisins supérieure à κ fois la différence médiane ; 0 : lissage de Tikhonov seul. Sur données réelles, aucun gain démontré (voir [Validation](validation.md#régularisation-préservant-les-contours)). | 0 |
+| `--quality` | Écrit un fichier d'indicateurs par coupe ([format](#fichier-de-qualité)). | aucun |
+| `--s2s-block-levels`, `--s2s-block-sweeps`, `--s2s-block-search-mm` | Alignement par stack ou par paquets avant les balayages par coupe (niveau 0 : stack entier ; niveau *l* : 2^*l* blocs de coupes consécutives ; recherche exhaustive de ±`search` mm puis Adam). Corrige les décalages de stack de 4 à 10 mm en simulation et rapproche `s2s` de NiftyMIC et SVRTK sur un sujet agité réel, sans régression sur trois sujets calmes ; coûte environ 1,5 fois le temps de calcul ; 0 niveau : désactivé. Sans effet sur le sujet très agité testé ; 3 niveaux n'aident que pour un décalage de stack **avec** biais d'intensité. Voir [Validation](validation.md#alignement-par-stack-ou-par-paquets). | 1, 2, 12 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 
@@ -52,7 +54,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 
 | `--motion` | Principe | Durée | À retenir |
 |---|---|---|---|
-| `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 2,5 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
+| `s2s` (défaut) | Chaque coupe est recalée contre les coupes des **autres stacks** qui la croisent, sans reconstruire de volume intermédiaire. | environ 4 minutes pour 3 stacks (98 coupes), sur un Mac à 12 cœurs (2,5 minutes sans l'alignement par stack) | Rapide. Sur nos six sujets, la qualité de la reconstruction est comparable à celle de `s2v`. |
 | `s2v` | Chaque coupe est recalée contre une référence calculée à partir des **autres** coupes (elle ne contient pas la coupe recalée), en 6 cycles ; le volume n'est reconstruit qu'à la fin, avec les poses finales. | environ 2,5 minutes pour 3 stacks (98 coupes) sur un Mac à 12 cœurs | Plus lent. Méthode classique de l'état de l'art (coupe-volume). |
 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
@@ -93,6 +95,10 @@ m = np.array([float(v) for v in champs[2:]]).reshape(4, 4, order="F")
 ```
 
 Les nombres sont écrits avec assez de chiffres pour être relus exactement.
+
+## Fichier de qualité
+
+Avec `--quality`, un fichier texte est écrit : **une ligne par coupe**, avec l'en-tête `stack`, `coupe`, `recalee` (1 si la coupe a été recalée), `score_avant`, `score_apres` (avec `s2s`, concordance des profils d'intersection avant et après le dernier balayage ; avec `s2v`, corrélation avec la référence ; de −1 à 1, plus grand = mieux), `nb_recalages` et `correction_rms_mm` (déplacement quadratique moyen des pixels de masque entre la pose de départ et la pose finale). Une coupe non recalée a des scores nuls. Ces indicateurs, étudiés seulement avec `s2s`, permettent de reconnaître le **régime** (peu ou presque toutes les coupes mal recalées), pas de compter les coupes mal recalées de façon fiable ([Validation](validation.md#combien-de-coupes-sont-mal-recalées)).
 
 ## Décrire des stacks : `medx svr info`
 

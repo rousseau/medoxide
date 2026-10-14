@@ -60,7 +60,7 @@ def erreurs(jeu, estimees):
     Xe = np.vstack([poser(estimees[k], pts[k]) for k in cles])
     Xv = np.vstack([poser(vraies[k], pts[k]) for k in cles])
     R, t = kabsch(Xe, Xv)
-    return np.array([np.sqrt((((R @ poser(estimees[k], pts[k]).T).T + t - poser(vraies[k], pts[k])) ** 2).sum(1).mean()) for k in cles])
+    return np.array([np.sqrt((((R @ poser(estimees[k], pts[k]).T).T + t - poser(vraies[k], pts[k])) ** 2).sum(1).mean()) for k in cles]), cles
 
 
 def ligne(nom, e):
@@ -71,10 +71,14 @@ for jeu in args.jeux:
     nom_jeu = os.path.basename(jeu.rstrip("/"))
     print(f"\n=== {nom_jeu}", flush=True)
     identite = {k: np.eye(4) for k in lire_poses(f"{jeu}/poses.tsv")}
-    print(ligne("en-tête (sans correction)", erreurs(jeu, identite)), flush=True)
+    print(ligne("en-tête (sans correction)", erreurs(jeu, identite)[0]), flush=True)
     for m in args.methodes:
         volume, poses = f"{args.sortie}/{nom_jeu}_{m}{args.etiquette}.nii.gz", f"{args.sortie}/{nom_jeu}_{m}{args.etiquette}.tsv"
-        if not os.path.exists(poses):
+        qualite = f"{args.sortie}/{nom_jeu}_{m}{args.etiquette}.qualite.tsv"
+        if not os.path.exists(poses) or not os.path.exists(qualite):
             subprocess.run([args.medx, "svr", "recon", "--motion", m, "--device", "cpu", "--alpha", args.alpha, "--input", *[f"{jeu}/stack{s}.nii.gz" for s in range(3)],
-                            "--mask", *[f"{jeu}/stack{s}_mask.nii.gz" for s in range(3)], "--output", volume, "--poses", poses, *shlex.split(args.extra)], check=True, capture_output=True)
-        print(ligne(m, erreurs(jeu, lire_poses(poses))), flush=True)
+                            "--mask", *[f"{jeu}/stack{s}_mask.nii.gz" for s in range(3)], "--output", volume, "--poses", poses, "--quality", qualite, *shlex.split(args.extra)], check=True, capture_output=True)
+        e, cles = erreurs(jeu, lire_poses(poses))
+        print(ligne(m, e), flush=True)
+        # erreur vraie par coupe, à côté de l'indicateur de qualité (même clé stack, coupe) pour `analyse_qualite_coupes.py`
+        open(f"{args.sortie}/{nom_jeu}_{m}{args.etiquette}.erreurs.tsv", "w").write("stack\tcoupe\terreur_mm\n" + "\n".join(f"{k[0]}\t{k[1]}\t{v:.4f}" for k, v in zip(cles, e)) + "\n")

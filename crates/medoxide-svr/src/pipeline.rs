@@ -10,7 +10,7 @@ use burn::prelude::Device;
 use nifti::{writer::WriterOptions, NiftiHeader};
 use ndarray::Array3;
 
-use crate::align::{reconstruct_with_motion_correction, LoopConfig};
+use crate::align::{reconstruct_with_motion_correction, LoopConfig, SliceReport};
 use crate::diff::RobustConfig;
 use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePoses};
 use crate::s2s::{register_slices_s2s, S2sConfig};
@@ -90,6 +90,12 @@ pub struct ReconstructionConfig {
     /// Coupe-coupe : passe-haut des profils d'intensité (écart type en mm du lissage soustrait) pour ignorer le champ de biais et le gain entre stacks ; 0 : aucun. Défaut 25 mm : en simulation avec un biais de 30 %, `s2s` s'effondre sans lui (±4 mm lisse : 3 % des
     /// coupes à ≤ 1,5 mm contre 59 % avec) ; sans biais il ne change rien (73 % dans les deux cas) ; sur données réelles, juge à 4 stacks +0,015 et à 2 stacks +0,002 en moyenne (5 sujets sur 6).
     pub s2s_highpass_mm: f64,
+    /// Coupe-coupe : alignement par blocs avant les balayages par coupe : nombre de niveaux hiérarchiques (stack entier, puis 2, 4… blocs de coupes consécutives par stack) ; 0 : aucun. Défaut 1 (stack entier) : en simulation, 0 → 88 % des coupes à ≤ 1,5 mm pour un décalage de stack de 10°/8 mm ; sur données réelles, juge à 4 stacks +0,016 (sujet agité) et à 2 stacks −0,001, +0,006 et +0,020 sur trois sujets calmes, pour environ 1,5 fois le temps de calcul.
+    pub s2s_block_levels: usize,
+    /// Coupe-coupe : balayages par niveau de blocs.
+    pub s2s_block_sweeps: usize,
+    /// Coupe-coupe : demi-étendue (mm) de la recherche exhaustive d'un bloc (translations puis rotations en mm équivalents) ; 0 : pas de recherche.
+    pub s2s_block_search_mm: f64,
     /// Coupe-coupe : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau) ; 1 : un seul niveau.
     pub s2s_coarse_levels: usize,
     /// Coupe-coupe : nombre de balayages (chaque balayage recale toutes les coupes une fois).
@@ -128,6 +134,9 @@ impl Default for ReconstructionConfig {
             s2s_coarse_sweeps: 2,
             s2s_coarse_levels: 1,
             s2s_highpass_mm: 25.0,
+            s2s_block_levels: 1,
+            s2s_block_sweeps: 2,
+            s2s_block_search_mm: 12.0,
             s2v_cycles: 6,
             s2v_extra_starts: 6,
             s2v_start_amplitude_mm: 5.0,
@@ -148,6 +157,9 @@ pub struct ReconstructionOutput {
     pub volume: Array3<f64>,
     /// Mouvement estimé de chaque coupe (composé après l'affine d'en-tête).
     pub poses: SlicePoses,
+    /// Rapport du dernier recalage de chaque coupe, dans l'ordre des stacks puis des coupes : `ncc_first` et `ncc_final` sont, avec `s2s`, la concordance aux intersections avant et après le recalage, avec `s2v` la corrélation avec la
+    /// référence ; `registered` vaut `false` pour une coupe non recalée. Sert d'indicateur de qualité (voir [`ReconstructionOutput::write_quality`]).
+    pub slices: Vec<SliceReport>,
 }
 
 impl ReconstructionOutput {
@@ -167,6 +179,19 @@ impl ReconstructionOutput {
             .reference_header(&header)
             .write_nifti(&self.volume.mapv(|v| v as f32))
             .map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+    }
+
+    /// Écrit un indicateur de qualité par coupe : une ligne `stack \t coupe \t recalée (0 ou 1) \t score_avant \t score_après \t nb_recalages \t correction_rms_mm`, dans l'ordre des stacks puis des coupes. Le score est, avec `s2s`, la
+    /// concordance aux intersections (corrélation des profils des coupes qui se croisent, de −1 à 1) ; avec `s2v`, la corrélation avec la référence. Une coupe non recalée a des scores nuls. La première ligne est l'en-tête.
+    ///
+    /// # Erreurs
+    /// [`SvrError::Write`] si le fichier ne peut pas être écrit.
+    pub fn write_quality(&self, path: &Path) -> Result<(), SvrError> {
+        let mut lignes = vec!["stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm".to_string()];
+        for r in &self.slices {
+            lignes.push(format!("{}\t{}\t{}\t{:?}\t{:?}\t{}\t{:?}", r.stack, r.slice, u8::from(r.registered), r.ncc_first, r.ncc_final, r.runs, r.correction_rms_mm));
+        }
+        std::fs::write(path, lignes.join("\n")).map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
     }
 
     /// Écrit le mouvement de chaque coupe : un fichier texte, une ligne par coupe, `stack \t coupe \t` puis les 16 valeurs de la matrice 4 × 4 **en ordre colonne**
@@ -206,16 +231,18 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
     let header_poses = SlicePoses::identity(stacks);
     match config.motion {
         Motion::SliceToSlice => {
-            let poses = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?.poses;
+            let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
+            let (poses, slices) = (rapport.poses, rapport.slices);
             let volume = reconstruct_with_poses(&grid, stacks, &poses, config)?;
-            Ok(ReconstructionOutput { grid, volume, poses })
+            Ok(ReconstructionOutput { grid, volume, poses, slices })
         }
         Motion::SliceToVolume => {
             let loop_config = loop_config(config);
             let result = reconstruct_with_motion_correction(&grid, stacks, &header_poses, loop_config, device, |_, _, _| {})?;
             // la boucle rend une reconstruction de Tikhonov ; avec `edge_kappa > 0`, la reconstruction finale est refaite préservant les contours, aux poses finales
             let volume = if config.edge_kappa > 0.0 { reconstruct_with_poses(&grid, stacks, &result.poses, config)? } else { result.volume };
-            Ok(ReconstructionOutput { grid, volume, poses: result.poses })
+            let slices = result.cycles.last().map(|r| r.slices.clone()).unwrap_or_default();
+            Ok(ReconstructionOutput { grid, volume, poses: result.poses, slices })
         }
     }
 }
@@ -259,6 +286,9 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         coarse_sigma_pixels: config.s2s_coarse_sigma_pixels,
         coarse_sweeps: config.s2s_coarse_sweeps,
         coarse_levels: config.s2s_coarse_levels,
+        block_levels: config.s2s_block_levels,
+        block_sweeps: config.s2s_block_sweeps,
+        block_search_mm: config.s2s_block_search_mm,
         intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() },
         ..Default::default()
     }

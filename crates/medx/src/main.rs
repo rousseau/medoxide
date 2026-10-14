@@ -67,6 +67,9 @@ enum SvrAction {
         /// Volume NIfTI reconstruit (compressé si le nom finit par `.gz`)
         #[arg(long)]
         output: PathBuf,
+        /// Écrit aussi un indicateur de qualité par coupe (texte : stack, coupe, recalée, score avant, score après, nombre de recalages, correction) : le score est la concordance aux intersections avec `s2s`
+        #[arg(long)]
+        quality: Option<PathBuf>,
         /// Écrit aussi le mouvement estimé de chaque coupe (texte : stack, coupe, matrice 4 x 4 en ordre colonne)
         #[arg(long)]
         poses: Option<PathBuf>,
@@ -100,6 +103,15 @@ enum SvrAction {
         /// Avec `--motion s2s` : passe-haut des profils d'intensité (écart type en mm du lissage soustrait) pour ignorer le champ de biais et le gain entre stacks (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_highpass_mm)]
         s2s_highpass_mm: f64,
+        /// Avec `--motion s2s` : alignement par blocs avant les coupes (niveaux hiérarchiques : le stack entier, puis 2, 4… blocs de coupes consécutives par stack ; 0 : aucun)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_block_levels)]
+        s2s_block_levels: usize,
+        /// Avec `--s2s-block-levels` : balayages par niveau
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_block_sweeps)]
+        s2s_block_sweeps: usize,
+        /// Avec `--s2s-block-levels` : demi-étendue en mm de la recherche exhaustive de chaque bloc (0 : aucune recherche)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_block_search_mm)]
+        s2s_block_search_mm: f64,
         /// Avec `--s2s-coarse-sigma` : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_levels)]
         s2s_coarse_levels: usize,
@@ -147,7 +159,7 @@ enum Command {
 }
 
 /// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit le volume (et les poses si demandé).
-fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, device: Option<DeviceArg>, config: &ReconstructionConfig) -> ExitCode {
+fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, qualite: Option<&std::path::Path>, device: Option<DeviceArg>, config: &ReconstructionConfig) -> ExitCode {
     if masques.len() != entrees.len() {
         eprintln!("medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), entrees.len());
         return ExitCode::FAILURE;
@@ -167,6 +179,9 @@ fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path,
         sortie_reconstruction.write_volume(sortie)?;
         if let Some(p) = poses {
             sortie_reconstruction.write_poses(&stacks, p)?;
+        }
+        if let Some(q) = qualite {
+            sortie_reconstruction.write_quality(q)?;
         }
         Ok(())
     })();
@@ -258,9 +273,9 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2v_cycles, ..Default::default() };
-            svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
+        Command::Svr { action: SvrAction::Recon { input, mask, output, quality, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2v_cycles, ..Default::default() };
+            svr_recon(&input, &mask, &output, poses.as_deref(), quality.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {
             // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;

@@ -2854,7 +2854,13 @@ mod tests {
         let grid = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         let (nx, ny, nz) = grid.dims;
         let volume = Array3::from_shape_fn(grid.dims, |(i, j, k)| (i + 3 * j + 7 * k) as f64 * 0.37 + if i == nx - 1 && j == ny - 1 && k == nz - 1 { 1000.5 } else { 0.0 });
-        let sortie = ReconstructionOutput { grid: grid.clone(), volume: volume.clone(), poses: vraies.clone() };
+        let rapports: Vec<align::SliceReport> = stacks
+            .iter()
+            .enumerate()
+            .flat_map(|(si, st)| (0..st.dim().2).map(move |k| (si, k)))
+            .map(|(si, k)| align::SliceReport { stack: si, slice: k, registered: (si + k) % 3 != 0, ncc_first: 0.1 * si as f64 + 0.01 * k as f64, ncc_final: 0.5 + 0.013 * k as f64 - 0.07 * si as f64, runs: 1 + k % 4, correction_rms_mm: 0.25 * k as f64 + 0.003 })
+            .collect();
+        let sortie = ReconstructionOutput { grid: grid.clone(), volume: volume.clone(), poses: vraies.clone(), slices: rapports.clone() };
         // (a) volume
         let chemin = t.fichier("volume.nii.gz");
         sortie.write_volume(&chemin).unwrap();
@@ -2878,6 +2884,19 @@ mod tests {
         let absent = t.fichier("absent/volume.nii.gz");
         assert!(matches!(sortie.write_volume(&absent), Err(SvrError::Write { .. })));
         assert!(matches!(sortie.write_poses(&stacks, &t.fichier("absent/poses.tsv")), Err(SvrError::Write { .. })));
+        // (e) indicateur de qualité : une ligne par coupe dans l'ordre, valeurs relues EXACTEMENT
+        let tsv_qualite = t.fichier("qualite.tsv");
+        sortie.write_quality(&tsv_qualite).unwrap();
+        let texte = std::fs::read_to_string(&tsv_qualite).unwrap();
+        let lignes: Vec<&str> = texte.lines().collect();
+        assert_eq!(lignes[0], "stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm");
+        assert_eq!(lignes.len(), rapports.len() + 1);
+        for (ligne, r) in lignes[1..].iter().zip(&rapports) {
+            let c: Vec<&str> = ligne.split('\t').collect();
+            assert_eq!((c[0].parse::<usize>().unwrap(), c[1].parse::<usize>().unwrap(), c[2] == "1", c[5].parse::<usize>().unwrap()), (r.stack, r.slice, r.registered, r.runs));
+            assert_eq!((c[3].parse::<f64>().unwrap(), c[4].parse::<f64>().unwrap(), c[6].parse::<f64>().unwrap()), (r.ncc_first, r.ncc_final, r.correction_rms_mm));
+        }
+        assert!(matches!(sortie.write_quality(&t.fichier("absent/q.tsv")), Err(SvrError::Write { .. })));
         // (d) forme des stacks
         assert!(matches!(sortie.write_poses(&stacks[..2], &tsv), Err(SvrError::PoseMismatch)));
     }
@@ -2940,7 +2959,9 @@ mod tests {
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
-        let directes = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() }, &device).unwrap().poses;
+        let rapport_direct = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, block_levels: config.s2s_block_levels, block_sweeps: config.s2s_block_sweeps, block_search_mm: config.s2s_block_search_mm, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() }, &device).unwrap();
+        assert_eq!(sortie.slices, rapport_direct.slices, "rapports par coupe (s2s) différents de l'appel direct");
+        let directes = rapport_direct.poses;
         assert_eq!(ecart_poses(&sortie.poses, &directes), 0.0, "poses coupe-coupe différentes de l'appel direct");
         let probleme = ReconstructionProblem::with_poses_covered(&grille, &stacks, &directes, config.alpha, config.min_stack_coverage).unwrap();
         let attendu = probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x;
@@ -2957,7 +2978,13 @@ mod tests {
             leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
         };
         let identite = SlicePoses::identity(&stacks);
-        let directes_v = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, boucle(true), &device, |_, _, _| {}).unwrap().poses;
+        let direct_v = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, boucle(true), &device, |_, _, _| {}).unwrap();
+        assert_eq!(sortie_v.slices.len(), direct_v.cycles.last().unwrap().slices.len());
+        for (a, b) in sortie_v.slices.iter().zip(&direct_v.cycles.last().unwrap().slices) {
+            assert_eq!((a.stack, a.slice, a.registered, a.runs), (b.stack, b.slice, b.registered, b.runs));
+            assert!((a.ncc_final - b.ncc_final).abs() < 1e-6, "score final (s2v) : {} contre {}", a.ncc_final, b.ncc_final);
+        }
+        let directes_v = direct_v.poses;
         let ecart_v = ecart_poses(&sortie_v.poses, &directes_v);
         assert!(ecart_v < 1e-6, "poses coupe-volume différentes de l'appel direct : {ecart_v:.2e}");
         let config_pile = ReconstructionConfig { s2v_leave_slice_out: false, ..config_v };
@@ -3618,6 +3645,190 @@ mod tests {
         }
     }
 
+    /// Alignement par blocs (critères fixés avant, blobs, trois stacks, décalage rigide PAR STACK de ±degrés et ±mm et aucun mouvement par coupe) : (a) sans blocs (`block_levels = 0`), les poses sont EXACTEMENT celles du recalage par coupe actuel ;
+    /// (b) avec un niveau de blocs (le stack entier) et la recherche exhaustive, l'erreur de pose médiane (après retrait du mouvement commun) est ≤ 1,5 mm, et elle est strictement inférieure à celle du recalage par coupe seul (mesuré : 1,4 contre 3,0 mm). RÉVISION EXPLICITE : le critère fixé avant (décalage de 8 mm et 8°, ≤ 1 mm) n'est pas testable sur ce fantôme, trop pauvre en structure : à 5 mm/° les blocs échouent aussi (5,4 mm ; avec recherche 11,9 mm) ; le grand décalage est jugé sur l'atlas simulé. (c) Partition en blocs :
+    /// `2^niveau` blocs consécutifs, de tailles différant d'au plus 1, couvrant toutes les coupes sans chevauchement.
+    #[test]
+    fn the_block_alignment_recovers_a_rigid_stack_offset() {
+        use crate::s2s::{block_partition, S2sConfig};
+        // (c)
+        for n in [1usize, 5, 12, 35] {
+            for niveau in 0..4 {
+                let blocs = block_partition(n, niveau);
+                assert_eq!(blocs.len(), (1usize << niveau).min(n));
+                assert_eq!(blocs.first().unwrap().start, 0);
+                assert_eq!(blocs.last().unwrap().end, n);
+                assert!(blocs.windows(2).all(|w| w[0].end == w[1].start));
+                let tailles: Vec<usize> = blocs.iter().map(|b| b.len()).collect();
+                assert!(tailles.iter().max().unwrap() - tailles.iter().min().unwrap() <= 1, "{n} coupes, niveau {niveau} : {tailles:?}");
+            }
+        }
+        let t = Temp::new("blocs");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_par_stack(&modeles, 3.0, 3.0, 17);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let med = |poses: &SlicePoses| {
+            let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            e[e.len() / 2]
+        };
+        let base = S2sConfig { sweeps: 2, ..Default::default() };
+        let (seul, avec_blocs) = (crate::s2s::register_slices_s2s(&stacks, &depart, &base, &device).unwrap(), crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 8.0, ..base }, &device).unwrap());
+        let (e0, e_seul, e_blocs) = (med(&depart), med(&seul.poses), med(&avec_blocs.poses));
+        println!("erreur médiane : en-tête {e0:.2} mm ; par coupe {e_seul:.2} mm ; avec blocs {e_blocs:.2} mm");
+        // (a)
+        let zero_niveau = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 0, block_sweeps: 5, block_search_mm: 30.0, ..base }, &device).unwrap();
+        assert!(stacks.iter().enumerate().all(|(si, s)| (0..s.dim().2).all(|k| zero_niveau.poses.get(si, k) == seul.poses.get(si, k))), "block_levels = 0 doit redonner le recalage par coupe");
+        // (b)
+        assert!(e_blocs <= 1.5, "erreur médiane avec blocs : {e_blocs}");
+        assert!(e_blocs < e_seul, "les blocs doivent faire mieux que le recalage par coupe seul : {e_blocs} contre {e_seul}");
+    }
+
+    /// Grille de recherche exhaustive de l'alignement par blocs (valeurs exactes) : symétrique, pas constant, contient toujours 0, ne dépasse jamais la demi-étendue ; `grille_1d(8, 4)` = −8, −4, 0, 4, 8 ; `grille_1d(9, 4)` aussi (9 n'est pas un multiple du pas) ; `grille_1d(3, 4)` = 0 seul.
+    #[test]
+    fn the_search_grid_is_exact() {
+        use crate::s2s::grille_1d;
+        assert_eq!(grille_1d(8.0, 4.0), vec![-8.0, -4.0, 0.0, 4.0, 8.0]);
+        assert_eq!(grille_1d(9.0, 4.0), vec![-8.0, -4.0, 0.0, 4.0, 8.0]);
+        assert_eq!(grille_1d(3.0, 4.0), vec![0.0]);
+        assert_eq!(grille_1d(6.0, 1.5), vec![-6.0, -4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5, 6.0]);
+    }
+
+    /// Prépare, pour le stack `si` de `stacks` aux poses `poses`, les problèmes d'intersection de toutes ses coupes recalables, avec le pivot moyen et l'échelle quadratique moyenne (comme `align_blocks_level`).
+    fn problemes_de_bloc(stacks: &[Stack], poses: &SlicePoses, si: usize, device: &burn::tensor::Device) -> (Vec<crate::s2s::IntersectionProblem>, burn::tensor::Tensor<1>, Vector3<f64>, f64) {
+        let atlas = crate::s2s::SliceAtlas::new(stacks, device).unwrap();
+        let (mut problemes, mut pivots, mut echelles) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..stacks[si].dim().2 {
+            let Some(p) = crate::align::preparer_coupe(&stacks[si], k, *poses.get(si, k)) else { continue };
+            let Some(pb) = crate::s2s::IntersectionProblem::build(&atlas, stacks, poses, si, k, &crate::s2s::IntersectionConfig::default(), device) else { continue };
+            problemes.push(pb);
+            pivots.push(p.pivot);
+            echelles.push(p.echelle);
+        }
+        let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
+        let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
+        (problemes, burn::tensor::Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device), pivot, echelle)
+    }
+
+    /// Recherche exhaustive d'un bloc, sur une fonction synthétique (valeurs exactes) : le meilleur point est cherché d'abord en translation (rotation nulle), puis en rotation AUTOUR de cette translation ; `f = −|t − (8, 0, 0)|² − |r − (4, 0, 0)|²` sur la grille −8, −4, 0, 4, 8
+    /// donne `r = (4, 0, 0)`, `t = (8, 0, 0)` ; une fonction maximale en zéro rend le paramètre nul (aucun candidat strictement meilleur).
+    #[test]
+    fn the_exhaustive_search_picks_the_best_translation_then_the_best_rotation_around_it() {
+        use crate::s2s::{grille_1d, recherche_exhaustive};
+        let grille = grille_1d(8.0, 4.0);
+        let f = |p: [f64; 6]| -((p[3] - 8.0).powi(2) + p[4].powi(2) + p[5].powi(2)) - ((p[0] - 4.0).powi(2) + p[1].powi(2) + p[2].powi(2));
+        assert_eq!(recherche_exhaustive(&f, &grille, f([0.0; 6])), [4.0, 0.0, 0.0, 8.0, 0.0, 0.0]);
+        let g = |p: [f64; 6]| -p.iter().map(|v| v * v).sum::<f64>();
+        assert_eq!(recherche_exhaustive(&g, &grille, g([0.0; 6])), [0.0; 6]);
+    }
+
+    /// Une recherche exhaustive suivie de quelques itérations d'Adam fait ce que quelques itérations d'Adam seules ne font pas (blobs, stack coronal décalé de 8 mm, 5 itérations, mesuré : concordance 0,48 sans recherche, 0,90 avec) et le point de départ d'Adam est bien le résultat de la recherche
+    /// (translation estimée entre 7 et 9 mm).
+    #[test]
+    fn the_block_search_reaches_what_a_short_descent_cannot() {
+        use crate::diff::RegistrationConfig;
+        let t = Temp::new("blocs_recherche");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let mut vraies = SlicePoses::identity(&modeles);
+        for k in 0..12 {
+            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(8.0, 0.0, 0.0), &Vector3::zeros()));
+        }
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let (problemes, pivot, _, echelle) = problemes_de_bloc(&stacks, &SlicePoses::identity(&stacks), 1, &device);
+        let config = RegistrationConfig { learning_rate: 0.3, iterations: 5, lr_decay: 1.0, initial: [0.0; 6] };
+        let sans = crate::s2s::register_block_s2s(&problemes, pivot.clone(), echelle, config, 0.0, 4.0);
+        let avec = crate::s2s::register_block_s2s(&problemes, pivot, echelle, config, 8.0, 4.0);
+        println!("concordance sans recherche {:.3}, avec {:.3} ; translation estimée {:.2?}", sans.ncc_history[1], avec.ncc_history[1], &avec.params[3..]);
+        assert!(sans.ncc_history[1] < 0.6, "sans recherche : {}", sans.ncc_history[1]);
+        assert!(avec.ncc_history[1] > 0.85, "avec recherche : {}", avec.ncc_history[1]);
+        assert!((7.0..=9.0).contains(&avec.params[3].abs()), "translation estimée : {:?}", avec.params);
+    }
+
+    /// Un niveau de l'alignement par blocs, sur des blobs, depuis des poses de départ DIFFÉRENTES pour chaque coupe : (a) niveau 0 : le premier stack ne bouge pas (exactement), chaque autre stack reçoit UNE transformation commune (`après · avant⁻¹` identique pour toutes ses coupes, à 1e-6 près, et
+    /// différente de l'identité), égale à celle que donne directement `register_block_s2s` sur les mêmes problèmes (recherche, pas de grille, pivot moyen, échelle quadratique, composition à gauche) ; (b) niveau 3 : 12 coupes en 8 blocs de 1 ou 2 coupes (moins de 3) : aucune pose ne change ;
+    /// (c) niveau 2 : blocs de 3 coupes : des poses changent ; (d) niveau 1 : le premier stack est aligné aussi (blocs de 6) ; (e) une mise à jour qui dégrade la concordance du bloc (pas d'Adam énorme depuis les poses vraies) est rejetée : poses inchangées.
+    #[test]
+    fn the_block_alignment_level_applies_one_common_transform_per_block() {
+        use crate::s2s::{align_blocks_level, S2sConfig, SliceAtlas};
+        let t = Temp::new("blocs_niveaux");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_par_stack(&modeles, 3.0, 3.0, 17);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let depart = poses_aleatoires(&modeles, 1.0, 1.0, 5);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let config = S2sConfig { block_sweeps: 1, block_search_mm: 8.0, block_search_step_mm: 4.0, ..Default::default() };
+        let change = |poses: &SlicePoses, si: usize| (0..12).any(|k| poses.get(si, k) != depart.get(si, k));
+        let ecart = |a: &Matrix4<f64>, b: &Matrix4<f64>| (a - b).iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        // (a)
+        let mut niveau0 = depart.clone();
+        align_blocks_level(&stacks, &mut niveau0, &atlas, &config, 0, &device);
+        assert!(!change(&niveau0, 0), "le premier stack a bougé au niveau 0");
+        let deltas = |poses: &SlicePoses, si: usize| (0..12).map(|k| poses.get(si, k) * depart.get(si, k).try_inverse().unwrap()).collect::<Vec<Matrix4<f64>>>();
+        for si in 1..3 {
+            // les coupes de bord, sans assez de pixels de masque, ne sont pas recalées : elles gardent leur pose
+            let d: Vec<Matrix4<f64>> = deltas(&niveau0, si).into_iter().filter(|m| ecart(m, &Matrix4::identity()) > 1e-12).collect();
+            assert!(d.len() >= 8, "stack {si} : seulement {} coupes corrigées", d.len());
+            assert!(d.iter().all(|m| ecart(m, &d[0]) < 1e-6), "stack {si} : transformation non commune");
+            assert!(ecart(&d[0], &Matrix4::identity()) > 1e-3, "stack {si} : correction nulle");
+        }
+        let (problemes, pivot_t, pivot, echelle) = problemes_de_bloc(&stacks, &depart, 1, &device);
+        let r = crate::s2s::register_block_s2s(&problemes, pivot_t, echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+        let attendu = crate::diff::pose_to_matrix(&r.params, &pivot, echelle);
+        let obtenu = deltas(&niveau0, 1)[1];
+        println!("écart à la transformation attendue : {:.2e}", ecart(&obtenu, &attendu));
+        assert!(ecart(&obtenu, &attendu) < 1e-6);
+        // (b)
+        let mut niveau3 = depart.clone();
+        align_blocks_level(&stacks, &mut niveau3, &atlas, &config, 3, &device);
+        assert!((0..3).all(|si| !change(&niveau3, si)), "des blocs de moins de 3 coupes ont été recalés");
+        // (c)
+        let mut niveau2 = depart.clone();
+        align_blocks_level(&stacks, &mut niveau2, &atlas, &config, 2, &device);
+        assert!(change(&niveau2, 1), "aucun bloc de 3 coupes n'a été recalé");
+        // (e) mise à jour rejetée : depuis les poses vraies (concordance maximale) un pas d'Adam énorme ne peut que dégrader la concordance du bloc, les poses restent exactement celles de départ
+        let brutal = S2sConfig { registration: crate::diff::RegistrationConfig { learning_rate: 3.0, iterations: 1, lr_decay: 1.0, initial: [0.0; 6] }, block_search_mm: 0.0, ..config };
+        let mut rejete = vraies.clone();
+        align_blocks_level(&stacks, &mut rejete, &atlas, &brutal, 0, &device);
+        assert!((0..3).all(|si| (0..12).all(|k| rejete.get(si, k) == vraies.get(si, k))), "une mise à jour qui dégrade la concordance a été acceptée");
+        // (d)
+        let mut niveau1 = depart.clone();
+        align_blocks_level(&stacks, &mut niveau1, &atlas, &config, 1, &device);
+        assert!(change(&niveau1, 0), "le premier stack n'est pas aligné au niveau 1");
+    }
+
+    /// EXPLORATION (sans critère) de l'alignement par blocs sur les blobs : erreur médiane selon le décalage de stack et la recherche exhaustive.
+    #[test]
+    #[ignore = "exploration"]
+    fn explore_the_block_alignment_on_blobs() {
+        use crate::s2s::S2sConfig;
+        let t = Temp::new("blocs_explo");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        for decalage in [2.0, 3.0, 5.0] {
+            let vraies = poses_par_stack(&modeles, decalage, decalage, 17);
+            let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+            let depart = SlicePoses::identity(&stacks);
+            let med = |poses: &SlicePoses| {
+                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+                e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                e[e.len() / 2]
+            };
+            let base = S2sConfig { sweeps: 2, ..Default::default() };
+            let seul = crate::s2s::register_slices_s2s(&stacks, &depart, &base, &device).unwrap();
+            let adam = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 0.0, ..base }, &device).unwrap();
+            let grille = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 8.0, ..base }, &device).unwrap();
+            println!("décalage {decalage} : en-tête {:.2} ; par coupe {:.2} ; blocs Adam seul {:.2} ; blocs + recherche {:.2}", med(&depart), med(&seul.poses), med(&adam.poses), med(&grille.poses));
+        }
+    }
+
     /// Calendrier du gros vers fin du coupe-coupe (critères fixés avant, valeurs exactes) : sans flou (σ = 0), un seul niveau net de `sweeps` balayages ; σ = 6, 2 niveaux, 2 balayages grossiers, 3 balayages nets : (6, 2), (3, 2), (0, 3 net) ; `coarse_levels` = 0 compte pour 1 ;
     /// `coarse_sweeps` = 0 supprime les niveaux grossiers ; 3 niveaux : 8, 4, 2. Et la correspondance des réglages du pipeline : chaque champ `s2s_*` de `ReconstructionConfig` se retrouve dans `S2sConfig`.
     #[test]
@@ -3631,8 +3842,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_levels: 0, ..deux }), vec![(6.0, 2, false), (0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sweeps: 0, ..deux }), vec![(0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 

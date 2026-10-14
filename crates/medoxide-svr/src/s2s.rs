@@ -478,11 +478,20 @@ pub struct S2sConfig {
     pub coarse_sweeps: usize,
     /// Nombre de niveaux grossiers : le niveau `l` (0 = le plus grossier) floute avec `coarse_sigma_pixels / 2^l` ; 1 : un seul niveau.
     pub coarse_levels: usize,
+    /// Alignement par blocs, avant les balayages par coupe : nombre de niveaux hiérarchiques (0 : aucun). Le niveau `l` partage une transformation rigide entre les coupes de chacun des `2^l` blocs consécutifs de chaque stack (niveau 0 : le stack entier,
+    /// le premier stack étant l'ancre).
+    pub block_levels: usize,
+    /// Nombre de balayages (tous les blocs de tous les stacks) à chaque niveau.
+    pub block_sweeps: usize,
+    /// Recherche exhaustive avant l'optimisation d'un bloc : demi-étendue (mm) de la grille de translations, puis de rotations exprimées en mm équivalents (0 : pas de recherche) ; pas `block_search_step_mm`.
+    pub block_search_mm: f64,
+    /// Pas (mm) de la grille de la recherche exhaustive.
+    pub block_search_step_mm: f64,
 }
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0 }
     }
 }
 
@@ -497,6 +506,133 @@ fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
         ordre.swap(i, (etat % (i as u64 + 1)) as usize);
     }
     ordre
+}
+
+/// Concordance moyenne d'un bloc : la moyenne, sur les coupes du bloc, de la concordance de chacune (`IntersectionProblem::cost`) pour la MÊME transformation rigide `params` autour du MÊME `pivot`.
+fn block_cost(problems: &[IntersectionProblem], params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
+    let n = problems.len() as f64;
+    let mut somme = problems[0].cost(params.clone(), pivot.clone(), rotation_scale_mm);
+    for p in &problems[1..] {
+        somme = somme + p.cost(params.clone(), pivot.clone(), rotation_scale_mm);
+    }
+    somme / n
+}
+
+/// Points d'une grille régulière de `[-demi, demi]` de pas `pas` (le zéro est toujours dedans, au milieu).
+pub(crate) fn grille_1d(demi: f64, pas: f64) -> Vec<f64> {
+    let n = (demi / pas).floor() as i64;
+    (-n..=n).map(|i| i as f64 * pas).collect()
+}
+
+/// Recherche exhaustive des 6 paramètres `[rotations (mm équivalents), translations (mm)]` maximisant `evaluer`, sur la grille `grille` (de [`grille_1d`]) : d'abord la meilleure translation (rotation nulle), puis la meilleure rotation autour de CETTE translation ;
+/// `zero` est la valeur de `evaluer` au paramètre nul, que la recherche ne rend qu'à égalité ou en dessous d'un candidat strictement meilleur. Rend le meilleur point (le paramètre nul si aucun candidat ne fait mieux).
+pub(crate) fn recherche_exhaustive(evaluer: &dyn Fn([f64; 6]) -> f64, grille: &[f64], zero: f64) -> [f64; 6] {
+    let (mut meilleur, mut valeur_max) = ([0.0; 6], zero);
+    for &x in grille {
+        for &y in grille {
+            for &z in grille {
+                let p = [0.0, 0.0, 0.0, x, y, z];
+                let v = evaluer(p);
+                if v > valeur_max {
+                    (meilleur, valeur_max) = (p, v);
+                }
+            }
+        }
+    }
+    let translation = [meilleur[3], meilleur[4], meilleur[5]];
+    for &a in grille {
+        for &b in grille {
+            for &c in grille {
+                let p = [a, b, c, translation[0], translation[1], translation[2]];
+                let v = evaluer(p);
+                if v > valeur_max {
+                    (meilleur, valeur_max) = (p, v);
+                }
+            }
+        }
+    }
+    meilleur
+}
+
+/// **Recalage rigide commun d'un bloc de coupes** : un seul jeu de 6 paramètres (autour de `pivot`, rotations en mm équivalents) pour toutes les coupes de `problems`. Avec `search_mm > 0`, une recherche exhaustive précède
+/// l'optimisation : d'abord la meilleure translation de la grille `[-search_mm, search_mm]³` (pas `step_mm`, rotation nulle), puis la meilleure rotation de la grille (mêmes bornes, en mm équivalents) autour de cette translation ; Adam part de ce point.
+/// Rend les paramètres et l'historique de la concordance (première valeur : au zéro ; dernière : finale).
+pub(crate) fn register_block_s2s(problems: &[IntersectionProblem], pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig, search_mm: f64, step_mm: f64) -> RegistrationResult {
+    let device = pivot.device();
+    let valeur = |t: Tensor<1>| f64::from(t.into_data().try_to_vec::<f32>().unwrap()[0]);
+    let evaluer = |p: [f64; 6]| valeur(block_cost(problems, Tensor::<1>::from_floats(p.map(|v| v as f32), &device), pivot.clone(), rotation_scale_mm));
+    let zero = evaluer([0.0; 6]);
+    let mut depart = config.initial;
+    if search_mm > 0.0 && step_mm > 0.0 {
+        depart = recherche_exhaustive(&evaluer, &grille_1d(search_mm, step_mm), zero);
+    }
+    let module_depart: Vec<f32> = depart.iter().map(|&v| v as f32).collect();
+    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(module_depart.as_slice(), &device)) };
+    let mut optimiseur = AdamConfig::new().init();
+    let mut pas = config.learning_rate;
+    for _ in 0..config.iterations {
+        let concordance = block_cost(problems, module.params.val(), pivot.clone(), rotation_scale_mm);
+        let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
+        module = optimiseur.step(pas, module, gradients);
+        pas *= config.lr_decay;
+    }
+    let finale = module.params.val();
+    let apres = valeur(block_cost(problems, finale.clone(), pivot.clone(), rotation_scale_mm));
+    let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
+    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: vec![zero, apres] }
+}
+
+/// Partition des `n` coupes d'un stack en `2^niveau` blocs consécutifs de tailles presque égales (indices de coupes) ; niveau 0 : un seul bloc.
+pub(crate) fn block_partition(n: usize, niveau: usize) -> Vec<std::ops::Range<usize>> {
+    let blocs = (1usize << niveau).min(n.max(1));
+    (0..blocs).map(|b| (b * n / blocs)..((b + 1) * n / blocs)).collect()
+}
+
+/// **Alignement par blocs** : pour chaque niveau hiérarchique (stack entier, puis 2, 4… blocs par stack), [`align_blocks_level`].
+fn align_blocks(stacks: &[Stack], poses: &mut SlicePoses, atlas: &SliceAtlas, config: &S2sConfig, device: &Device) {
+    for niveau in 0..config.block_levels {
+        align_blocks_level(stacks, poses, atlas, config, niveau, device);
+    }
+}
+
+/// Un niveau de l'alignement par blocs : `config.block_sweeps` balayages ; chaque bloc de coupes consécutives (les coupes recalables : assez de pixels de masque et au moins une paire ; au moins 3 pour que le bloc soit recalé) reçoit une
+/// transformation rigide COMMUNE ([`register_block_s2s`]), acceptée seulement si la concordance du bloc ne baisse pas, et composée à la pose de toutes ses coupes. Au niveau 0, le premier stack ne bouge pas (le repère est libre). Les stacks sont traités dans l'ordre
+/// (Gauss-Seidel : un bloc voit les poses déjà corrigées des autres stacks).
+pub(crate) fn align_blocks_level(stacks: &[Stack], poses: &mut SlicePoses, atlas: &SliceAtlas, config: &S2sConfig, niveau: usize, device: &Device) {
+    for _ in 0..config.block_sweeps {
+        for si in 0..stacks.len() {
+            if niveau == 0 && si == 0 {
+                continue;
+            }
+            for bloc in block_partition(stacks[si].dim().2, niveau) {
+                let mut problemes = Vec::new();
+                let (mut pivots, mut echelles, mut ks) = (Vec::new(), Vec::new(), Vec::new());
+                for k in bloc {
+                    let courante = *poses.get(si, k);
+                    let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
+                    let Some(probleme) = IntersectionProblem::build(atlas, stacks, poses, si, k, &config.intersection, device) else { continue };
+                    problemes.push(probleme);
+                    pivots.push(preparee.pivot);
+                    echelles.push(preparee.echelle);
+                    ks.push(k);
+                }
+                if problemes.len() < 3 {
+                    continue;
+                }
+                let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
+                let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
+                let t_pivot = Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device);
+                let resultat = register_block_s2s(&problemes, t_pivot, echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+                if resultat.ncc_history[1] >= resultat.ncc_history[0] {
+                    let delta = pose_to_matrix(&resultat.params, &pivot, echelle);
+                    for k in ks {
+                        let nouvelle = delta * poses.get(si, k);
+                        poses.set(si, k, nouvelle);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Calendrier des balayages de [`register_slices_s2s`] : une liste de `(écart type du flou en pixels, nombre de balayages, net)`. D'abord les niveaux grossiers (`coarse_levels` niveaux, le flou `coarse_sigma_pixels` divisé par 2 à chaque niveau,
@@ -531,6 +667,10 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
     let mut courantes = poses.clone();
     let mut rapports: Vec<SliceReport> =
         coupes.iter().map(|&(stack, slice)| SliceReport { stack, slice, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }).collect();
+    if config.block_levels > 0 {
+        let atlas = SliceAtlas::new(stacks, device)?;
+        align_blocks(stacks, &mut courantes, &atlas, config, device);
+    }
     let niveaux = sweep_schedule(config);
     let mut decalage_graine = 0u64;
     for (sigma, balayages, net) in niveaux {
