@@ -13,6 +13,7 @@
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
 pub mod align;
+pub mod bias;
 pub mod diff;
 pub mod optimizers;
 pub mod pipeline;
@@ -69,6 +70,8 @@ pub enum SvrError {
     Write { path: PathBuf, message: String },
     /// Moins de deux stacks : le mouvement ne peut pas être estimé (une coupe n'a pas de coupe d'un autre stack à croiser, ni de reconstruction indépendante d'elle).
     NotEnoughStacks,
+    /// Aucune paire de coupes de stacks différents ne se croise assez : le champ de biais n'est pas estimable.
+    NoIntersections,
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -103,6 +106,7 @@ impl std::fmt::Display for SvrError {
             SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
             SvrError::InvalidBlur => write!(f, "écart type de flou invalide : σ >= 0 et fini requis"),
             SvrError::InvalidScales => write!(f, "facteurs d'intensité par coupe invalides : un facteur fini et > 0 par coupe requis"),
+            SvrError::NoIntersections => write!(f, "aucune paire de coupes de stacks différents ne se croise assez : champ de biais non estimable"),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
             SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(

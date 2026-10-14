@@ -231,13 +231,13 @@ impl Default for IntersectionConfig {
 }
 
 /// Plan d'une coupe à sa pose : matrice pixel → monde, son inverse, centre et normale unitaire (monde).
-struct Plan {
-    inverse: Matrix4<f64>,
-    centre: Vector3<f64>,
-    normale: Vector3<f64>,
+pub(crate) struct Plan {
+    pub(crate) inverse: Matrix4<f64>,
+    pub(crate) centre: Vector3<f64>,
+    pub(crate) normale: Vector3<f64>,
 }
 
-fn plan_de(stack: &Stack, k: usize, pose: &Matrix4<f64>) -> Plan {
+pub(crate) fn plan_de(stack: &Stack, k: usize, pose: &Matrix4<f64>) -> Plan {
     let ma = pose * stack.affine();
     let (nx, ny, _) = stack.dim();
     Plan {

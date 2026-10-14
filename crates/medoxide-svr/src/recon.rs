@@ -1948,6 +1948,11 @@ mod tests {
     /// Simule depuis `volume` les stacks de `modeles` avec le mouvement vrai `vraies` (par coupe) ; les stacks gardent leur affine d'en-tête.
     /// Masque d'un pixel : couvert et d'intensité > 3 % du maximum (assez bas pour que chaque coupe ait plus de `MIN_MASK_PIXELS` pixels).
     fn simuler_blobs(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses) -> Vec<Stack> {
+        simuler_blobs_avec_champ(t, volume, modeles, vraies, None)
+    }
+
+    /// Comme [`simuler_blobs`], avec en plus un champ de biais multiplicatif `exp(champ(stack, position nominale))`, fixe dans le repère du scanner (position d'en-tête du pixel).
+    fn simuler_blobs_avec_champ(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses, champ: Option<&dyn Fn(usize, &Vector3<f64>) -> f64>) -> Vec<Stack> {
         let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
         modeles
             .iter()
@@ -1958,7 +1963,8 @@ mod tests {
                     let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
                     let sim = volume.simulate_slice(&posee, &posee.psf());
                     for ((i, j), &v) in sim.values.indexed_iter() {
-                        data[[i, j, coupe.index()]] = v;
+                        let gain = champ.map_or(1.0, |f| f(n, &(modele.affine() * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0)).xyz()).exp());
+                        data[[i, j, coupe.index()]] = (f64::from(v) * gain) as f32;
                         masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
                     }
                 }
@@ -3801,6 +3807,132 @@ mod tests {
         let mut niveau1 = depart.clone();
         align_blocks_level(&stacks, &mut niveau1, &atlas, &config, 1, &device);
         assert!(change(&niveau1, 0), "le premier stack n'est pas aligné au niveau 1");
+    }
+
+    /// Stacks ANALYTIQUES : l'intensité d'un pixel est `f(position vraie) × exp(champ(stack, position nominale))`, avec `f` une fonction lisse et positive (un fond plus trois gaussiennes) évaluée à la position du centre du pixel après le mouvement vrai ; masque plein. Le « même tissu » est donc
+    /// exactement le même en deux coupes qui se croisent (à l'interpolation bilinéaire près), sans l'écart de profil de coupe d'un fantôme à bords francs.
+    fn stacks_analytiques(t: &Temp, modeles: &[Stack], vraies: &SlicePoses, champ: &dyn Fn(usize, &Vector3<f64>) -> f64) -> Vec<Stack> {
+        let tissu = |x: &Vector3<f64>| {
+            let g = |c: [f64; 3], s: f64| (-((x - Vector3::from(c)).norm_squared()) / (2.0 * s * s)).exp();
+            1.0 + 0.8 * g([0.0, 0.0, 0.0], 9.0) + 0.6 * g([6.0, -4.0, 3.0], 5.0) + 0.5 * g([-5.0, 5.0, -4.0], 6.0)
+        };
+        modeles
+            .iter()
+            .enumerate()
+            .map(|(n, modele)| {
+                let mut data = Array3::<f32>::zeros(modele.dim());
+                for ((i, j, k), v) in data.indexed_iter_mut() {
+                    let h = nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0);
+                    let (nominale, vraie) = ((modele.affine() * h).xyz(), (vraies.get(n, k) * modele.affine() * h).xyz());
+                    *v = (tissu(&vraie) * champ(n, &nominale).exp()) as f32;
+                }
+                stack_avec_masque(t, &format!("analytique{n}"), &data, &Array3::from_elem(modele.dim(), 1u8), modele.affine(), [1.0, 1.0, 3.0])
+            })
+            .collect()
+    }
+
+    /// Estimation du champ de biais (stacks analytiques de trois plans de 28 × 28 pixels de 1 mm et 12 coupes de 3 mm, mouvement vrai PAR COUPE de ±4°/±4 mm (avec un mouvement par stack seulement, un polynôme restant un polynôme après un mouvement rigide, utiliser les positions corrigées au lieu des nominales ne changerait rien : un mutant l'a montré), poses vraies données ; champ appliqué aux positions NOMINALES des pixels, polynomial de degré 3 : stack 0 aucun, stack 1
+    /// `0,30 u − 0,10 u w + 0,15 v² − 0,20`, stack 2 `0,20 w − 0,15 u v + 0,10`, avec `u, v, w` les coordonnées monde / 15 mm ; base de degré 3 et d'échelle 15 mm). CRITÈRES RÉVISÉS après une première mesure : les critères fixés d'abord (corrélation avec le vrai champ ≥ 0,99, rapports de gain à 0,03) portaient sur
+    /// une quantité NON IDENTIFIABLE : ajouter à tous les stacks un même champ lisse attaché à l'anatomie ne change aucun rapport entre coupes qui se croisent (mesuré : erreur absolue du champ 0,09-0,10, erreur du champ RELATIF entre stacks 0,04). Critères maintenant : (a) l'incohérence d'intensité entre stacks
+    /// (`intensity_inconsistency`) est ≥ 0,1 avant correction et ≤ 0,01 après, soit au moins dix fois moins ; (b) SANS champ appliqué, le champ estimé est nul à 0,01 près en écart type, pour chaque stack, et l'incohérence ne change pas (≤ 0,001) ; (c) le terme constant du stack 0 est exactement nul ; (d) erreurs : un seul
+    /// stack → `NotEnoughStacks`, poses de mauvaise forme → `PoseMismatch`, deux stacks parallèles (aucune paire) → `NoIntersections`. Un fantôme à bords francs (blobs, coupes de 3 mm contre 1 mm dans le plan) ne convient pas : la structure parasite du profil de coupe est prise pour du biais ;
+    /// l'estimateur reproduit la référence Python sur l'atlas (`compare_the_bias_estimation_with_the_python_reference`).
+    #[test]
+    fn the_bias_estimation_removes_the_intensity_inconsistency_between_stacks() {
+        use crate::bias::{estimate_bias_fields, intensity_inconsistency, BiasConfig};
+        let t = Temp::new("biais");
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 4.0, 4.0, 17);
+        let vrai_champ = |s: usize, x: &Vector3<f64>| {
+            let (u, v, w) = (x.x / 15.0, x.y / 15.0, x.z / 15.0);
+            match s {
+                0 => 0.0,
+                1 => 0.30 * u - 0.10 * u * w + 0.15 * v * v - 0.20,
+                _ => 0.20 * w - 0.15 * u * v + 0.10,
+            }
+        };
+        let config = BiasConfig { scale_mm: 15.0, ..Default::default() };
+        let stacks = stacks_analytiques(&t, &modeles, &vraies, &vrai_champ);
+        let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
+        assert_eq!(champs.coefficients()[0][0], 0.0, "(c)");
+        let (avant, apres) = (intensity_inconsistency(&stacks, &vraies, &config, None).unwrap(), intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap());
+        println!("incohérence d'intensité : avant {avant:.4}, après {apres:.4}");
+        assert!(avant >= 0.1, "(a) avant : {avant}");
+        assert!(apres <= 0.01 && apres * 10.0 <= avant, "(a) après : {apres} (avant {avant})");
+        // (b)
+        let sans = stacks_analytiques(&t, &modeles, &vraies, &|_, _| 0.0);
+        let champs_sans = estimate_bias_fields(&sans, &vraies, &config).unwrap();
+        for (s, stack) in sans.iter().enumerate() {
+            let valeurs: Vec<f64> = stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).map(|((i, j, k), _)| champs_sans.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz())).collect();
+            let moyenne = valeurs.iter().sum::<f64>() / valeurs.len() as f64;
+            let ecart = (valeurs.iter().map(|a| (a - moyenne).powi(2)).sum::<f64>() / valeurs.len() as f64).sqrt();
+            assert!(ecart <= 0.01, "(b) stack {s} : écart type du champ estimé sans biais {ecart}");
+        }
+        let (i0, i1) = (intensity_inconsistency(&sans, &vraies, &config, None).unwrap(), intensity_inconsistency(&sans, &vraies, &config, Some(&champs_sans)).unwrap());
+        assert!((i0 - i1).abs() <= 0.001, "(b) incohérence sans biais : {i0} puis {i1}");
+        // (d)
+        assert!(matches!(estimate_bias_fields(&stacks[..1], &SlicePoses::identity(&stacks[..1]), &BiasConfig::default()), Err(SvrError::NotEnoughStacks)));
+        assert!(matches!(estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks[..2]), &BiasConfig::default()), Err(SvrError::PoseMismatch)));
+        let deux = [modeles[0].clone(), modeles[0].clone()];
+        let paralleles = stacks_analytiques(&t, &deux, &SlicePoses::identity(&deux), &|_, _| 0.0);
+        assert!(matches!(estimate_bias_fields(&paralleles, &SlicePoses::identity(&paralleles), &BiasConfig::default()), Err(SvrError::NoIntersections)));
+    }
+
+    /// Perte de signal (critère fixé avant) : une coupe entière du stack 0 (la 5ᵉ, d'intensité multipliée par 1e-4) est ignorée par le seuil d'intensité (10 % du 99ᵉ centile) : avec les mêmes champs vrais que ci-dessus, l'incohérence après correction reste ≤ 0,01 ; sans ce seuil, le log du rapport
+    /// des intensités de cette coupe (≈ −9) dominerait.
+    #[test]
+    fn the_bias_estimation_ignores_a_slice_with_signal_dropout() {
+        use crate::bias::{estimate_bias_fields, intensity_inconsistency, BiasConfig};
+        let t = Temp::new("biais_perte");
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 4.0, 4.0, 17);
+        let champ = |s: usize, x: &Vector3<f64>| {
+            let (u, v, w) = (x.x / 15.0, x.y / 15.0, x.z / 15.0);
+            match s {
+                0 if (x.z + 1.5).abs() < 1.0 => -9.2, // la 5ᵉ coupe du stack axial est à z = −1,5 mm, les autres à 3 mm d'écart
+                0 => 0.0,
+                1 => 0.30 * u - 0.10 * u * w + 0.15 * v * v - 0.20,
+                _ => 0.20 * w - 0.15 * u * v + 0.10,
+            }
+        };
+        let config = BiasConfig { scale_mm: 15.0, ..Default::default() };
+        let stacks = stacks_analytiques(&t, &modeles, &vraies, &champ);
+        let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
+        let apres = intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap();
+        println!("perte de signal : incohérence après correction {apres:.4}");
+        assert!(apres <= 0.01, "incohérence après correction avec une coupe sans signal : {apres}");
+    }
+
+    /// COMPARAISON avec la référence Python (`scripts/prototype_champ_biais.py`) sur un jeu simulé de l'atlas (poses vraies) : écart type du log du champ estimé par stack et rapports de gain.
+    /// Python (jeu `STA31_mvt4_b5_biais30`) : écarts types 0,076 / 0,220 / 0,202 ; gains (log, par rapport au stack 0) −0,202 / −0,053. Variable `MEDOXIDE_JEU_SIMULE` : dossier du jeu.
+    #[test]
+    #[ignore = "comparaison avec la référence Python, données locales"]
+    fn compare_the_bias_estimation_with_the_python_reference() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        let dossier = PathBuf::from(std::env::var("MEDOXIDE_JEU_SIMULE").expect("MEDOXIDE_JEU_SIMULE"));
+        let stacks: Vec<Stack> = (0..3)
+            .map(|n| {
+                let mut s = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).unwrap();
+                s.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                s
+            })
+            .collect();
+        let poses = lire_poses_tsv(&dossier.join("poses.tsv"), &stacks);
+        let champs = estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap();
+        let mut moyennes = Vec::new();
+        for (s, stack) in stacks.iter().enumerate() {
+            let v: Vec<f64> = stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).map(|((i, j, k), _)| champs.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz())).collect();
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            let e = (v.iter().map(|a| (a - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+            println!("stack {s} : écart type du log estimé {e:.3}, moyenne {m:+.3}");
+            moyennes.push(m);
+        }
+        println!("gains par rapport au stack 0 : {:+.3} {:+.3}", moyennes[1] - moyennes[0], moyennes[2] - moyennes[0]);
+        let config = BiasConfig::default();
+        for (nom, p) in [("vraies", poses.clone()), ("en-tête", SlicePoses::identity(&stacks))] {
+            let champs = estimate_bias_fields(&stacks, &p, &config).unwrap();
+            println!("poses {nom} : incohérence d'intensité avant {:.4}, après {:.4}", crate::bias::intensity_inconsistency(&stacks, &p, &config, None).unwrap(), crate::bias::intensity_inconsistency(&stacks, &p, &config, Some(&champs)).unwrap());
+        }
     }
 
     /// EXPLORATION (sans critère) de l'alignement par blocs sur les blobs : erreur médiane selon le décalage de stack et la recherche exhaustive.
