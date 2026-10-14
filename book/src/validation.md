@@ -178,6 +178,29 @@ La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur *
 
 Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains étaient plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01** : elle a été refaite (tableau ci-dessus). **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
 
+## Pourquoi certains sujets très agités ne sont pas corrigés
+
+Sur deux de nos six sujets (agité 2 et agité 3), aucune méthode (la nôtre, SVRTK, NeSVoR) ne prédit mieux des coupes jamais vues que de ne pas corriger, avec le protocole à deux stacks. Voici ce que les mesures établissent, dans l'ordre.
+
+**1. Les méthodes ne s'accordent pas sur les poses.** Pour chaque coupe recalée, nous plaçons des pixels de masque avec la pose de chaque méthode, nous alignons rigidement les deux jeux de poses (le repère de sortie est libre) et nous rapportons l'écart quadratique par coupe. L'accord est de 0,5 à 1 mm en médiane sur les sujets calmes (1 à 21 % des coupes à plus de 3 mm d'écart), de 1 à 1,8 mm sur l'agité 1 (celui où la correction marche), de 3 à 4,6 mm sur l'agité 2 (46 à 89 % des coupes à plus de 3 mm) et de **6 à 13 mm sur l'agité 3 (85 à 100 %)** : les quatre méthodes y trouvent des poses différentes. Le mouvement estimé par rapport à l'en-tête y est de 5 à 12 mm en médiane (jusqu'à 29 mm au 90ᵉ centile pour SVRTK). SVRTK déplace des stacks entiers de 10 à 28 mm et garde peu de mouvement par coupe (1 à 3 mm) ; nos méthodes et NeSVoR trouvent des décalages de stack modestes (2,5 à 6 mm) mais un mouvement résiduel par coupe de 4 à 9 mm.
+
+**2. La portée de capture, mesurée avec vérité connue.** Nous simulons des stacks d'un atlas avec un mouvement rigide par coupe, uniforme dans ±A (indépendant ou lisse avec sauts), et nous mesurons la part des coupes dont la pose est retrouvée à 1,5 mm ou moins (après retrait du mouvement commun) :
+
+| Amplitude A | ±2 | ±4 | ±6 | ±8 | ±10 |
+|---|---|---|---|---|---|
+| `s2s`, indépendant | 96 % | 79 % | 8 % | 0 % | 0 % |
+| `s2s`, lisse | | 73 % | 0 % | 0 % | 0 % |
+
+La portée de capture d'un recalage local parti de l'en-tête est donc d'environ ±4 mm, alors que le mouvement estimé des sujets très agités est de 5 à 12 mm.
+
+**3. Élargir la portée marche en simulation propre, pas sur le réel.** Des balayages préliminaires sur des coupes floutées (gros vers fin, σ = 6 pixels puis 3) portent la portée à environ ±8 mm : indépendant 92 / 74 / 59 % à ±4 / ±6 / ±8 (8 % et 0 % à ±6 et ±8 sans), lisse 93 / 79 / 49 % à ±4 / ±6 / ±8. Mais sur données réelles, avec le juge à quatre stacks, la moyenne tombe de 0,818 à **0,701** : l'élargissement dégrade nettement.
+
+**4. Cause : les incohérences d'intensité basses fréquences entre stacks.** Le simulateur d'origine donne la même intensité à tous les stacks. Nous lui avons ajouté un **champ de biais multiplicatif lisse, fixe dans le repère du scanner (donc différent pour chaque stack à mouvement donné) et un gain global par stack**, d'amplitude 30 %. Résultat : `s2s` de base passe de 73 % à **3 %** à ±4 en mouvement lisse (79 % à 65 % en indépendant), et la passe grossière s'effondre (±4 indépendant : 92 % → 4 %), ce qui reproduit le comportement observé sur le réel. Un flou fait correspondre des formes lisses d'intensité, donc le champ de biais plutôt que l'anatomie.
+
+**5. Une brique qui l'atténue : le passe-haut des profils.** Avant la corrélation, on soustrait à chaque profil son lissage gaussien (25 mm, restreint au masque) : les variations lentes d'intensité disparaissent. En simulation avec biais, ±4 : 83 % (indépendant, 65 % sans) et 59 % (lisse, **3 % sans**), et sans biais le résultat est inchangé (79 % et 73 %). Sur données réelles, le juge à quatre stacks passe de 0,818 à **0,833** (+0,015, et le repli qui échouait passe de 0,735 à 0,776) ; à deux stacks sur les six sujets, +0,002 en moyenne (5 sujets sur 6 positifs, le pire −0,007). Il est donc actif par défaut (`--s2s-highpass-mm 25`), pour environ 15 à 25 % de temps en plus. **Il ne suffit pas à rendre la passe grossière utilisable** : avec le passe-haut, la passe grossière reste mauvaise sur le réel (juge à quatre stacks 0,706, contre 0,833 pour le passe-haut seul) et en simulation avec biais (±6 : 4 %).
+
+**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. La brique suivante à évaluer est une **estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut), puis le retour à la passe grossière. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
+
 ## Zones vues par un seul stack
 
 Sur les sujets très agités, les volumes montraient des « languettes » rectangulaires qui dépassent du cerveau et un liseré extérieur : ce sont des zones **vues par un seul stack** (environ 15 % du domaine pour le sujet agité examiné), alors qu'un voxel réellement dans le cerveau est atteint par chaque plan. Une première hypothèse (des coupes non recalées de bord) a été **infirmée** : elles ne représentent que 0,4 % des pixels de masque, et aucune des 59 coupes recalées n'a une corrélation simulée/réelle sous 0,7. La règle retenue (`--min-stack-coverage 2`, défaut) ne reconstruit que les voxels atteints par au moins deux stacks.

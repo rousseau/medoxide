@@ -2940,7 +2940,7 @@ mod tests {
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
-        let directes = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, ..Default::default() }, &device).unwrap().poses;
+        let directes = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() }, &device).unwrap().poses;
         assert_eq!(ecart_poses(&sortie.poses, &directes), 0.0, "poses coupe-coupe différentes de l'appel direct");
         let probleme = ReconstructionProblem::with_poses_covered(&grille, &stacks, &directes, config.alpha, config.min_stack_coverage).unwrap();
         let attendu = probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x;
@@ -3574,6 +3574,50 @@ mod tests {
         assert!((num / den).sqrt() < 5e-2, "la solution sur le domaine commun change trop : {:.2e}", (num / den).sqrt());
     }
 
+    /// Passe-haut des profils (critères fixés avant, valeurs calculées) : sur un profil de 400 points (pas 0,5 mm), σ = 10 mm, poids 1 partout : (a) un profil constant donne un résidu nul (< 1e-5) ; (b) un profil linéaire donne un résidu nul à 1e-3 près à plus de 40 mm
+    /// des bords ; (c) une sinusoïde de période 4 mm (≪ σ) est conservée (à 2 % de son amplitude près) ; (d) une sinusoïde de période 200 mm (≫ σ) est supprimée (résidu < 10 % de l'amplitude) ; (e) des points de poids nul ne contribuent pas au lissage (changer leur valeur ne change
+    /// pas le résultat aux points de poids 1) ; (f) la matrice de lissage est symétrique, de diagonale 1 et de valeur `exp(−½ (Δ/σ)²)`.
+    #[test]
+    fn the_profile_highpass_is_exact() {
+        use crate::s2s::{gaussian_smoothing_matrix, highpass_profiles};
+        use burn::prelude::{Tensor, TensorData};
+        let device = burn::tensor::Device::flex().autodiff();
+        let n = 400usize;
+        let t: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+        let k = gaussian_smoothing_matrix(&t, 10.0, &device);
+        let lire = |x: Tensor<2>| x.into_data().try_to_vec::<f32>().unwrap();
+        let profil = |f: &dyn Fn(f64) -> f64| Tensor::<2>::from_floats(TensorData::new(t.iter().map(|&x| f(x) as f32).collect::<Vec<f32>>(), [1, n]), &device);
+        let un = Tensor::<2>::ones([1, n], &device);
+        // (a)
+        assert!(lire(highpass_profiles(profil(&|_| 5.0), un.clone(), k.clone())).iter().all(|v| v.abs() < 1e-4));
+        // (b)
+        let lin = lire(highpass_profiles(profil(&|x| 0.3 * x + 2.0), un.clone(), k.clone()));
+        assert!((0..n).filter(|&i| t[i] > 40.0 && t[i] < t[n - 1] - 40.0).all(|i| lin[i].abs() < 1e-3), "résidu linéaire");
+        // (c) et (d) loin des bords
+        let loin = |i: usize| t[i] > 60.0 && t[i] < t[n - 1] - 60.0;
+        let rapide = lire(highpass_profiles(profil(&|x| (2.0 * std::f64::consts::PI * x / 4.0).sin()), un.clone(), k.clone()));
+        let ecart = (0..n).filter(|&i| loin(i)).map(|i| (f64::from(rapide[i]) - (2.0 * std::f64::consts::PI * t[i] / 4.0).sin()).abs()).fold(0.0, f64::max);
+        assert!(ecart < 0.02, "sinusoïde rapide altérée de {ecart}");
+        let lente = lire(highpass_profiles(profil(&|x| (2.0 * std::f64::consts::PI * x / 200.0).sin()), un.clone(), k.clone()));
+        let reste = (0..n).filter(|&i| loin(i)).map(|i| f64::from(lente[i]).abs()).fold(0.0, f64::max);
+        assert!(reste < 0.1, "sinusoïde lente non supprimée : {reste}");
+        // (e) poids nuls
+        let poids = Tensor::<2>::from_floats(TensorData::new((0..n).map(|i| if i % 7 == 3 { 0.0_f32 } else { 1.0 }).collect::<Vec<f32>>(), [1, n]), &device);
+        let a = lire(highpass_profiles(profil(&|x| (x * 0.1).sin() + 0.001 * x), poids.clone(), k.clone()));
+        let b = lire(highpass_profiles(profil(&|x| (x * 0.1).sin() + 0.001 * x + if ((x / 0.5).round() as usize) % 7 == 3 { 500.0 } else { 0.0 }), poids, k.clone()));
+        assert!((0..n).filter(|i| i % 7 != 3).all(|i| (a[i] - b[i]).abs() < 1e-3), "un point de poids nul a contribué");
+        // (f)
+        let m = lire(k);
+        for a in [0usize, 7, 100, 399] {
+            assert_eq!(m[a * n + a], 1.0);
+            for b in [0usize, 3, 50, 399] {
+                assert_eq!(m[a * n + b], m[b * n + a]);
+                let attendu = (-0.5 * ((t[a] - t[b]) / 10.0).powi(2)).exp() as f32;
+                assert!((m[a * n + b] - attendu).abs() < 1e-6);
+            }
+        }
+    }
+
     /// Calendrier du gros vers fin du coupe-coupe (critères fixés avant, valeurs exactes) : sans flou (σ = 0), un seul niveau net de `sweeps` balayages ; σ = 6, 2 niveaux, 2 balayages grossiers, 3 balayages nets : (6, 2), (3, 2), (0, 3 net) ; `coarse_levels` = 0 compte pour 1 ;
     /// `coarse_sweeps` = 0 supprime les niveaux grossiers ; 3 niveaux : 8, 4, 2. Et la correspondance des réglages du pipeline : chaque champ `s2s_*` de `ReconstructionConfig` se retrouve dans `S2sConfig`.
     #[test]
@@ -3587,8 +3631,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_levels: 0, ..deux }), vec![(6.0, 2, false), (0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sweeps: 0, ..deux }), vec![(0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, ..Default::default() };
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 

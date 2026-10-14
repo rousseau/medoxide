@@ -1404,4 +1404,13 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-14 — Comprendre un échec : mesurer l'accord, simuler avec vérité connue, reproduire le réel en simulation
+
+- **Quoi (méthode)** : pour comprendre pourquoi aucune méthode ne corrige certains sujets, quatre étapes, chacune bon marché et chacune décisive : (1) **l'accord des poses entre méthodes** (alignement rigide global puis écart par coupe) : trois régimes (0,5-1 mm, 1-2 mm, 6-13 mm) montrent que le problème est mal posé ou hors de portée, sans besoin de vérité terrain ; (2) **une simulation avec vérité connue** donne la portée de capture (±4 mm) à comparer à l'amplitude estimée des sujets ; (3) une brique candidate (gros vers fin) qui gagne en simulation propre mais **perd sur le réel** désigne ce que le simulateur omet ; (4) on **ajoute cette omission au simulateur** (champ de biais fixe dans le repère du scanner) : si le simulateur reproduit alors l'échec réel (la passe grossière s'effondre de 92 % à 4 %), l'explication est crédible, et on peut chercher une brique qui y répond (passe-haut des profils : 3 % → 59 %) en **vérifiant sur le réel** (juge à 4 stacks, +0,015).
+- **Quoi (Rust/Burn)** : une convolution normalisée dans un masque (`blur_slice_in_mask` : `flou(image · masque) / flou(masque)`) évite que le fond entre dans les pixels voisins ; le passe-haut des profils est une soustraction `p − (p ⊙ w) K / (w K)` avec une matrice de lissage `K` de forme `[T, T]` appliquée par `matmul` à un lot de profils `[J, T]`, entièrement différentiable ; un mutant « noyau non normalisé » a survécu parce que la normalisation s'annule dans le rapport signal / masque : le code a été simplifié.
+- **Leçon** : « ce qui marche en simulation ne se transfère pas au réel » (deuxième occurrence : α, puis gros vers fin) n'est pas une fatalité ; chaque occurrence désigne une propriété du réel absente du simulateur, à ajouter au simulateur puis à tester.
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`blur_slice_in_mask`, `sweep_schedule`, `gaussian_smoothing_matrix`, `highpass_profiles`), `scripts/evaluate_simulated_motion.py`, `scripts/make_pyrecon_benchmark.py` (`--biais-pct`), `scripts/benchmark_4stacks.py`.
+
+---
+
 *(à compléter à la prochaine étape)*

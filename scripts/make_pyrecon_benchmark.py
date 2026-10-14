@@ -40,6 +40,7 @@ parser.add_argument("--pyrecon", required=True, help="dossier ROSI du clone loca
 parser.add_argument("--atlas", required=True, help="atlas HR (NIfTI)")
 parser.add_argument("--amplitudes", type=float, nargs="+", default=[0, 2, 4, 6])
 parser.add_argument("--bruit-pct", type=int, default=5)
+parser.add_argument("--biais-pct", type=int, default=0, help="amplitude (en %) d'un champ de biais multiplicatif lisse, FIXE dans le repère du scanner (la position des coupes, pas l'anatomie), différent pour chaque stack, plus un gain global par stack de même amplitude : incohérences d'intensité basses fréquences entre stacks")
 parser.add_argument("--sortie", default="data/atlas/sim_pyrecon")
 parser.add_argument("--epaisseur-mm", type=float, default=3.5)
 parser.add_argument("--modele", choices=["independant", "lisse", "lisseint"], default="independant")
@@ -94,7 +95,8 @@ nom_atlas = os.path.basename(args.atlas).split(".")[0]
 
 for amplitude in args.amplitudes:
     prefixe = "" if args.modele == "independant" else f"_{args.modele}"
-    dossier = f"{args.sortie}/{nom_atlas}{prefixe}_mvt{int(amplitude)}_b{args.bruit_pct}"
+    suffixe_biais = f"_biais{args.biais_pct}" if args.biais_pct else ""
+    dossier = f"{args.sortie}/{nom_atlas}{prefixe}_mvt{int(amplitude)}_b{args.bruit_pct}{suffixe_biais}"
     os.makedirs(dossier, exist_ok=True)
     lignes = []
     for n, orientation in enumerate(("axial", "coronal", "sagittal")):
@@ -116,6 +118,18 @@ for amplitude in args.amplitudes:
             assert parametres.shape == planifies.shape and np.abs(parametres - planifies).max() < 1e-12, "paramètres rendus != planifiés"
         data = lr.get_fdata().astype(np.float32)
         masque = lr_masque.get_fdata() > 0.5
+        if args.biais_pct > 0:
+            # champ de biais : 1 + somme de 4 ondes planes de longueur d'onde 100 à 200 mm, phases et directions tirées par stack (graine fixée) ; évalué aux positions NOMINALES des pixels (repère du scanner)
+            rb = np.random.default_rng(31000 + 17 * n)
+            ii, jj, kk = np.meshgrid(*[np.arange(t) for t in data.shape], indexing="ij")
+            monde = (lr.affine @ np.stack([ii.ravel(), jj.ravel(), kk.ravel(), np.ones(ii.size)]))[:3].T
+            champ = np.ones(len(monde))
+            for _ in range(4):
+                direction = rb.normal(size=3)
+                direction /= np.linalg.norm(direction)
+                champ += (args.biais_pct / 100.0) / 2.0 * np.cos(2 * np.pi * (monde @ direction) / rb.uniform(100.0, 200.0) + rb.uniform(0, 2 * np.pi))
+            gain = 1.0 + (args.biais_pct / 100.0) * rb.uniform(-1.0, 1.0)
+            data = (data * (gain * champ).reshape(data.shape)).astype(np.float32)
         if args.bruit_pct > 0:
             sigma = args.bruit_pct / 100.0 * float(data[masque].mean())
             data = data + np.random.default_rng(0xC0FFEE + 7919 * (n + 1) + int(amplitude)).normal(0.0, sigma, data.shape).astype(np.float32)

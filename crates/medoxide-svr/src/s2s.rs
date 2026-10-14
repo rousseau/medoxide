@@ -220,11 +220,13 @@ pub struct IntersectionConfig {
     /// Stack d'ancrage : si `Some(a)`, seules les paires dont une des deux coupes est dans le stack `a` sont formées (les paires entre deux autres stacks sont ignorées). Sert à garder des paires
     /// non utilisées par l'estimation pour les évaluer (`None` : toutes les paires).
     pub anchor_stack: Option<usize>,
+    /// Passe-haut des profils : écart type (mm) du lissage gaussien (restreint aux pixels de masque) soustrait à chaque profil avant la corrélation, pour ignorer les variations lentes de l'intensité (champ de biais, gain) ; 0 : aucun.
+    pub highpass_sigma_mm: f64,
 }
 
 impl Default for IntersectionConfig {
     fn default() -> Self {
-        IntersectionConfig { min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, anchor_stack: None }
+        IntersectionConfig { min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, anchor_stack: None, highpass_sigma_mm: 0.0 }
     }
 }
 
@@ -243,6 +245,21 @@ fn plan_de(stack: &Stack, k: usize, pose: &Matrix4<f64>) -> Plan {
         centre: (ma * Vector4::new((nx - 1) as f64 / 2.0, (ny - 1) as f64 / 2.0, k as f64, 1.0)).xyz(),
         normale: ma.fixed_view::<3, 1>(0, 2).into_owned().normalize(),
     }
+}
+
+/// Matrice `[T, T]` du lissage gaussien le long d'un profil : `K[a][b] = exp(−½ ((tₐ − t_b) / σ)²)` pour les abscisses `t` (mm).
+pub(crate) fn gaussian_smoothing_matrix(t: &[f64], sigma_mm: f64, device: &Device) -> Tensor<2> {
+    let n = t.len();
+    let valeurs: Vec<f32> = (0..n).flat_map(|a| (0..n).map(move |b| (-0.5 * ((t[a] - t[b]) / sigma_mm).powi(2)).exp() as f32)).collect();
+    Tensor::<2>::from_floats(TensorData::new(valeurs, [n, n]), device)
+}
+
+/// Passe-haut de profils `p` (`[J, T]`) : `p − (p ⊙ w) K / (w K)`, le lissage gaussien (matrice `k`) étant **restreint aux points de poids `w` non nul** (convolution normalisée) pour que le fond n'entre pas dans les points voisins. Un profil constant
+/// ou linéaire (loin des bords) donne un résidu nul ; une oscillation bien plus rapide que le lissage est conservée.
+pub(crate) fn highpass_profiles(p: Tensor<2>, w: Tensor<2>, k: Tensor<2>) -> Tensor<2> {
+    let numerateur = (p.clone() * w.clone()).matmul(k.clone());
+    let denominateur = w.matmul(k).clamp_min(1e-6);
+    p - numerateur / denominateur
 }
 
 /// Le problème de recalage coupe-coupe d'UNE coupe (la coupe mobile) : ses partenaires (les coupes des AUTRES stacks qui la croisent, à leur pose courante, gardées si la droite d'intersection a au moins
@@ -267,6 +284,8 @@ pub struct IntersectionProblem {
     index: AtlasIndex,
     atlas_images: Tensor<1>,
     atlas_masks: Tensor<1>,
+    /// Matrice du lissage gaussien du passe-haut des profils (`None` : pas de passe-haut).
+    highpass: Option<Tensor<2>>,
     /// Indices (stack, coupe) des partenaires, dans l'ordre des paires.
     pub partners: Vec<(usize, usize)>,
 }
@@ -365,6 +384,7 @@ impl IntersectionProblem {
             index: AtlasIndex { offset: int(&off), ny: int(&nyv), max_i: lisse(&mi), max_j: lisse(&mj), max_i_int: int(&max_i_int), max_j_int: int(&max_j_int) },
             atlas_images: atlas.images.clone(),
             atlas_masks: atlas.masks.clone(),
+            highpass: (config.highpass_sigma_mm > 0.0).then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
             partners: partenaires.iter().map(|(s, j, _)| (*s, *j)).collect(),
         })
     }
@@ -404,7 +424,12 @@ impl IntersectionProblem {
         let fixe = bilinear_sample_atlas(&self.atlas_images, &self.index, v2.clone());
         let masque_fixe = bilinear_sample_atlas(&self.atlas_masks, &self.index, v2).values.greater_elem(0.5).float();
         let w = (mobile.inside * fixe.inside * masque_mobile * masque_fixe).reshape([j, t]);
-        let ncc_paires = ncc(mobile.values.reshape([j, t]), fixe.values.reshape([j, t]), w.clone());
+        let (profil_mobile, profil_fixe) = (mobile.values.reshape([j, t]), fixe.values.reshape([j, t]));
+        let (profil_mobile, profil_fixe) = match &self.highpass {
+            Some(k) => (highpass_profiles(profil_mobile, w.clone(), k.clone()), highpass_profiles(profil_fixe, w.clone(), k.clone())),
+            None => (profil_mobile, profil_fixe),
+        };
+        let ncc_paires = ncc(profil_mobile, profil_fixe, w.clone());
         let valides = w.sum_dim(1).reshape([j]).greater_equal_elem(self.min_points).float();
         (ncc_paires * valides.clone()).sum() / valides.sum().clamp_min(1.0)
     }

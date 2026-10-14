@@ -97,6 +97,9 @@ enum SvrAction {
         /// Avec `--s2s-coarse-sigma` : nombre de balayages sur les coupes floutées
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_sweeps)]
         s2s_coarse_sweeps: usize,
+        /// Avec `--motion s2s` : passe-haut des profils d'intensité (écart type en mm du lissage soustrait) pour ignorer le champ de biais et le gain entre stacks (0 : aucun)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_highpass_mm)]
+        s2s_highpass_mm: f64,
         /// Avec `--s2s-coarse-sigma` : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_levels)]
         s2s_coarse_levels: usize,
@@ -255,8 +258,8 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2v_cycles, ..Default::default() };
+        Command::Svr { action: SvrAction::Recon { input, mask, output, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2v_cycles, ..Default::default() };
             svr_recon(&input, &mask, &output, poses.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {

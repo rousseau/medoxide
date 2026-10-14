@@ -87,6 +87,9 @@ pub struct ReconstructionConfig {
     pub s2s_coarse_sigma_pixels: f64,
     /// Coupe-coupe : nombre de balayages avec les images floutées (avec `s2s_coarse_sigma_pixels > 0`), à chaque niveau.
     pub s2s_coarse_sweeps: usize,
+    /// Coupe-coupe : passe-haut des profils d'intensité (écart type en mm du lissage soustrait) pour ignorer le champ de biais et le gain entre stacks ; 0 : aucun. Défaut 25 mm : en simulation avec un biais de 30 %, `s2s` s'effondre sans lui (±4 mm lisse : 3 % des
+    /// coupes à ≤ 1,5 mm contre 59 % avec) ; sans biais il ne change rien (73 % dans les deux cas) ; sur données réelles, juge à 4 stacks +0,015 et à 2 stacks +0,002 en moyenne (5 sujets sur 6).
+    pub s2s_highpass_mm: f64,
     /// Coupe-coupe : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau) ; 1 : un seul niveau.
     pub s2s_coarse_levels: usize,
     /// Coupe-coupe : nombre de balayages (chaque balayage recale toutes les coupes une fois).
@@ -124,6 +127,7 @@ impl Default for ReconstructionConfig {
             s2s_coarse_sigma_pixels: 0.0,
             s2s_coarse_sweeps: 2,
             s2s_coarse_levels: 1,
+            s2s_highpass_mm: 25.0,
             s2v_cycles: 6,
             s2v_extra_starts: 6,
             s2v_start_amplitude_mm: 5.0,
@@ -255,6 +259,7 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         coarse_sigma_pixels: config.s2s_coarse_sigma_pixels,
         coarse_sweeps: config.s2s_coarse_sweeps,
         coarse_levels: config.s2s_coarse_levels,
+        intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() },
         ..Default::default()
     }
 }

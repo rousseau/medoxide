@@ -41,6 +41,8 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--device` | Où se font les calculs : `cpu` ou `wgpu` (GPU). | CPU, voir [ci-dessous](#cpu-ou-gpu) |
 | `--resolution-mm` | Côté des voxels du volume reconstruit. | 0,8 |
 | `--alpha` | Poids de la régularisation (lissage) : plus il est grand, plus le volume est lisse. Trop faible, le volume garde un hachurage régulier et des valeurs négatives ; trop fort, il devient flou. L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité). | 0,1 |
+| `--s2s-highpass-mm` | Avec `s2s` : passe-haut des profils d'intensité comparés (écart type, en mm, du lissage soustrait) pour ignorer les variations lentes d'intensité entre stacks (champ de biais, gain). Sans lui, `s2s` s'effondre en simulation avec un biais de 30 % ; 0 : aucun. | 25 |
+| `--s2s-coarse-sigma`, `--s2s-coarse-sweeps`, `--s2s-coarse-levels` | **Expérimental.** Balayages préliminaires du gros vers le fin (coupes floutées de σ pixels, flou divisé par 2 à chaque niveau). Étend la portée de capture en simulation propre (de ±4 à ±8 mm), mais **dégrade nettement sur données réelles** (voir [Validation](validation.md#pourquoi-certains-sujets-très-agités-ne-sont-pas-corrigés)). | désactivé |
 | `--min-stack-coverage` | Nombre minimal de stacks qui doivent atteindre un voxel pour qu'il soit reconstruit. Avec 2 (défaut), les zones vues par un seul stack, souvent des coupes mal placées qui forment des « languettes » hors du cerveau, ne sont pas reconstruites ; 1 : tous les voxels touchés. | 2 |
 | `--edge-kappa` | **Expérimental.** Reconstruction préservant les contours (Huber, trois repondérations) : seuil relatif κ, un contour étant une différence entre voxels voisins supérieure à κ fois la différence médiane ; 0 : lissage de Tikhonov seul. Sur données réelles, aucun gain démontré (voir [Validation](validation.md#régularisation-préservant-les-contours)). | 0 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
@@ -118,7 +120,9 @@ ne partagent pas un repère (écart de plus de 18 mm entre barycentres de masque
   facteurs d'échelle mesurés sont petits, mais ce n'est pas démontré pour d'autres contrastes (HASTE :
   non évalué).
 - **Fœtus très agités** : sur deux de nos six sujets, aucune méthode testée (la nôtre, SVRTK, NeSVoR)
-  ne prédit mieux des coupes jamais vues que de ne pas corriger le mouvement.
+  ne prédit mieux des coupes jamais vues que de ne pas corriger le mouvement avec le protocole à deux stacks. Les méthodes y
+  divergent entre elles de 6 à 13 mm : le mouvement dépasse la portée de capture des recalages locaux (environ ±4 mm en simulation),
+  et l'élargir demande de traiter d'abord les incohérences d'intensité entre stacks ([explication](validation.md#pourquoi-certains-sujets-très-agités-ne-sont-pas-corrigés)).
 - **Netteté** : avec α = 0,1, le hachurage régulier des premières versions a disparu, mais nos volumes sont plus lisses que ceux de SVRTK, qui préserve mieux les contours (lissage adaptatif). Baisser `--alpha` (0,03 à 0,05) rend l'image plus nette sur un sujet calme, au prix d'un peu de hachurage ; une régularisation qui préserve les contours est prévue.
 - **Un seul jeu de données** (TRUFI, six sujets) ; pas de vérité terrain sur des acquisitions réelles.
 - Seul un Mac avec CPU Apple a été testé. La commande est destinée à la **recherche**, pas à un usage
