@@ -47,6 +47,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--edge-kappa` | **Expérimental.** Reconstruction préservant les contours (Huber, trois repondérations) : seuil relatif κ, un contour étant une différence entre voxels voisins supérieure à κ fois la différence médiane ; 0 : lissage de Tikhonov seul. Sur données réelles, aucun gain démontré (voir [Validation](validation.md#régularisation-préservant-les-contours)). | 0 |
 | `--quality` | Écrit un fichier d'indicateurs par coupe ([format](#fichier-de-qualité)). | aucun |
 | `--s2s-block-levels`, `--s2s-block-sweeps`, `--s2s-block-search-mm` | Alignement par stack ou par paquets avant les balayages par coupe (niveau 0 : stack entier ; niveau *l* : 2^*l* blocs de coupes consécutives ; recherche exhaustive de ±`search` mm puis Adam). Corrige les décalages de stack de 4 à 10 mm en simulation et rapproche `s2s` de NiftyMIC et SVRTK sur un sujet agité réel, sans régression sur trois sujets calmes ; coûte environ 1,5 fois le temps de calcul ; 0 niveau : désactivé. Sans effet sur le sujet très agité testé ; 3 niveaux n'aident que pour un décalage de stack **avec** biais d'intensité. Voir [Validation](validation.md#alignement-par-stack-ou-par-paquets). | 1, 2, 12 |
+| `--s2s-bias-rounds`, `--s2s-bias-min-reduction` | Correction du champ de biais par stack : nombre d'alternances « estimer le champ de chaque stack (polynôme de degré 3, sans volume), diviser les stacks, recaler » ; le volume est reconstruit à partir des stacks corrigés. La correction n'est appliquée que si elle réduit d'au moins `min-reduction` (10 %) l'incohérence d'intensité entre stacks : sans biais, rien ne change. En simulation avec un biais de 30 %, de 3 à 65 % des coupes à ≤ 1,5 mm avec l'alignement par stack ; sur données réelles, concordance inchangée à 0,01 près sur 6 sujets et sujet très agité remis au consensus de NiftyMIC et NeSVoR. 0 alternance : désactivé. Voir [Validation](validation.md#correction-du-champ-de-biais-par-stack). | 1, 0,1 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 
@@ -121,7 +122,7 @@ ne partagent pas un repère (écart de plus de 18 mm entre barycentres de masque
 - **Repère du volume** : le volume est ancré par les données. Avec `s2s`, rien ne fixe le repère (la solution
   est définie à un mouvement rigide commun près), donc la position et l'orientation du volume dans le repère du
   scanner ne sont pas garanties. Pour le comparer à un autre volume ou à un atlas, recalez-le rigidement.
-- **Pas de correction d'intensité** : ni mise à l'échelle par coupe, ni champ de biais, ni
+- **Correction d'intensité partielle** : un champ de biais polynomial par stack est corrigé (voir `--s2s-bias-rounds`), mais ni la mise à l'échelle par coupe, ni la
   pondération robuste des coupes aberrantes (coupes sombres). SVRTK le fait. Sur nos données TRUFI, les
   facteurs d'échelle mesurés sont petits, mais ce n'est pas démontré pour d'autres contrastes (HASTE :
   non évalué).

@@ -1431,4 +1431,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-14 — Une mesure doit être invariante à ce qu'on corrige, et une correction doit savoir s'abstenir
+
+- **Quoi (méthode)** : (1) un **juge qui compare à des données brutes pénalise mécaniquement** une correction appliquée aux données d'apprentissage : le juge hors échantillon compare les coupes du stack de test, avec leur propre biais, à un volume reconstruit à partir de stacks corrigés ; le NCC chute (0,61 contre 0,85) sans que la méthode soit en cause. Avant d'utiliser une mesure, se demander si elle est invariante à ce qu'on change ; ici on a pris des mesures qui ne dépendent que des poses (concordance aux intersections sur images brutes, accord avec d'autres méthodes). (2) une **garde « ne pas nuire »** : un estimateur appliqué sans preuve s'ajuste au bruit (ici, à la structure d'anatomie entre coupes mal alignées) ; on n'applique la correction que si elle réduit d'au moins 10 % l'incohérence qu'elle prétend corriger (0,4 % sans biais, 35,7 % avec) ; sans garde 83 → 55 %, avec garde 83 → 83 %. (3) **deux briques qui s'influencent** : l'alignement par stack, activé par défaut après des mesures sans biais, régressait en présence d'un biais (59 → 3 %) ; seule la mesure croisée (blocs × biais) l'a montré, et la correction de biais l'a réparé (65 %). Leçon : tester chaque brique dans les conditions où une autre brique est censée échouer.
+- **Quoi (Rust)** : `Stack::divided_by_log_field` (copie dont chaque voxel est divisé par `exp(f(position nominale))`, masque conservé) ; `correct_stacks` (garde sur la réduction d'incohérence) ; alternance estimer–corriger–recaler dans `reconstruct`, dont le câblage est testé par égalité exacte avec la séquence directe (poses, rapports par coupe, volume) et par l'effet du nombre d'alternances.
+- **Où** : `crates/medoxide-svr/src/pipeline.rs` (`s2s_bias_rounds`, `s2s_bias_min_reduction`, `correct_stacks`), `crates/medoxide-svr/src/lib.rs` (`divided_by_log_field`), `crates/medoxide-svr/src/bias.rs` (`inconsistency_reduction`), options `--s2s-bias-rounds` et `--s2s-bias-min-reduction` de `medx svr recon`.
+
+---
+
 *(à compléter à la prochaine étape)*

@@ -2961,7 +2961,7 @@ mod tests {
         let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
         // (a) coupe-coupe
         // tous les réglages sont NON défaut : un réglage ignoré par `reconstruct` ferait différer la sortie de l'appel direct
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_bias_rounds: 0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
@@ -3858,6 +3858,8 @@ mod tests {
         let (avant, apres) = (intensity_inconsistency(&stacks, &vraies, &config, None).unwrap(), intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap());
         println!("incohérence d'intensité : avant {avant:.4}, après {apres:.4}");
         assert!(avant >= 0.1, "(a) avant : {avant}");
+        assert!((champs.inconsistency().0 - avant).abs() < 1e-9 && (champs.inconsistency().1 - apres).abs() < 1e-9, "(a') incohérences enregistrées : {:?}", champs.inconsistency());
+        assert!(champs.inconsistency_reduction() >= 0.9, "(a') réduction : {}", champs.inconsistency_reduction());
         assert!(apres <= 0.01 && apres * 10.0 <= avant, "(a) après : {apres} (avant {avant})");
         // (b)
         let sans = stacks_analytiques(&t, &modeles, &vraies, &|_, _| 0.0);
@@ -3868,6 +3870,7 @@ mod tests {
             let ecart = (valeurs.iter().map(|a| (a - moyenne).powi(2)).sum::<f64>() / valeurs.len() as f64).sqrt();
             assert!(ecart <= 0.01, "(b) stack {s} : écart type du champ estimé sans biais {ecart}");
         }
+        assert!(champs_sans.inconsistency().0 <= 0.001, "(b) incohérence sans biais : {:?} (la réduction relative n'a de sens qu'au-dessus du bruit : ici l'« avant » est du bruit d'interpolation)", champs_sans.inconsistency());
         let (i0, i1) = (intensity_inconsistency(&sans, &vraies, &config, None).unwrap(), intensity_inconsistency(&sans, &vraies, &config, Some(&champs_sans)).unwrap());
         assert!((i0 - i1).abs() <= 0.001, "(b) incohérence sans biais : {i0} puis {i1}");
         // (d)
@@ -3931,6 +3934,7 @@ mod tests {
         let config = BiasConfig::default();
         for (nom, p) in [("vraies", poses.clone()), ("en-tête", SlicePoses::identity(&stacks))] {
             let champs = estimate_bias_fields(&stacks, &p, &config).unwrap();
+            println!("poses {nom} : réduction de l'incohérence {:.3}", champs.inconsistency_reduction());
             println!("poses {nom} : incohérence d'intensité avant {:.4}, après {:.4}", crate::bias::intensity_inconsistency(&stacks, &p, &config, None).unwrap(), crate::bias::intensity_inconsistency(&stacks, &p, &config, Some(&champs)).unwrap());
         }
     }
@@ -3959,6 +3963,84 @@ mod tests {
             let grille = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 8.0, ..base }, &device).unwrap();
             println!("décalage {decalage} : en-tête {:.2} ; par coupe {:.2} ; blocs Adam seul {:.2} ; blocs + recherche {:.2}", med(&depart), med(&seul.poses), med(&adam.poses), med(&grille.poses));
         }
+    }
+
+    /// Câblage de la correction de biais du pipeline coupe-coupe (blobs, correction FORCÉE par `s2s_bias_min_reduction = 0` pour que le chemin soit exercé) : `reconstruct` avec 2 alternances rend EXACTEMENT la séquence directe « estimer le champ aux poses courantes, corriger,
+    /// recaler » deux fois, puis « estimer aux poses finales, corriger, reconstruire » (poses, rapports par coupe et volume), et diffère du résultat sans correction ; une alternance de moins donne un autre résultat (le nombre d'alternances est bien lu).
+    #[test]
+    fn the_pipeline_wires_the_bias_correction() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::pipeline::{correct_stacks, reconstruct, Motion, ReconstructionConfig};
+        let t = Temp::new("pipeline_biais");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, ..Default::default() };
+        let sortie = reconstruct(&stacks, &config, &device).unwrap();
+        let s2s = crate::s2s::S2sConfig { sweeps: 1, block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() };
+        let direct = |alternances: usize, seuil: f64| {
+            let (mut poses, mut slices) = (SlicePoses::identity(&stacks), Vec::new());
+            for _ in 0..alternances {
+                let corriges = correct_stacks(&stacks, &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(), seuil);
+                let rapport = crate::s2s::register_slices_s2s(&corriges, &poses, &s2s, &device).unwrap();
+                (poses, slices) = (rapport.poses, rapport.slices);
+            }
+            let corriges = correct_stacks(&stacks, &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(), seuil);
+            let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
+            let probleme = ReconstructionProblem::with_poses_covered(&grille, &corriges, &poses, config.alpha, config.min_stack_coverage).unwrap();
+            (poses, slices, probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x)
+        };
+        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecart_volumes = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let (poses, slices, volume) = direct(2, 0.0);
+        assert_eq!(sortie.slices, slices, "rapports par coupe différents de la séquence directe");
+        assert_eq!(ecart_poses(&sortie.poses, &poses), 0.0, "poses différentes de la séquence directe");
+        assert!(ecart_volumes(&sortie.volume, &volume) < 1e-9, "volume différent de la séquence directe : {:.2e}", ecart_volumes(&sortie.volume, &volume));
+        let (poses_1, _, volume_1) = direct(1, 0.0);
+        assert!(ecart_poses(&poses, &poses_1) > 1e-6 || ecart_volumes(&volume, &volume_1) > 1e-6, "le nombre d'alternances n'a aucun effet");
+        // le seuil de la garde est lu : avec un seuil inatteignable (2), aucune correction n'est appliquée, ni pendant les alternances ni à la fin, et la sortie est celle de la séquence directe avec ce seuil, différente de celle à seuil 0
+        let gardee = reconstruct(&stacks, &ReconstructionConfig { s2s_bias_min_reduction: 2.0, ..config.clone() }, &device).unwrap();
+        let (poses_g, slices_g, volume_g) = direct(2, 2.0);
+        assert_eq!(gardee.slices, slices_g, "garde : rapports par coupe");
+        assert_eq!(ecart_poses(&gardee.poses, &poses_g), 0.0, "garde : poses");
+        assert!(ecart_volumes(&gardee.volume, &volume_g) < 1e-9, "garde : volume");
+        assert!(ecart_poses(&gardee.poses, &poses) > 1e-6 || ecart_volumes(&gardee.volume, &volume) > 1e-6, "le seuil de la garde n'a aucun effet");
+        let sans = reconstruct(&stacks, &ReconstructionConfig { s2s_bias_rounds: 0, ..config.clone() }, &device).unwrap();
+        assert!(ecart_volumes(&sortie.volume, &sans.volume) > 1e-6, "la correction de biais n'a aucun effet sur le volume");
+    }
+
+    /// Division d'un stack par un champ de biais et garde « ne pas nuire » (valeurs exactes) : `divided_by_log_field` divise chaque voxel par `exp(f(position nominale))` (ici `f = ln 2` si x > 0, sinon 0) et laisse l'original et le masque intacts ;
+    /// `correct_stacks` rend des stacks inchangés si la réduction de l'incohérence est inférieure au seuil (seuil 0,9999 sur des stacks à biais fort, réduction ≈ 0,998), et les stacks corrigés sinon (seuil 0,5) ; seule la constante du stack 0 est fixée à 0 (le reste de son champ est estimé : indétermination de champ commun), donc son contenu change aussi.
+    #[test]
+    fn the_stack_division_and_the_do_no_harm_guard_are_exact() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::pipeline::correct_stacks;
+        let t = Temp::new("division_champ");
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 4.0, 4.0, 17);
+        let champ = |s: usize, x: &Vector3<f64>| match s {
+            0 => 0.0,
+            1 => 0.30 * x.x / 15.0 - 0.20,
+            _ => 0.20 * x.z / 15.0 + 0.10,
+        };
+        let stacks = stacks_analytiques(&t, &modeles, &vraies, &champ);
+        let divise = stacks[1].divided_by_log_field(|x| if x.x > 0.0 { std::f64::consts::LN_2 } else { 0.0 });
+        let (nx, ny, nz) = stacks[1].dim();
+        for i in 0..nx {
+            for j in 0..ny {
+                for k in 0..nz {
+                    let x = (stacks[1].affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+                    let attendu = f64::from(stacks[1].data()[[i, j, k]]) / if x.x > 0.0 { 2.0 } else { 1.0 };
+                    assert!((f64::from(divise.data()[[i, j, k]]) - attendu).abs() <= 1e-6 * attendu.abs().max(1.0), "voxel ({i},{j},{k})");
+                }
+            }
+        }
+        assert_eq!(divise.brain_mask().unwrap().voxels(), stacks[1].brain_mask().unwrap().voxels());
+        let champs = estimate_bias_fields(&stacks, &vraies, &BiasConfig { scale_mm: 15.0, ..Default::default() }).unwrap();
+        assert!(champs.inconsistency_reduction() > 0.9);
+        let strict = correct_stacks(&stacks, &champs, 0.9999);
+        assert!(stacks.iter().zip(&strict).all(|(a, b)| a.data() == b.data()), "la garde aurait dû laisser les stacks inchangés");
+        let corriges = correct_stacks(&stacks, &champs, 0.5);
+        assert!((1..3).all(|s| corriges[s].data() != stacks[s].data()), "les stacks auraient dû être corrigés");
     }
 
     /// Calendrier du gros vers fin du coupe-coupe (critères fixés avant, valeurs exactes) : sans flou (σ = 0), un seul niveau net de `sweeps` balayages ; σ = 6, 2 niveaux, 2 balayages grossiers, 3 balayages nets : (6, 2), (3, 2), (0, 3 net) ; `coarse_levels` = 0 compte pour 1 ;

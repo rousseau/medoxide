@@ -11,6 +11,7 @@ use nifti::{writer::WriterOptions, NiftiHeader};
 use ndarray::Array3;
 
 use crate::align::{reconstruct_with_motion_correction, LoopConfig, SliceReport};
+use crate::bias::{estimate_bias_fields, BiasConfig, BiasFields};
 use crate::diff::RobustConfig;
 use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePoses};
 use crate::s2s::{register_slices_s2s, S2sConfig};
@@ -94,6 +95,10 @@ pub struct ReconstructionConfig {
     pub s2s_block_levels: usize,
     /// Coupe-coupe : balayages par niveau de blocs.
     pub s2s_block_sweeps: usize,
+    /// Coupe-coupe : nombre d'alternances « estimer le champ de biais de chaque stack, corriger les stacks, recaler » (voir [`crate::bias`]) ; 0 : aucune correction de biais. Le volume est reconstruit à partir des stacks corrigés aux poses finales. Défaut 1 : en simulation avec un biais de 30 % (±4 mm), part des coupes à ≤ 1,5 mm de 3 → 65 % (mouvement lisse) et 71 → 86 % (indépendant) avec l'alignement par stack, sans changement sans biais (garde `s2s_bias_min_reduction`) ; sur données réelles, concordance aux intersections inchangée à 0,01 près sur 6 sujets et décalages de stack de l'alignement par blocs ramenés au consensus de NiftyMIC et NeSVoR sur le sujet le plus agité.
+    pub s2s_bias_rounds: usize,
+    /// Coupe-coupe : réduction relative minimale de l'incohérence d'intensité entre stacks (`1 − après / avant`, voir [`BiasFields::inconsistency_reduction`]) pour que la correction de biais estimée soit appliquée ; en deçà, le champ ne fait que s'ajuster au bruit d'anatomie (un mesuré : 0,4 % sans biais, 35 % avec un biais de 30 %) et les stacks restent inchangés. 0 : toujours appliquer.
+    pub s2s_bias_min_reduction: f64,
     /// Coupe-coupe : demi-étendue (mm) de la recherche exhaustive d'un bloc (translations puis rotations en mm équivalents) ; 0 : pas de recherche.
     pub s2s_block_search_mm: f64,
     /// Coupe-coupe : nombre de niveaux grossiers (le flou est divisé par 2 à chaque niveau) ; 1 : un seul niveau.
@@ -136,6 +141,8 @@ impl Default for ReconstructionConfig {
             s2s_highpass_mm: 25.0,
             s2s_block_levels: 1,
             s2s_block_sweeps: 2,
+            s2s_bias_rounds: 1,
+            s2s_bias_min_reduction: 0.1,
             s2s_block_search_mm: 12.0,
             s2v_cycles: 6,
             s2v_extra_starts: 6,
@@ -231,9 +238,22 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
     let header_poses = SlicePoses::identity(stacks);
     match config.motion {
         Motion::SliceToSlice => {
-            let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
-            let (poses, slices) = (rapport.poses, rapport.slices);
-            let volume = reconstruct_with_poses(&grid, stacks, &poses, config)?;
+            if config.s2s_bias_rounds == 0 {
+                let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
+                let (poses, slices) = (rapport.poses, rapport.slices);
+                let volume = reconstruct_with_poses(&grid, stacks, &poses, config)?;
+                return Ok(ReconstructionOutput { grid, volume, poses, slices });
+            }
+            // alternances : champ de biais estimé aux poses courantes (celles de l'en-tête au départ), stacks corrigés, recalage depuis les poses courantes ; puis une dernière estimation aux poses finales pour la reconstruction
+            let biais = BiasConfig::default();
+            let (mut poses, mut slices) = (header_poses, Vec::new());
+            for _ in 0..config.s2s_bias_rounds {
+                let corriges = correct_stacks(stacks, &estimate_bias_fields(stacks, &poses, &biais)?, config.s2s_bias_min_reduction);
+                let rapport = register_slices_s2s(&corriges, &poses, &s2s_config(config), device)?;
+                (poses, slices) = (rapport.poses, rapport.slices);
+            }
+            let corriges = correct_stacks(stacks, &estimate_bias_fields(stacks, &poses, &biais)?, config.s2s_bias_min_reduction);
+            let volume = reconstruct_with_poses(&grid, &corriges, &poses, config)?;
             Ok(ReconstructionOutput { grid, volume, poses, slices })
         }
         Motion::SliceToVolume => {
@@ -245,6 +265,14 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
             Ok(ReconstructionOutput { grid, volume, poses: result.poses, slices })
         }
     }
+}
+
+/// Copie des `stacks` corrigés du champ de biais `champs` (chaque stack divisé par l'exponentielle de son champ, aux positions nominales) si la correction réduit l'incohérence d'intensité d'au moins `min_reduction` (voir [`BiasFields::inconsistency_reduction`]) ; sinon copie inchangée.
+pub(crate) fn correct_stacks(stacks: &[Stack], champs: &BiasFields, min_reduction: f64) -> Vec<Stack> {
+    if champs.inconsistency_reduction() < min_reduction {
+        return stacks.to_vec();
+    }
+    stacks.iter().enumerate().map(|(s, stack)| stack.divided_by_log_field(|x| champs.log_field(s, x))).collect()
 }
 
 /// Réglages de la boucle coupe-volume correspondant à `config` ; les options expérimentales non retenues (flou grossier, rejet des poses aberrantes) sont désactivées.

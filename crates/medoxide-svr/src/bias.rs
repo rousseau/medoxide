@@ -70,6 +70,8 @@ pub struct BiasFields {
     scale_mm: f64,
     /// `coefficients[stack][monôme]` ; le terme constant du stack 0 est nul.
     coefficients: Vec<Vec<f64>>,
+    /// Incohérence d'intensité (écart quadratique moyen du log du rapport des intensités aux points d'intersection) avant et après correction, sur les points de l'estimation.
+    inconsistency: (f64, f64),
 }
 
 impl BiasFields {
@@ -82,6 +84,20 @@ impl BiasFields {
     /// Logarithme du champ de biais du stack `stack` à la position NOMINALE `x` (monde, mm, avant tout mouvement estimé). Le terme constant du stack 0 est 0.
     pub fn log_field(&self, stack: usize, x: &Vector3<f64>) -> f64 {
         self.basis(x).iter().zip(&self.coefficients[stack]).map(|(p, c)| p * c).sum()
+    }
+
+    /// Incohérence d'intensité entre stacks, avant et après la correction estimée (voir [`intensity_inconsistency`]), sur les points de l'estimation.
+    pub fn inconsistency(&self) -> (f64, f64) {
+        self.inconsistency
+    }
+
+    /// Réduction relative de l'incohérence d'intensité : `1 − après / avant` (0 : le champ estimé n'explique rien ; 1 : tout). Mesure de la PREUVE d'un biais : sans biais, le champ ne fait que s'ajuster au bruit d'anatomie et la réduction est de l'ordre du pour cent.
+    pub fn inconsistency_reduction(&self) -> f64 {
+        if self.inconsistency.0 > 0.0 {
+            1.0 - self.inconsistency.1 / self.inconsistency.0
+        } else {
+            0.0
+        }
     }
 
     /// Coefficients (un vecteur par stack) des logarithmes des champs.
@@ -198,7 +214,7 @@ pub fn estimate_bias_fields(stacks: &[Stack], poses: &SlicePoses, config: &BiasC
     let (points, centre) = collect_samples(stacks, poses, config)?;
     let exposants = monomial_exponents(config.degree);
     let (ns, nb) = (stacks.len(), exposants.len());
-    let champs = BiasFields { exponents: exposants, centre, scale_mm: config.scale_mm, coefficients: vec![vec![0.0; nb]; ns] };
+    let champs = BiasFields { exponents: exposants, centre, scale_mm: config.scale_mm, coefficients: vec![vec![0.0; nb]; ns], inconsistency: (0.0, 0.0) };
     let (mut ata, mut atb) = (DMatrix::<f64>::zeros(ns * nb, ns * nb), DVector::<f64>::zeros(ns * nb));
     for p in &points {
         let (f1, f2) = (champs.basis(&p.x1), champs.basis(&p.x2));
@@ -232,7 +248,15 @@ pub fn estimate_bias_fields(stacks: &[Stack], poses: &SlicePoses, config: &BiasC
     for (r, &c) in libres.iter().enumerate() {
         coefficients[c / nb][c % nb] = solution[r];
     }
-    Ok(BiasFields { coefficients, ..champs })
+    let mut ajuste = BiasFields { coefficients, ..champs };
+    let (mut avant, mut apres) = (0.0, 0.0);
+    for p in &points {
+        let cible = p.y1.ln() - p.y2.ln();
+        avant += cible * cible;
+        apres += (cible - (ajuste.log_field(p.s1, &p.x1) - ajuste.log_field(p.s2, &p.x2))).powi(2);
+    }
+    ajuste.inconsistency = ((avant / points.len() as f64).sqrt(), (apres / points.len() as f64).sqrt());
+    Ok(ajuste)
 }
 
 /// **Incohérence d'intensité entre stacks** : écart quadratique moyen, sur les points d'intersection, du logarithme du rapport des intensités de deux coupes qui se croisent, après correction par `champs` (`None` : sans correction). Nulle si les stacks sont parfaitement cohérents.
@@ -268,10 +292,13 @@ mod tests {
         assert_eq!(monomial_exponents(0), vec![[0, 0, 0]]);
         let mut coefficients = vec![0.0; 20];
         (coefficients[0], coefficients[1], coefficients[2], coefficients[3]) = (0.5, 0.25, 7.0, 0.125);
-        let champs = BiasFields { exponents: e, centre: Vector3::new(1.0, 2.0, 3.0), scale_mm: 10.0, coefficients: vec![vec![0.0; 20], coefficients] };
+        let champs = BiasFields { exponents: e, centre: Vector3::new(1.0, 2.0, 3.0), scale_mm: 10.0, coefficients: vec![vec![0.0; 20], coefficients], inconsistency: (0.5, 0.125) };
         assert_eq!(champs.log_field(1, &Vector3::new(11.0, 2.0, 13.0)), 0.5 + 0.25 + 0.125);
         assert_eq!(champs.log_field(0, &Vector3::new(11.0, 2.0, 13.0)), 0.0);
         assert_eq!(champs.log_field(1, &Vector3::new(1.0, 2.0, 3.0)), 0.5);
+        assert_eq!(champs.inconsistency(), (0.5, 0.125));
+        assert_eq!(champs.inconsistency_reduction(), 0.75);
+        assert_eq!(BiasFields { inconsistency: (0.0, 0.0), ..champs }.inconsistency_reduction(), 0.0);
     }
 
     /// Percentile à interpolation linéaire (comme `numpy.percentile`) : médiane de 1..5 = 3, 99ᵉ centile de 0..100 = 99, 25ᵉ centile de 0, 10, 20, 30 = 7,5.

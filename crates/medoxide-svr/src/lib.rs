@@ -874,6 +874,17 @@ impl Stack {
         Ok(copie)
     }
 
+    /// Copie du stack dont chaque voxel est divisé par `exp(log_champ(position nominale du voxel))` : correction d'un champ de biais multiplicatif fixe dans le repère du scanner (la position nominale est celle de l'en-tête, sans mouvement estimé). Le masque est conservé.
+    pub fn divided_by_log_field(&self, log_champ: impl Fn(&Vector3<f64>) -> f64) -> Stack {
+        let mut copie = self.clone();
+        let affine = self.affine;
+        for ((i, j, k), v) in copie.data.indexed_iter_mut() {
+            let x = (affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+            *v = (f64::from(*v) / log_champ(&x).exp()) as f32;
+        }
+        copie
+    }
+
     /// Masque cérébral attaché, s'il y en a un.
     pub fn brain_mask(&self) -> Option<&BrainMask> {
         self.mask.as_ref()
