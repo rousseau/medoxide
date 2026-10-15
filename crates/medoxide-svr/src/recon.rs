@@ -3486,17 +3486,27 @@ mod tests {
             .split(';')
             .map(|v| {
                 let v = v.trim();
-                if v == "fin" {
-                    ("fin".to_string(), fin)
+                // suffixe optionnel `:bas,haut` : fiabilité des partenaires (voir `S2sConfig::reliability_low`)
+                let (base, fiabilite) = match v.split_once(':') {
+                    Some((b, f)) => {
+                        let f: Vec<f64> = f.split(',').map(|x| x.parse().unwrap()).collect();
+                        (b, (f[0], f[1]))
+                    }
+                    None => (v, (0.0, 0.0)),
+                };
+                let fin = S2sConfig { reliability_low: fiabilite.0, reliability_high: fiabilite.1, ..fin };
+                if base == "fin" {
+                    (v.to_string(), fin)
                 } else {
-                    let c: Vec<&str> = v.split(',').collect();
+                    let c: Vec<&str> = base.split(',').collect();
                     (format!("gros({v})"), S2sConfig { coarse_sigma_pixels: c[0].parse().unwrap(), coarse_sweeps: c[1].parse().unwrap(), coarse_levels: c[2].parse().unwrap(), ..fin })
                 }
             })
             .collect();
         for a in amplitudes {
+            let graine: u64 = std::env::var("MEDOXIDE_GRAINE").map_or(7, |v| v.trim().parse().unwrap());
             // MEDOXIDE_PERTURBATION : `independante` (défaut) ou `lisse` (marche autorégressive le long du stack, coefficient 0,9)
-            let perturbation = if std::env::var("MEDOXIDE_PERTURBATION").map_or(false, |v| v.trim() == "lisse") { poses_lisses(&tous, a, a, 7, 0.9) } else { poses_aleatoires(&tous, a, a, 7) };
+            let perturbation = if std::env::var("MEDOXIDE_PERTURBATION").map_or(false, |v| v.trim() == "lisse") { poses_lisses(&tous, a, a, graine, 0.9) } else { poses_aleatoires(&tous, a, a, graine) };
             let mut depart = SlicePoses::identity(&tous);
             for (si, stack) in tous.iter().enumerate() {
                 for k in 0..stack.dim().2 {
@@ -3541,7 +3551,8 @@ mod tests {
             Some((a.points.iter().zip(&b.points).map(|(p, q)| (p - q).norm_squared()).sum::<f64>() / a.points.len() as f64).sqrt())
         };
         for a in amplitudes {
-            let perturbation = if lire("MEDOXIDE_PERTURBATION", "independante") == "lisse" { poses_lisses(&tous, a, a, 7, 0.9) } else { poses_aleatoires(&tous, a, a, 7) };
+            let graine: u64 = lire("MEDOXIDE_GRAINE", "7").parse().unwrap();
+            let perturbation = if lire("MEDOXIDE_PERTURBATION", "independante") == "lisse" { poses_lisses(&tous, a, a, graine, 0.9) } else { poses_aleatoires(&tous, a, a, graine) };
             let mut depart = SlicePoses::identity(&tous);
             for (si, stack) in tous.iter().enumerate() {
                 for k in 0..stack.dim().2 {
@@ -3856,6 +3867,105 @@ mod tests {
         let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
         let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
         (problemes, burn::tensor::Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device), pivot, echelle)
+    }
+
+    /// Pondération des partenaires (blobs, trois stacks, mouvement par coupe de ±2 mm/°, la coupe 5 du stack coronal à deux jeux de paramètres) : (a) des poids tous égaux à 1 redonnent la moyenne simple ; (b) multiplier les poids par 7 ne change rien ; (c) un poids nul sur un partenaire donne la concordance du problème construit
+    /// SANS ce partenaire (repoussé à 1 m) ; (d) un poids non nul sur un seul partenaire donne la concordance du problème construit avec ce seul partenaire (la corrélation de la paire) ; (e) des poids inégaux donnent une valeur strictement comprise entre les concordances des deux partenaires isolés quand elles diffèrent.
+    #[test]
+    fn the_partner_weights_form_an_exact_weighted_mean() {
+        use crate::s2s::{IntersectionConfig, IntersectionProblem, SliceAtlas};
+        let t = Temp::new("poids_partenaires");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 5);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let depart = SlicePoses::identity(&stacks);
+        let (si, k) = (1usize, 5usize);
+        let prep = crate::align::preparer_coupe(&stacks[si], k, *depart.get(si, k)).unwrap();
+        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
+        let construire = |poses: &SlicePoses| IntersectionProblem::build(&atlas, &stacks, poses, si, k, &IntersectionConfig::default(), &device).unwrap();
+        let valeur = |p: &IntersectionProblem, params: [f32; 6]| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats(params, &device), pivot.clone(), prep.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let loin = |poses: &SlicePoses, garder: &dyn Fn(usize, usize) -> bool| {
+            let mut p = poses.clone();
+            for (sj, s) in stacks.iter().enumerate() {
+                for kj in 0..s.dim().2 {
+                    if (sj, kj) != (si, k) && !garder(sj, kj) {
+                        p.set(sj, kj, Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0)) * depart.get(sj, kj));
+                    }
+                }
+            }
+            p
+        };
+        for params in [[0.0f32; 6], [0.3, -0.2, 0.1, 0.5, -0.4, 0.2]] {
+            let simple = construire(&depart);
+            let m = valeur(&simple, params);
+            let partenaires = simple.partners.clone();
+            assert!(partenaires.len() >= 4, "{} partenaires", partenaires.len());
+            // deux partenaires dont la paire est valide (concordance isolée non nulle) et de concordances différentes
+            let isolee = |p: (usize, usize)| valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == p)), params);
+            let valides: Vec<((usize, usize), f64)> = partenaires.iter().map(|&p| (p, isolee(p))).filter(|(_, v)| v.abs() > 1e-9).collect();
+            assert!(valides.len() >= 2, "moins de deux paires valides");
+            let (a, b) = (valides[0].0, valides.iter().find(|(_, v)| (v - valides[0].1).abs() > 1e-3).expect("deux concordances différentes").0);
+            // (a) et (b)
+            assert!((valeur(&construire(&depart).with_partner_weights(|_, _| 1.0), params) - m).abs() < 1e-6, "(a)");
+            assert!((valeur(&construire(&depart).with_partner_weights(|_, _| 7.0), params) - m).abs() < 1e-5, "(b)");
+            // (c) poids nul sur `a`
+            let sans_a = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) != a)), params);
+            let poids_nul = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 0.0 } else { 1.0 }), params);
+            assert!((poids_nul - sans_a).abs() < 1e-5, "(c) {poids_nul} contre {sans_a}");
+            // (d) un seul partenaire
+            let seul_a = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == a)), params);
+            let seul_b = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == b)), params);
+            let un_seul = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 1.0 } else { 0.0 }), params);
+            assert!((un_seul - seul_a).abs() < 1e-5, "(d) {un_seul} contre {seul_a}");
+            // (e) deux partenaires, poids 3 et 1 : moyenne pondérée des deux concordances isolées
+            let deux = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 3.0 } else if (sj, kj) == b { 1.0 } else { 0.0 }), params);
+            let attendu = (3.0 * seul_a + seul_b) / 4.0;
+            assert!((deux - attendu).abs() < 1e-5, "(e) {deux} contre {attendu} (isolées {seul_a} et {seul_b})");
+        }
+    }
+
+    /// Câblage de la fiabilité des partenaires dans le recalage coupe-coupe (blobs) : (a) inactive (`reliability_high <= reliability_low`, défaut) : poses EXACTEMENT identiques à celles obtenues sans ces champs ; (b) active avec des seuils très exigeants (0,95 ; 0,99) : la plupart des partenaires sont sous-pondérés,
+    /// les poses diffèrent d'au moins 1e-6 de celles sans pondération ; (c) des seuils inversés (0,99 ; 0,95) restent inactifs : poses identiques à (a).
+    #[test]
+    fn the_reliability_option_is_wired_into_the_s2s_sweeps() {
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let t = Temp::new("fiabilite_cablage");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let base = S2sConfig { sweeps: 2, ..Default::default() };
+        let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
+        let inactive = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.7, reliability_high: 0.7, ..base }, &device).unwrap().poses;
+        assert_eq!(ecart(&sans, &inactive), 0.0, "(a)");
+        let active = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.95, reliability_high: 0.99, ..base }, &device).unwrap().poses;
+        assert!(ecart(&sans, &active) > 1e-6, "(b) la fiabilité n'a aucun effet : {}", ecart(&sans, &active));
+        let inverse = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.99, reliability_high: 0.95, ..base }, &device).unwrap().poses;
+        assert_eq!(ecart(&sans, &inverse), 0.0, "(c)");
+    }
+
+    /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier
+    /// un score de 1 (aucune information) a le poids 1 avec les réglages actifs usuels.
+    #[test]
+    fn the_reliability_weight_is_an_exact_smooth_ramp() {
+        use crate::s2s::reliability_weight;
+        let (low, high, floor) = (0.5, 0.8, 0.05);
+        assert_eq!(reliability_weight(0.5, low, high, floor), floor);
+        assert_eq!(reliability_weight(0.2, low, high, floor), floor);
+        assert_eq!(reliability_weight(0.8, low, high, floor), 1.0);
+        assert_eq!(reliability_weight(1.0, low, high, floor), 1.0);
+        assert!((reliability_weight(0.65, low, high, floor) - 0.525).abs() < 1e-12);
+        let echantillon: Vec<f64> = (0..=30).map(|i| reliability_weight(0.5 + 0.01 * i as f64, low, high, floor)).collect();
+        assert!(echantillon.windows(2).all(|w| w[1] >= w[0]), "non monotone");
+        // quart de la rampe : x = 0,25 → x²(3 − 2x) = 0,15625
+        assert!((reliability_weight(0.575, low, high, floor) - (floor + (1.0 - floor) * 0.15625)).abs() < 1e-12);
+        for score in [0.0, 0.6, 1.0] {
+            assert_eq!(reliability_weight(score, 0.7, 0.7, floor), 1.0);
+            assert_eq!(reliability_weight(score, 0.8, 0.5, floor), 1.0);
+        }
     }
 
     /// Maxima locaux d'une grille de candidats (valeurs exactes) : grille 3 × 3 × 3 de concordance 0, avec deux pics (au coin `(0,0,0)` : 0,9 ; au centre : 0,7), un plateau de deux points égaux à 0,5 en `(2,2,1)` et `(2,2,2)` (jamais un maximum : l'inégalité est stricte) ; les maxima sont `(0,0,0)` puis le centre, triés par concordance décroissante ;

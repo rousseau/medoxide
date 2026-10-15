@@ -264,6 +264,17 @@ La portée réelle du recalage par coupe est d'environ **±2 mm**, contre ±4 mm
 
 Le témoin sans flou (les mêmes balayages supplémentaires) donne 20 % : le gain du flou (68 %) est bien dû au flou, avec un optimum autour de 1 à 1,5 pixel. Avec 3 balayages : 72 % (σ = 1). À *A* = 4 mm : 13 % (σ = 1, 3 balayages, 1 niveau) et **37 % avec 2 niveaux** (σ = 1 puis 0,5) ; à *A* = 6 mm, 0 % partout. La portée réelle passe donc d'environ ±2 mm à ±3 mm bien couvert et ±4 mm en partie.
 
+**Vérification avec une référence indépendante et plusieurs graines.** Les tableaux ci-dessus sont des tirages uniques (une graine de perturbation) avec, comme référence, notre propre sortie précédente. Deux limites ensuite mesurées : la part des coupes retrouvées à ±4 mm varie énormément d'une graine à l'autre pour la même méthode (24 à 63 %), et une référence qui est la sortie de la méthode testée est circulaire. Refait avec la référence **SVRTK** (indépendante) et trois graines (7, 11, 13) à ±3 mm, part des coupes à ≤ 1,5 mm :
+
+| | recalage fin seul | σ = 1 (3 balayages, 2 niveaux) | σ = 6 (2 balayages, 2 niveaux) |
+|---|---|---|---|
+| graine 7 | 32 % | 54 % | 6 % |
+| graine 11 | 35 % | 80 % | 13 % |
+| graine 13 | 21 % | 63 % | 25 % |
+| **moyenne** | **29 %** | **66 %** | **15 %** |
+
+L'ordre est le même pour chaque graine : σ = 1 est nettement meilleur que le recalage fin seul, lui-même meilleur que σ = 6. L'effet est plus modeste que sur les tirages uniques ci-dessus (66 % contre 29 %, et non 72 % contre 11 %) ; **ce sont ces chiffres qu'il faut retenir.** Les écarts de quelques points d'un tableau à l'autre (par exemple à ±4 mm) ne sont pas significatifs.
+
 **Adopté par défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5).**
 
 - **Réel, depuis l'en-tête, six sujets** (concordance aux intersections) : moyenne 0,797 → **0,811** (σ = 6 : 0,742), en hausse sur **les six sujets** : calmes +0,002 à +0,003, agité 1 +0,013, agité 3 +0,011, **agité 2 +0,051**.

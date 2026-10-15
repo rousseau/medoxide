@@ -83,3 +83,20 @@ Pistes pour la suite (à choisir) :
 - (A) **Pondérer les partenaires par leur fiabilité** (cœur de ROSI : le coût n'utilise que les coupes jugées bonnes, via un classifieur) plutôt que de tout croiser avec tout ; estimation de la fiabilité par la concordance de chaque coupe, réestimée à chaque balayage.
 - (B) **Multi-départ au niveau du bloc ou du stack** (peu d'inconnues, partenaires nombreux) avec grille de rotations comme FLIRT, puis par coupe : l'alignement par stack actuel ne cherche que des translations exhaustivement, pas les rotations.
 - (C) **Régularisation temporelle** : pénaliser l'écart de pose entre coupes voisines d'un stack (équivalent doux des départs issus des voisines de ROSI) ; n'aide que si le mouvement est lisse, donc à évaluer avec la perturbation `lisse`.
+
+## 6. Piste A (pondérer les partenaires par leur fiabilité) : rejetée (2026-10-15)
+
+Implémentation : `IntersectionProblem::with_partner_weights` (moyenne pondérée des corrélations, testée exactement : poids égaux = moyenne simple, poids nul = partenaire exclu, un seul partenaire, moyenne pondérée de deux partenaires, invariance d'échelle) et `S2sConfig::reliability_low/high/floor` (poids d'un partenaire = rampe lisse de sa dernière concordance connue, 1 avant toute information ; `reliability_weight` testée exactement). Option **désactivée par défaut**. Mutation : 6 mutants sur 9 détectés ; survivants : `>=` au lieu de `>` à l'activation (équivalent : des seuils égaux donnent des poids tous à 1), et deux vrais manques de test (indexation `scores[décalage du stack + coupe]` du partenaire ; score mis à jour à `max(avant, après)` plutôt que `avant`), non comblés car l'option est expérimentale et jugée nuisible.
+
+Banc d'essai (calme 2, perturbation indépendante ±4 mm/°, flou σ = 1, 3 balayages, 2 niveaux ; part des coupes à ≤ 1,5 mm) :
+- référence = notre propre sortie précédente, graine 7 : sans pondération 49 % ; seuils (0,5 ; 0,8) : 10 % ; seuils (0,6 ; 0,9) : 0 %.
+- référence **indépendante (SVRTK)**, trois graines (7, 11, 13) : sans pondération 18 / 30 / 59 % (moyenne 36 %) ; seuils (0,3 ; 0,6) : 44 / 23 / 0 % (moyenne 22 %).
+
+Pas de gain robuste : un gain sur une graine, une perte totale sur une autre. **Explication** : la concordance d'une coupe est une propriété de la PAIRE (coupe, partenaires). Quand la majorité des partenaires est fausse, une coupe correcte croisant des partenaires faux a une concordance basse, comme une coupe fausse : la concordance n'identifie pas les partenaires fiables sans consensus majoritaire, et pondérer renforce les partenaires qui ont par hasard une concordance élevée (auto-renforcement). Même un oracle parfait (section 5) ne rend la sélection correcte que dans 25 % des cas.
+
+**Enseignements de méthode** :
+- la part de coupes retrouvées à ±4 mm varie énormément avec la graine de la perturbation (24 à 63 % pour la même méthode) : **comparer des variantes exige plusieurs graines** (au moins trois) ; une seule perturbation ne permet de conclure que pour des écarts très grands ;
+- une référence qui est la sortie d'une version de la méthode testée est **circulaire** (et changer le fichier de référence change les chiffres : 37 % → 49 % pour la même configuration) ; préférer une référence indépendante (SVRTK) et la figer ;
+- les tableaux de portée de capture de la section « Un flou adapté aux données réelles » du livre sont des tirages uniques avec une référence de type notre sortie : les grands écarts (11 → 72 % à 3 mm) restent crédibles, les petits non.
+
+Pistes restantes : (B) multi-départ au niveau du bloc ou du stack avec rotations (FLIRT) ; (C) régularisation temporelle ; (A') agrégation robuste des corrélations de paires (M-estimateur, moyenne tronquée : « la coupe s'accorde avec un sous-ensemble cohérent de partenaires », sans estimer de fiabilité).

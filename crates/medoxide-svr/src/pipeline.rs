@@ -84,7 +84,7 @@ pub struct ReconstructionConfig {
     pub edge_kappa: f64,
     /// Nombre de repondérations de Huber (avec `edge_kappa > 0`).
     pub edge_outer: usize,
-    /// Coupe-coupe, gros vers fin : écart type (pixels) du flou des coupes pour les premiers balayages, qui élargit la portée de capture ; 0 : pas de passe grossière. Défaut 1 (avec 3 balayages et 2 niveaux : σ = 1 puis 0,5) : sur données réelles (sujet calme, référence de consensus, perturbation aléatoire par coupe), la part des coupes retrouvées à ≤ 1,5 mm passe de 11 à 68-72 % à ±3 mm et de 1 à 37 % à ±4 mm (le flou σ = 6 tiré de la simulation, lui, réduit la portée) ; concordance en hausse sur six sujets réels sur six.
+    /// Coupe-coupe, gros vers fin : écart type (pixels) du flou des coupes pour les premiers balayages, qui élargit la portée de capture ; 0 : pas de passe grossière. Défaut 1 (avec 3 balayages et 2 niveaux : σ = 1 puis 0,5) : sur données réelles (sujet calme, référence de consensus, perturbation aléatoire par coupe), la part des coupes retrouvées à ≤ 1,5 mm passe de 29 à 66 % à ±3 mm (référence SVRTK, trois graines ; le flou σ = 6 tiré de la simulation, lui, la réduit à 15 %) ; concordance en hausse sur six sujets réels sur six.
     pub s2s_coarse_sigma_pixels: f64,
     /// Coupe-coupe : nombre de balayages avec les images floutées (avec `s2s_coarse_sigma_pixels > 0`), à chaque niveau.
     pub s2s_coarse_sweeps: usize,

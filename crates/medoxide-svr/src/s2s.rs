@@ -286,6 +286,8 @@ pub struct IntersectionProblem {
     atlas_masks: Tensor<1>,
     /// Matrice du lissage gaussien du passe-haut des profils (`None` : pas de passe-haut).
     highpass: Option<Tensor<2>>,
+    /// Poids de fiabilité de chaque partenaire (`[J]`) : `None` = moyenne simple ; `Some` = moyenne pondérée des corrélations (voir [`IntersectionProblem::with_partner_weights`]).
+    partner_weights: Option<Tensor<1>>,
     /// Indices (stack, coupe) des partenaires, dans l'ordre des paires.
     pub partners: Vec<(usize, usize)>,
 }
@@ -385,8 +387,18 @@ impl IntersectionProblem {
             atlas_images: atlas.images.clone(),
             atlas_masks: atlas.masks.clone(),
             highpass: (config.highpass_sigma_mm > 0.0).then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
+            partner_weights: None,
             partners: partenaires.iter().map(|(s, j, _)| (*s, *j)).collect(),
         })
+    }
+
+    /// **Pondère les partenaires par leur fiabilité** : `poids(stack, coupe)` est le poids du partenaire `(stack, coupe)`, et la concordance de la coupe mobile devient la moyenne PONDÉRÉE `Σ wⱼ NCCⱼ / Σ wⱼ` sur les paires valides (au lieu de la moyenne simple). Un partenaire mal recalé (poids faible) tire alors moins
+    /// la pose de la coupe vers un mauvais minimum. Des poids tous égaux redonnent exactement la moyenne simple ; un poids nul exclut le partenaire ; multiplier tous les poids par une constante ne change rien.
+    pub fn with_partner_weights(mut self, poids: impl Fn(usize, usize) -> f64) -> IntersectionProblem {
+        let device = self.t_grid.device();
+        let valeurs: Vec<f32> = self.partners.iter().map(|&(s, k)| poids(s, k) as f32).collect();
+        self.partner_weights = Some(Tensor::<1>::from_floats(valeurs.as_slice(), &device));
+        self
     }
 
     /// Nombre de paires (partenaires gardés).
@@ -431,7 +443,13 @@ impl IntersectionProblem {
         };
         let ncc_paires = ncc(profil_mobile, profil_fixe, w.clone());
         let valides = w.sum_dim(1).reshape([j]).greater_equal_elem(self.min_points).float();
-        (ncc_paires * valides.clone()).sum() / valides.sum().clamp_min(1.0)
+        match &self.partner_weights {
+            None => (ncc_paires * valides.clone()).sum() / valides.sum().clamp_min(1.0),
+            Some(poids) => {
+                let poids = valides * poids.clone();
+                (ncc_paires * poids.clone()).sum() / poids.sum().clamp_min(1e-6)
+            }
+        }
     }
 }
 
@@ -565,11 +583,27 @@ pub struct S2sConfig {
     pub block_search_mm: f64,
     /// Pas (mm) de la grille de la recherche exhaustive.
     pub block_search_step_mm: f64,
+    /// Fiabilité des partenaires : la concordance d'une coupe est la moyenne PONDÉRÉE des corrélations de ses paires, le poids d'un partenaire étant une rampe lisse de sa dernière concordance connue entre `reliability_low` (poids `reliability_floor`) et `reliability_high` (poids 1)
+    /// (voir [`reliability_weight`]) ; la concordance d'une coupe est mise à jour pendant les balayages (1 avant toute information). Inactif si `reliability_high <= reliability_low` (moyenne simple).
+    pub reliability_low: f64,
+    /// Voir `reliability_low`.
+    pub reliability_high: f64,
+    /// Poids minimal d'un partenaire peu fiable (jamais nul : sans lui une coupe sans bon partenaire n'aurait plus de contrainte).
+    pub reliability_floor: f64,
+}
+
+/// Poids de fiabilité d'un partenaire de concordance `score` : `floor` en dessous de `low`, 1 au-dessus de `high`, et entre les deux `floor + (1 − floor) · x²(3 − 2x)` avec `x = (score − low) / (high − low)` (rampe lisse, monotone). Rend 1 si `high <= low` (pondération inactive).
+pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) -> f64 {
+    if high <= low {
+        return 1.0;
+    }
+    let x = ((score - low) / (high - low)).clamp(0.0, 1.0);
+    floor + (1.0 - floor) * x * x * (3.0 - 2.0 * x)
 }
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
     }
 }
 
@@ -751,6 +785,9 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
     }
     let niveaux = sweep_schedule(config);
     let mut decalage_graine = 0u64;
+    // dernière concordance connue de chaque coupe (1 avant toute information) et position de chaque stack dans `coupes`, pour la fiabilité des partenaires
+    let mut scores = vec![1.0_f64; coupes.len()];
+    let decalages: Vec<usize> = stacks.iter().scan(0usize, |cumul, s| { let d = *cumul; *cumul += s.dim().2; Some(d) }).collect();
     for (sigma, balayages, net) in niveaux {
         let atlas = SliceAtlas::new_blurred(stacks, device, sigma)?;
         for balayage in 0..balayages {
@@ -759,9 +796,15 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                 let courante = *courantes.get(si, k);
                 let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
                 let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+                let probleme = if config.reliability_high > config.reliability_low {
+                    probleme.with_partner_weights(|sj, kj| reliability_weight(scores[decalages[sj] + kj], config.reliability_low, config.reliability_high, config.reliability_floor))
+                } else {
+                    probleme
+                };
                 let pivot = Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], device);
                 let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
                 let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
+                scores[n] = apres.max(avant);
                 if net {
                     let rapport = &mut rapports[n];
                     rapport.registered = true;
