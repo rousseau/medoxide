@@ -60,3 +60,26 @@ Critères proposés (à valider avant de coder) :
 - départ à la référence (±0) : ≥ 97 % conservées ;
 - pipeline depuis l'en-tête sur six sujets réels : aucune baisse de concordance supérieure à 0,01, moyenne en hausse d'au moins 0,01 ; accord des poses avec NiftyMIC / SVRTK / NeSVoR non dégradé sur le sujet calme ; simulation ±4 mm sans régression ;
 - coût en temps ≤ 1,5 fois celui du défaut.
+
+## 5. Résultat de l'étape 2 : le bon bassin est parfois dans la liste, mais on ne sait pas le choisir (2026-10-15)
+
+Diagnostic `diagnose_the_multistart_candidates_on_real_data` (calme 2, référence de consensus ; une coupe sur 2 ou 3 de chaque stack ; grille de rotations ±3°/±6° (5³ = 125 candidats), translation ré-optimisée à chaque point (Adam, 20 itérations), images floutées de σ = 1 ; part des coupes à ≤ 1,5 mm de la référence) :
+
+| Situation | coupes | erreur de départ (médiane) | Adam depuis le départ | meilleur candidat (concordance) | meilleur des 5 maxima | un des 125 candidats |
+|---|---|---|---|---|---|---|
+| ±4 mm indépendant, partenaires perturbés (1er balayage) | 10 | 3,6 mm | 0 % | 0 % | 0 % | 30 % |
+| ±4 mm indépendant, partenaires à la vraie pose (borne haute) | 10 | 3,6 mm | 90 % | 90 % | 90 % | 100 % |
+| ±4 mm indépendant, **après les balayages actuels** (coupes restées > 1,5 mm) | 33 | 3,1 mm | 3 % | 3 % | 3 % | 39 % |
+| même, partenaires restreints aux coupes bien recalées (oracle) | 28 | 3,1 mm | 4 % | 4 % | 25 % | 46 % |
+| ±6 mm lisse, après les balayages actuels | 32 | 6,4 mm | 0 % | 0 % | 0 % | 3 % |
+
+Lecture :
+- **Avec des partenaires justes, le recalage actuel suffit déjà à ±4 mm (90 %)** : la grille n'apporte rien. Le problème n'est pas la capture d'une coupe isolée mais la **cohérence conjointe** : les partenaires sont eux aussi faux.
+- **Après les balayages**, le bon bassin est dans la grille pour 39 % des coupes mal recalées (±4 mm), mais le classement par concordance ne le retrouve que dans 3 % des cas (5 maxima : 3 %) : c'est un problème de **sélection**, pas de génération. Restreindre les partenaires aux coupes bien recalées (oracle) l'améliore (25 % avec les 5 maxima) sans le résoudre : il ne reste que 37 % de partenaires corrects, donc peu de droites d'intersection fiables par coupe.
+- **À ±6 mm**, la grille (±6°, translations par 20 itérations d'Adam) ne contient presque jamais le bon bassin (3 %), et il ne reste presque aucune coupe bien recalée pour servir de partenaire.
+- Le critère de départ (±4 mm indépendant ≥ 70 %) n'est donc **pas atteignable par un multi-départ par coupe isolé** dans ce régime : l'étape 3 (raffiner les K meilleurs) n'a pas de sens si la sélection échoue. Le banc d'essai indépendant est un régime sévère (chaque coupe est fausse indépendamment des voisines) : le mouvement réel est plutôt lisse.
+
+Pistes pour la suite (à choisir) :
+- (A) **Pondérer les partenaires par leur fiabilité** (cœur de ROSI : le coût n'utilise que les coupes jugées bonnes, via un classifieur) plutôt que de tout croiser avec tout ; estimation de la fiabilité par la concordance de chaque coupe, réestimée à chaque balayage.
+- (B) **Multi-départ au niveau du bloc ou du stack** (peu d'inconnues, partenaires nombreux) avec grille de rotations comme FLIRT, puis par coupe : l'alignement par stack actuel ne cherche que des translations exhaustivement, pas les rotations.
+- (C) **Régularisation temporelle** : pénaliser l'écart de pose entre coupes voisines d'un stack (équivalent doux des départs issus des voisines de ROSI) ; n'aide que si le mouvement est lisse, donc à évaluer avec la perturbation `lisse`.

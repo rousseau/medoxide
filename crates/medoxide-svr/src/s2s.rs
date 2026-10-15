@@ -461,6 +461,84 @@ pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotat
     RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
 }
 
+/// Module à trois paramètres (les translations) pour [`register_translation_s2s`].
+#[cfg(test)]
+#[derive(Module, Debug)]
+struct TranslationModule {
+    params: Param<Tensor<1>>,
+}
+
+#[cfg(test)]
+/// **Recalage des seules translations d'une coupe, la rotation étant fixée** : comme [`register_slice_s2s`], mais seuls `(tx, ty, tz)` sont optimisés (Adam, `config.initial[3..6]` au départ) ; la rotation `rotation_mm` (`(φx, φy, φz)` en mm équivalents) est une constante.
+/// C'est le pas élémentaire de la recherche par grille de rotations : à chaque rotation candidate, la meilleure translation est cherchée localement (comme FLIRT et ROSI). Rend les six paramètres (rotation fixée, translations optimisées) et l'historique de la concordance.
+pub(crate) fn register_translation_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, rotation_mm: [f64; 3], config: RegistrationConfig) -> RegistrationResult {
+    let device = pivot.device();
+    let rotation = Tensor::<1>::from_floats(rotation_mm.map(|v| v as f32), &device);
+    let depart: Vec<f32> = config.initial[3..6].iter().map(|&v| v as f32).collect();
+    let mut module = TranslationModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
+    let mut optimiseur = AdamConfig::new().init();
+    let valeur = |t: &Tensor<1>| f64::from(t.clone().into_data().try_to_vec::<f32>().unwrap()[0]);
+    let mut historique = Vec::with_capacity(config.iterations + 1);
+    let mut pas = config.learning_rate;
+    for _ in 0..config.iterations {
+        let concordance = problem.cost(Tensor::cat(vec![rotation.clone(), module.params.val()], 0), pivot.clone(), rotation_scale_mm);
+        historique.push(valeur(&concordance));
+        let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
+        module = optimiseur.step(pas, module, gradients);
+        pas *= config.lr_decay;
+    }
+    let finale = Tensor::cat(vec![rotation, module.params.val()], 0);
+    historique.push(valeur(&problem.cost(finale.clone(), pivot, rotation_scale_mm)));
+    let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
+    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
+}
+
+#[cfg(test)]
+/// Une pose candidate d'une coupe (six paramètres, comme [`register_slice_s2s`]) et sa concordance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Candidate {
+    pub(crate) params: [f64; 6],
+    pub(crate) concordance: f64,
+}
+
+#[cfg(test)]
+/// **Candidats par grille de rotations** (FLIRT, ROSI) : pour chaque triplet d'angles `(a, b, c)` de `angles_deg` (un angle en degrés autour de chaque axe, autour de la pose courante), recale les translations seules
+/// ([`register_translation_s2s`]) et note la concordance. Rend `n³` candidats, `n = angles_deg.len()`, dans l'ordre `(i · n + j) · n + k`.
+pub(crate) fn rotation_grid_candidates(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, angles_deg: &[f64], config: RegistrationConfig) -> Vec<Candidate> {
+    let mm = |angle_deg: f64| angle_deg.to_radians() * rotation_scale_mm;
+    let mut candidats = Vec::with_capacity(angles_deg.len().pow(3));
+    for &a in angles_deg {
+        for &b in angles_deg {
+            for &c in angles_deg {
+                let r = register_translation_s2s(problem, pivot.clone(), rotation_scale_mm, [mm(a), mm(b), mm(c)], config);
+                candidats.push(Candidate { params: r.params, concordance: *r.ncc_history.last().unwrap() });
+            }
+        }
+    }
+    candidats
+}
+
+#[cfg(test)]
+/// Indices des **maxima locaux** de la concordance d'une grille `n × n × n` (ordre de [`rotation_grid_candidates`]) : un point strictement supérieur à ses voisins de la grille selon les six directions (les bords n'ont que
+/// leurs voisins existants), triés par concordance décroissante.
+pub(crate) fn grid_local_maxima(candidats: &[Candidate], n: usize) -> Vec<usize> {
+    let idx = |i: usize, j: usize, k: usize| (i * n + j) * n + k;
+    let mut maxima = Vec::new();
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                let c = candidats[idx(i, j, k)].concordance;
+                let voisins = [(i.wrapping_sub(1), j, k), (i + 1, j, k), (i, j.wrapping_sub(1), k), (i, j + 1, k), (i, j, k.wrapping_sub(1)), (i, j, k + 1)];
+                if voisins.iter().filter(|&&(a, b, d)| a < n && b < n && d < n).all(|&(a, b, d)| c > candidats[idx(a, b, d)].concordance) {
+                    maxima.push(idx(i, j, k));
+                }
+            }
+        }
+    }
+    maxima.sort_by(|&x, &y| candidats[y].concordance.partial_cmp(&candidats[x].concordance).unwrap_or(std::cmp::Ordering::Equal));
+    maxima
+}
+
 /// Réglages de [`register_slices_s2s`].
 #[derive(Debug, Clone, Copy)]
 pub struct S2sConfig {

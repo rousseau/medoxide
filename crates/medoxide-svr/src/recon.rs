@@ -3513,6 +3513,96 @@ mod tests {
         }
     }
 
+    /// DIAGNOSTIC (sans critère) des CANDIDATS d'un multi-départ sur DONNÉES RÉELLES, avec la même référence de consensus que `diagnose_the_capture_range_on_real_data` (`MEDOXIDE_POSES`) et les mêmes perturbations (`MEDOXIDE_AMPLITUDES`, `MEDOXIDE_PERTURBATION`). Pour une coupe sur `MEDOXIDE_PAS` (défaut 3)
+    /// de chaque stack, depuis sa pose de départ perturbée : (i) le recalage actuel (Adam à 6 paramètres depuis le départ) ; (ii) la grille de rotations de `MEDOXIDE_ANGLES` (défaut −6,−3,0,3,6 degrés autour de chaque axe) et `MEDOXIDE_MODES` (partenaires étudiés, défaut `perturbés,vrais,après`) avec translation ré-optimisée à chaque point ([`rotation_grid_candidates`]), sur des images
+    /// floutées de `MEDOXIDE_SIGMA` pixels (défaut 1). Les partenaires de la coupe sont soit à leur pose de départ perturbée (`perturbés`, le cas du premier balayage), soit à leur pose de référence (`vrais`, borne haute : le paysage de coût a-t-il son maximum près de la référence ?), soit à l'état obtenu après le recalage coupe-coupe actuel (`après` : seules les coupes restées à plus de 1,5 mm de la référence sont traitées, c'est le cas d'usage du multi-départ), soit comme `après` avec seulement les partenaires bien recalés (`oracle` : borne haute d'une estimation parfaite de la fiabilité des partenaires).
+    /// Écrit `CANDIDATS amplitude partenaires coupes erreur_départ_médiane part_Adam part_meilleur_candidat part_top5_maxima part_grille` : part des coupes dont la pose est à ≤ 1,5 mm de la référence (écart quadratique des pixels de masque) pour, dans l'ordre, la pose obtenue par Adam,
+    /// le candidat de concordance maximale, le meilleur des 5 maxima locaux de la grille (« le bon bassin est-il dans la liste ? »), le meilleur de tous les candidats de la grille.
+    #[test]
+    #[ignore = "diagnostic sur données réelles locales"]
+    fn diagnose_the_multistart_candidates_on_real_data() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::diff::{pose_to_matrix, RegistrationConfig};
+        use crate::pipeline::correct_stacks;
+        use crate::s2s::{grid_local_maxima, register_slice_s2s, rotation_grid_candidates, IntersectionConfig, IntersectionProblem, SliceAtlas};
+        let tous = stacks_reels();
+        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
+        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "4").split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let angles: Vec<f64> = lire("MEDOXIDE_ANGLES", "-6,-3,0,3,6").split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let (pas, sigma): (usize, f64) = (lire("MEDOXIDE_PAS", "3").parse().unwrap(), lire("MEDOXIDE_SIGMA", "1").parse().unwrap());
+        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new_blurred(&corriges, &device, sigma).unwrap();
+        let adam = RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] };
+        let translation = RegistrationConfig { learning_rate: 0.5, iterations: 20, lr_decay: 0.95, initial: [0.0; 6] };
+        let erreur = |si: usize, k: usize, pose: &Matrix4<f64>| -> Option<f64> {
+            let (a, b) = (crate::align::preparer_coupe(&corriges[si], k, *pose)?, crate::align::preparer_coupe(&corriges[si], k, *reference.get(si, k))?);
+            Some((a.points.iter().zip(&b.points).map(|(p, q)| (p - q).norm_squared()).sum::<f64>() / a.points.len() as f64).sqrt())
+        };
+        for a in amplitudes {
+            let perturbation = if lire("MEDOXIDE_PERTURBATION", "independante") == "lisse" { poses_lisses(&tous, a, a, 7, 0.9) } else { poses_aleatoires(&tous, a, a, 7) };
+            let mut depart = SlicePoses::identity(&tous);
+            for (si, stack) in tous.iter().enumerate() {
+                for k in 0..stack.dim().2 {
+                    depart.set(si, k, perturbation.get(si, k) * reference.get(si, k));
+                }
+            }
+            // état « après » : le recalage coupe-coupe actuel (flou σ = 1, sans alignement par stack) lancé depuis le départ perturbé ; le multi-départ ne porte que sur les coupes qui y restent mal recalées (> 1,5 mm de la référence)
+            let apres = {
+                let fin = crate::s2s::S2sConfig { block_levels: 0, coarse_sigma_pixels: 1.0, coarse_sweeps: 3, coarse_levels: 2, intersection: IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+                crate::s2s::register_slices_s2s(&corriges, &depart, &fin, &device).unwrap().poses
+            };
+            for partenaires in lire("MEDOXIDE_MODES", "perturbés,vrais,après").split(',') {
+                let base = match partenaires {
+                    "vrais" => reference.clone(),
+                    "après" => apres.clone(),
+                    // ORACLE : comme « après », mais les partenaires restés à plus de 1,5 mm de la référence sont repoussés à 1 m (hors de portée des droites d'intersection) : seuls les partenaires bien recalés comptent
+                    "oracle" => {
+                        let mut p = apres.clone();
+                        for (sj, stack_j) in tous.iter().enumerate() {
+                            for kj in 0..stack_j.dim().2 {
+                                if erreur(sj, kj, apres.get(sj, kj)).map_or(false, |e| e > 1.5) {
+                                    p.set(sj, kj, Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0)) * apres.get(sj, kj));
+                                }
+                            }
+                        }
+                        p
+                    }
+                    _ => depart.clone(),
+                };
+                let depart = if partenaires == "après" || partenaires == "oracle" { &apres } else { &depart };
+                let (mut e0, mut e_adam, mut e_best, mut e_top, mut e_grid) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (si, stack) in tous.iter().enumerate() {
+                    for k in (0..stack.dim().2).step_by(pas) {
+                        let s0 = *depart.get(si, k);
+                        let mut poses = base.clone();
+                        poses.set(si, k, s0);
+                        if (partenaires == "après" || partenaires == "oracle") && erreur(si, k, &s0).map_or(true, |e| e <= 1.5) {
+                            continue; // déjà bien recalée : hors du périmètre du multi-départ
+                        }
+                        let (Some(prep), Some(probleme)) = (crate::align::preparer_coupe(&corriges[si], k, s0), IntersectionProblem::build(&atlas, &corriges, &poses, si, k, &IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, &device)) else { continue };
+                        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
+                        let pose_de = |params: &[f64; 6]| pose_to_matrix(params, &prep.pivot, prep.echelle) * s0;
+                        e0.push(erreur(si, k, &s0).unwrap());
+                        e_adam.push(erreur(si, k, &pose_de(&register_slice_s2s(&probleme, pivot.clone(), prep.echelle, adam).params)).unwrap());
+                        let candidats = rotation_grid_candidates(&probleme, pivot, prep.echelle, &angles, translation);
+                        let erreurs: Vec<f64> = candidats.iter().map(|c| erreur(si, k, &pose_de(&c.params)).unwrap()).collect();
+                        let meilleur = (0..candidats.len()).max_by(|&x, &y| candidats[x].concordance.partial_cmp(&candidats[y].concordance).unwrap()).unwrap();
+                        e_best.push(erreurs[meilleur]);
+                        let maxima = grid_local_maxima(&candidats, angles.len());
+                        e_top.push(maxima.iter().take(5).map(|&i| erreurs[i]).fold(f64::INFINITY, f64::min));
+                        e_grid.push(erreurs.iter().cloned().fold(f64::INFINITY, f64::min));
+                    }
+                }
+                let part = |v: &[f64]| v.iter().filter(|&&x| x <= 1.5).count() as f64 / v.len() as f64;
+                let mut tri = e0.clone();
+                tri.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                println!("CANDIDATS {a} {partenaires} {} {:.2} {:.2} {:.2} {:.2} {:.2}", e0.len(), tri[tri.len() / 2], part(&e_adam), part(&e_best), part(&e_top), part(&e_grid));
+            }
+        }
+    }
+
     /// DIAGNOSTIC (sans critère) des résidus par coupe sur DONNÉES RÉELLES : pour chaque coupe de tous les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`), simule la coupe à sa pose (`MEDOXIDE_POSES`, fichier de `--poses`)
     /// depuis le volume `MEDOXIDE_VOLUME` (NIfTI) sur les pixels de son masque, et écrit sur la sortie standard une ligne `COUPE stack coupe pixels_masque déplacement_rms_mm ncc rmse_relatif` : la corrélation entre la coupe simulée et la coupe réelle
     /// (les coupes dont le volume est incohérent avec les données ont une corrélation basse).
@@ -3766,6 +3856,55 @@ mod tests {
         let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
         let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
         (problemes, burn::tensor::Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device), pivot, echelle)
+    }
+
+    /// Maxima locaux d'une grille de candidats (valeurs exactes) : grille 3 × 3 × 3 de concordance 0, avec deux pics (au coin `(0,0,0)` : 0,9 ; au centre : 0,7), un plateau de deux points égaux à 0,5 en `(2,2,1)` et `(2,2,2)` (jamais un maximum : l'inégalité est stricte) ; les maxima sont `(0,0,0)` puis le centre, triés par concordance décroissante ;
+    /// un coin (bords : seulement les voisins existants) peut être un maximum ; une grille constante n'en a aucun.
+    #[test]
+    fn the_grid_local_maxima_are_exact() {
+        use crate::s2s::{grid_local_maxima, Candidate};
+        let mut c = vec![Candidate { params: [0.0; 6], concordance: 0.0 }; 27];
+        let idx = |i: usize, j: usize, k: usize| (i * 3 + j) * 3 + k;
+        c[idx(0, 0, 0)].concordance = 0.9;
+        c[idx(1, 1, 1)].concordance = 0.7;
+        c[idx(2, 2, 1)].concordance = 0.5;
+        c[idx(2, 2, 2)].concordance = 0.5;
+        assert_eq!(grid_local_maxima(&c, 3), vec![idx(0, 0, 0), idx(1, 1, 1)]);
+        assert!(grid_local_maxima(&vec![Candidate { params: [0.0; 6], concordance: 0.3 }; 27], 3).is_empty());
+        // le centre dominé par un voisin n'est pas un maximum
+        c[idx(1, 1, 2)].concordance = 0.8;
+        assert_eq!(grid_local_maxima(&c, 3), vec![idx(0, 0, 0), idx(1, 1, 2)]);
+    }
+
+    /// Recalage des translations seules (blobs, stack coronal décalé de 3 mm en x, la coupe du milieu, partenaires à leur vraie pose) : la rotation donnée reste EXACTEMENT celle donnée (elle n'est pas optimisée), la concordance finale dépasse
+    /// la concordance au départ d'au moins 0,1, et la translation estimée a une composante x d'au moins 2 mm en valeur absolue ; avec la rotation nulle et zéro itération, le résultat est le départ.
+    #[test]
+    fn the_translation_registration_keeps_the_rotation_and_improves_the_concordance() {
+        use crate::diff::RegistrationConfig;
+        use crate::s2s::{register_translation_s2s, IntersectionConfig, IntersectionProblem, SliceAtlas};
+        let t = Temp::new("translation_seule");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let mut vraies = SlicePoses::identity(&modeles);
+        for k in 0..12 {
+            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()));
+        }
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let depart = SlicePoses::identity(&stacks);
+        let preparee = crate::align::preparer_coupe(&stacks[1], 5, *depart.get(1, 5)).unwrap();
+        let probleme = IntersectionProblem::build(&atlas, &stacks, &depart, 1, 5, &IntersectionConfig::default(), &device).unwrap();
+        let pivot = burn::tensor::Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], &device);
+        let rotation = [0.25, -0.5, 0.125];
+        let config = RegistrationConfig { learning_rate: 0.5, iterations: 40, lr_decay: 0.97, initial: [0.0; 6] };
+        let r = register_translation_s2s(&probleme, pivot.clone(), preparee.echelle, rotation, config);
+        println!("concordance {:.3} -> {:.3}, translation {:.2?}", r.ncc_history[0], r.ncc_history.last().unwrap(), &r.params[3..]);
+        assert_eq!(&r.params[..3], &rotation, "la rotation fixée a changé");
+        assert!(r.ncc_history.last().unwrap() - r.ncc_history[0] >= 0.1, "concordance : {:?} -> {:?}", r.ncc_history[0], r.ncc_history.last());
+        assert!(r.params[3].abs() >= 2.0, "translation x estimée : {}", r.params[3]);
+        let zero = register_translation_s2s(&probleme, pivot, preparee.echelle, [0.0; 3], RegistrationConfig { iterations: 0, ..config });
+        assert_eq!(zero.params, [0.0; 6]);
     }
 
     /// Recherche exhaustive d'un bloc, sur une fonction synthétique (valeurs exactes) : le meilleur point est cherché d'abord en translation (rotation nulle), puis en rotation AUTOUR de cette translation ; `f = −|t − (8, 0, 0)|² − |r − (4, 0, 0)|²` sur la grille −8, −4, 0, 4, 8
