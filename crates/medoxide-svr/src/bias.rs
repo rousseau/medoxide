@@ -36,13 +36,13 @@ pub struct BiasConfig {
     pub points_per_pair: usize,
     /// Seuil d'intensité d'un stack, en fraction de son 99ᵉ centile dans le masque : les points plus sombres (log bruité) sont ignorés.
     pub threshold_fraction: f64,
-    /// Régularisation des coefficients non constants : `ridge² × (nombre d'équations)` ajouté à la diagonale des équations normales.
+    /// Régularisation des coefficients non constants : `ridge² × (nombre d'équations)` ajouté à la diagonale des équations normales. Défaut 0,1 : avec 0,001, le polynôme de degré 3 diverge hors des zones contraintes par des intersections (jusqu'à `exp(10)` sur un sujet réel) et assombrit ou éclaircit le volume ; 0,1 garde la réduction d'incohérence (5, 29, 15 et 17 % contre 6, 29, 17 et 20 % sur quatre sujets) avec un champ borné.
     pub ridge: f64,
 }
 
 impl Default for BiasConfig {
     fn default() -> Self {
-        BiasConfig { degree: 3, scale_mm: 60.0, min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, points_per_pair: 40, threshold_fraction: 0.1, ridge: 1e-3 }
+        BiasConfig { degree: 3, scale_mm: 60.0, min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, points_per_pair: 40, threshold_fraction: 0.1, ridge: 0.1 }
     }
 }
 
@@ -72,6 +72,8 @@ pub struct BiasFields {
     coefficients: Vec<Vec<f64>>,
     /// Incohérence d'intensité (écart quadratique moyen du log du rapport des intensités aux points d'intersection) avant et après correction, sur les points de l'estimation.
     inconsistency: (f64, f64),
+    /// Plage `(min, max)` du log du champ de chaque stack aux points d'intersection de l'estimation : `log_field` n'extrapole pas au-delà (un polynôme diverge hors des zones contraintes).
+    range: Vec<(f64, f64)>,
 }
 
 impl BiasFields {
@@ -81,8 +83,15 @@ impl BiasFields {
         self.exponents.iter().map(|e| u.x.powi(e[0] as i32) * u.y.powi(e[1] as i32) * u.z.powi(e[2] as i32)).collect()
     }
 
-    /// Logarithme du champ de biais du stack `stack` à la position NOMINALE `x` (monde, mm, avant tout mouvement estimé). Le terme constant du stack 0 est 0.
+    /// Logarithme du champ de biais du stack `stack` à la position NOMINALE `x` (monde, mm, avant tout mouvement estimé), ramené à la plage vue aux points d'intersection de l'estimation (pas d'extrapolation). Le terme constant du stack 0 est 0.
     pub fn log_field(&self, stack: usize, x: &Vector3<f64>) -> f64 {
+        let brut: f64 = self.basis(x).iter().zip(&self.coefficients[stack]).map(|(p, c)| p * c).sum();
+        let (bas, haut) = self.range[stack];
+        brut.clamp(bas, haut)
+    }
+
+    /// Valeur du polynôme SANS écrêtage (utilisée pour mesurer la plage).
+    fn raw_log_field(&self, stack: usize, x: &Vector3<f64>) -> f64 {
         self.basis(x).iter().zip(&self.coefficients[stack]).map(|(p, c)| p * c).sum()
     }
 
@@ -98,6 +107,11 @@ impl BiasFields {
         } else {
             0.0
         }
+    }
+
+    /// Plage `(min, max)` du log du champ du stack `stack` aux points d'intersection de l'estimation, à laquelle `log_field` est ramené.
+    pub fn log_field_range(&self, stack: usize) -> (f64, f64) {
+        self.range[stack]
     }
 
     /// Coefficients (un vecteur par stack) des logarithmes des champs.
@@ -214,7 +228,7 @@ pub fn estimate_bias_fields(stacks: &[Stack], poses: &SlicePoses, config: &BiasC
     let (points, centre) = collect_samples(stacks, poses, config)?;
     let exposants = monomial_exponents(config.degree);
     let (ns, nb) = (stacks.len(), exposants.len());
-    let champs = BiasFields { exponents: exposants, centre, scale_mm: config.scale_mm, coefficients: vec![vec![0.0; nb]; ns], inconsistency: (0.0, 0.0) };
+    let champs = BiasFields { exponents: exposants, centre, scale_mm: config.scale_mm, coefficients: vec![vec![0.0; nb]; ns], inconsistency: (0.0, 0.0), range: vec![(f64::NEG_INFINITY, f64::INFINITY); ns] };
     let (mut ata, mut atb) = (DMatrix::<f64>::zeros(ns * nb, ns * nb), DVector::<f64>::zeros(ns * nb));
     for p in &points {
         let (f1, f2) = (champs.basis(&p.x1), champs.basis(&p.x2));
@@ -250,6 +264,14 @@ pub fn estimate_bias_fields(stacks: &[Stack], poses: &SlicePoses, config: &BiasC
     }
     let mut ajuste = BiasFields { coefficients, ..champs };
     let (mut avant, mut apres) = (0.0, 0.0);
+    let mut plage = vec![(f64::INFINITY, f64::NEG_INFINITY); ns];
+    for p in &points {
+        for (s, x) in [(p.s1, &p.x1), (p.s2, &p.x2)] {
+            let v = ajuste.raw_log_field(s, x);
+            plage[s] = (plage[s].0.min(v), plage[s].1.max(v));
+        }
+    }
+    ajuste.range = plage;
     for p in &points {
         let cible = p.y1.ln() - p.y2.ln();
         avant += cible * cible;
@@ -292,10 +314,16 @@ mod tests {
         assert_eq!(monomial_exponents(0), vec![[0, 0, 0]]);
         let mut coefficients = vec![0.0; 20];
         (coefficients[0], coefficients[1], coefficients[2], coefficients[3]) = (0.5, 0.25, 7.0, 0.125);
-        let champs = BiasFields { exponents: e, centre: Vector3::new(1.0, 2.0, 3.0), scale_mm: 10.0, coefficients: vec![vec![0.0; 20], coefficients], inconsistency: (0.5, 0.125) };
+        let champs = BiasFields { exponents: e, centre: Vector3::new(1.0, 2.0, 3.0), scale_mm: 10.0, coefficients: vec![vec![0.0; 20], coefficients], inconsistency: (0.5, 0.125), range: vec![(0.0, 0.0), (-10.0, 10.0)] };
         assert_eq!(champs.log_field(1, &Vector3::new(11.0, 2.0, 13.0)), 0.5 + 0.25 + 0.125);
         assert_eq!(champs.log_field(0, &Vector3::new(11.0, 2.0, 13.0)), 0.0);
         assert_eq!(champs.log_field(1, &Vector3::new(1.0, 2.0, 3.0)), 0.5);
+        // écrêtage à la plage vue aux points de l'estimation : pas d'extrapolation
+        let serre = BiasFields { range: vec![(0.0, 0.0), (0.0, 0.6)], ..champs.clone() };
+        assert_eq!(serre.log_field(1, &Vector3::new(11.0, 2.0, 13.0)), 0.6);
+        assert_eq!(serre.log_field(1, &Vector3::new(1.0, 2.0, 3.0)), 0.5);
+        let bas = BiasFields { range: vec![(0.0, 0.0), (0.55, 9.0)], ..champs.clone() };
+        assert_eq!(bas.log_field(1, &Vector3::new(1.0, 2.0, 3.0)), 0.55);
         assert_eq!(champs.inconsistency(), (0.5, 0.125));
         assert_eq!(champs.inconsistency_reduction(), 0.75);
         assert_eq!(BiasFields { inconsistency: (0.0, 0.0), ..champs }.inconsistency_reduction(), 0.0);

@@ -291,25 +291,28 @@ Le [passe-haut des profils](#pourquoi-certains-sujets-très-agités-ne-sont-pas-
 
 | Jeu | sans alignement par stack | alignement par stack seul | alignement + biais |
 |---|---|---|---|
-| lisse, biais 30 % | 59 % | **3 %** | **65 %** |
-| indépendant, biais 30 % | 83 % | 71 % | **86 %** |
+| lisse, biais 30 % | 59 % | **3 %** | **75 %** |
+| indépendant, biais 30 % | 83 % | 71 % | **79 %** |
 | lisse, sans biais | (73 %) | 83 % | 83 % |
 | indépendant, sans biais | (79 %) | 83 % | 83 % |
 
-Deux constats. (1) **L'alignement par stack, activé par défaut, régresse en présence d'un biais** (59 → 3 % et 83 → 71 %) : l'incohérence d'intensité le fait aller vers de mauvais décalages de stack ; la correction de biais le rend sûr (65 % et 86 %, au-dessus du passe-haut seul). Cette régression n'avait pas été vue avant le changement de défaut, qui reposait sur des simulations sans biais et sur les données réelles. (2) Sans biais, la garde laisse le résultat strictement identique (83 % et 83 %). Les valeurs entre parenthèses sont des mesures antérieures sans alignement par stack.
+Deux constats. (1) **L'alignement par stack, activé par défaut, régresse en présence d'un biais** (59 → 3 % et 83 → 71 %) : l'incohérence d'intensité le fait aller vers de mauvais décalages de stack ; la correction de biais le rend sûr (75 % et 79 % ; 79 % reste un peu sous les 83 % du passe-haut seul, écart de l'ordre du bruit sur 72 coupes). Cette régression n'avait pas été vue avant le changement de défaut, qui reposait sur des simulations sans biais et sur les données réelles. (2) Sans biais, la garde laisse le résultat strictement identique (83 % et 83 %). Les valeurs entre parenthèses sont des mesures antérieures sans alignement par stack.
 
 **Données réelles.** Le juge hors échantillon est **invalide pour cette brique** : il compare les coupes du stack mis de côté (non corrigées de son propre biais) à un volume reconstruit à partir de stacks corrigés, et le NCC chute mécaniquement (premier repli à quatre stacks : 0,61 contre 0,85) ; il pénalise par construction ce qu'on corrige. Mesures utilisées à la place, qui ne dépendent que des poses (la concordance aux intersections est calculée sur les images brutes, équitable pour toutes les poses) :
 
 | Concordance (toutes paires) | calme 1 | calme 2 | calme 3 | agité 1 | agité 2 | agité 3 | moyenne |
 |---|---|---|---|---|---|---|---|
 | alignement par stack seul | 0,8784 | 0,9087 | 0,9004 | 0,7936 | 0,6941 | 0,5647 | 0,7900 |
-| + correction de biais | 0,8770 | 0,9087 | 0,9004 | 0,7967 | 0,6941 | **0,6070** | 0,7973 |
+| + correction de biais (régularisation 0,001) | 0,8770 | 0,9087 | 0,9004 | 0,7967 | 0,6941 | 0,6070 | 0,7973 |
+| + correction de biais (réglage final : 0,1 et écrêtage) | 0,8760 | 0,9085 | 0,8985 | 0,7986 | 0,6922 | **0,6350** | 0,8015 |
 
-Aucune baisse supérieure à 0,01 sur les six sujets (le pire : −0,0014) ; les trois sujets où la garde écarte la correction sont inchangés. Sur l'**agité 3**, que l'alignement par stack faisait dériver, les décalages de stack passent de 8,0/9,8 mm à **4,1/5,2 mm** (NiftyMIC 4,1/5,1 ; NeSVoR 4,6/5,3) et l'écart médian avec NiftyMIC de 7,9 à 3,6 mm (90ᵉ centile 15,6 → 6,8) ; avec SVRTK, qui trouve 18-21 mm, l'écart reste de 17 mm. L'**incohérence d'intensité entre stacks était donc bien la cause** de la dérive observée sur ce sujet. Sur l'agité 1, l'accord avec NiftyMIC est inchangé (0,7 mm), sur le calme 1 et le calme 2 il l'est aussi. Le temps de calcul est inchangé dans le bruit des mesures (quelques secondes pour l'estimation du champ).
+Aucune baisse supérieure à 0,01 sur les six sujets (le pire : −0,0014) ; les trois sujets où la garde écarte la correction sont inchangés. Sur l'**agité 3**, que l'alignement par stack faisait dériver, les décalages de stack passent de 8,0/9,8 mm à **4,7/5,2 mm** (réglage final ; NiftyMIC 4,2/4,7 ; NeSVoR 4,6/5,3) et l'écart médian avec NiftyMIC de 7,9 à **2,3 mm** (90ᵉ centile 15,6 → 7,4) ; avec SVRTK, qui trouve 18-21 mm, l'écart reste de 17 mm. L'**incohérence d'intensité entre stacks était donc bien la cause** de la dérive observée sur ce sujet. Sur l'agité 1, l'accord avec NiftyMIC est inchangé (0,7 mm), sur le calme 1 et le calme 2 il l'est aussi. Le temps de calcul est inchangé dans le bruit des mesures (quelques secondes pour l'estimation du champ).
+
+**Défaut découvert par la figure, et corrigé.** Une première version (régularisation de 0,001) donnait, sur la figure des reconstructions, des volumes **assombris avec un effet de vignettage** (centre sombre, périphérie claire) sur trois sujets, alors que la concordance, mesurée sur les poses, était bonne. Cause : le polynôme de degré 3 **diverge hors des zones contraintes par des intersections** (champ jusqu'à exp(2,4) sur un sujet calme et exp(10), soit ×22 000, sur l'agité 3), ce qui change l'intensité de quelques voxels de masque. Remèdes : régularisation portée à 0,1 (la réduction d'incohérence est conservée : 5, 29, 15 et 17 % contre 6, 29, 17 et 20 % sur quatre sujets) et **écrêtage du champ à la plage vue aux points d'intersection** (aucune extrapolation) ; la plage reste alors comprise entre 0,13 et 0,51 en log (facteur ≤ 1,7). Effet sur les poses : simulation 65 % → 75 % (lisse, biais) et 86 % → 79 % (indépendant, biais) ; réel : concordance moyenne 0,794 → 0,802, agité 3 0,595 → 0,635, aucune baisse. Leçon : les mesures fondées sur les poses (concordance, accord) ne voient pas un défaut d'intensité du volume ; il faut regarder les volumes.
 
 **Réserve.** La brique corrige un champ polynomial de basse fréquence supposé multiplicatif ; les effets d'intensité qui dépendent de la coupe (perte de signal localisée) ne sont pas corrigés (le seuil d'intensité les ignore). Un champ commun à tous les stacks (la sensibilité de la bobine, la même pour tous) est aussi invisible, comme on l'a vu, et n'est pas corrigé.
 
-Le code est testé par mutation (14 mutants du câblage et de la garde et 19 de l'estimateur).
+Le code est testé par mutation (14 mutants du câblage et de la garde, 19 de l'estimateur et 5 de l'écrêtage).
 
 ## Comparaison avec NiftyMIC
 

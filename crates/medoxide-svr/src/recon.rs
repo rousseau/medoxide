@@ -3851,10 +3851,25 @@ mod tests {
                 _ => 0.20 * w - 0.15 * u * v + 0.10,
             }
         };
-        let config = BiasConfig { scale_mm: 15.0, ..Default::default() };
+        let config = BiasConfig { scale_mm: 15.0, ridge: 1e-3, ..Default::default() };
         let stacks = stacks_analytiques(&t, &modeles, &vraies, &vrai_champ);
         let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
         assert_eq!(champs.coefficients()[0][0], 0.0, "(c)");
+        // régularisation par défaut (0,1) plus forte que celle de ce test (0,001) : la norme des coefficients est plus petite, et l'incohérence résiduelle reste du même ordre
+        let par_defaut = estimate_bias_fields(&stacks, &vraies, &BiasConfig { scale_mm: 15.0, ..Default::default() }).unwrap();
+        let norme = |c: &crate::bias::BiasFields| c.coefficients().iter().flatten().map(|v| v * v).sum::<f64>();
+        assert!(norme(&par_defaut) < norme(&champs), "la régularisation par défaut ne réduit pas les coefficients : {} contre {}", norme(&par_defaut), norme(&champs));
+        // pas d'extrapolation : très loin des données, le champ vaut une borne de la plage vue aux points d'intersection, et tous les voxels de masque sont dans la plage
+        for (s, stack) in stacks.iter().enumerate() {
+            let (bas, haut) = champs.log_field_range(s);
+            assert!(bas <= haut && bas.is_finite() && haut.is_finite(), "plage du stack {s} : {bas} {haut}");
+            let loin = champs.log_field(s, &Vector3::new(1.0e4, -2.0e4, 3.0e4));
+            assert!(loin == bas || loin == haut, "stack {s} : champ très loin des données {loin} hors des bornes {bas} {haut}");
+            for ((i, j, k), _) in stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).step_by(7) {
+                let v = champs.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz());
+                assert!(v >= bas && v <= haut, "voxel hors plage : {v}");
+            }
+        }
         let (avant, apres) = (intensity_inconsistency(&stacks, &vraies, &config, None).unwrap(), intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap());
         println!("incohérence d'intensité : avant {avant:.4}, après {apres:.4}");
         assert!(avant >= 0.1, "(a) avant : {avant}");
@@ -3898,7 +3913,7 @@ mod tests {
                 _ => 0.20 * w - 0.15 * u * v + 0.10,
             }
         };
-        let config = BiasConfig { scale_mm: 15.0, ..Default::default() };
+        let config = BiasConfig { scale_mm: 15.0, ridge: 1e-3, ..Default::default() };
         let stacks = stacks_analytiques(&t, &modeles, &vraies, &champ);
         let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
         let apres = intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap();
@@ -3907,7 +3922,7 @@ mod tests {
     }
 
     /// COMPARAISON avec la référence Python (`scripts/prototype_champ_biais.py`) sur un jeu simulé de l'atlas (poses vraies) : écart type du log du champ estimé par stack et rapports de gain.
-    /// Python (jeu `STA31_mvt4_b5_biais30`) : écarts types 0,076 / 0,220 / 0,202 ; gains (log, par rapport au stack 0) −0,202 / −0,053. Variable `MEDOXIDE_JEU_SIMULE` : dossier du jeu.
+    /// Python (jeu `STA31_mvt4_b5_biais30`, régularisation 1e-3, sans écrêtage) : écarts types 0,076 / 0,220 / 0,202 ; gains (log, par rapport au stack 0) −0,202 / −0,053. Le défaut de Rust est une régularisation de 0,1 avec écrêtage : la comparaison utilise 1e-3. Variable `MEDOXIDE_JEU_SIMULE` : dossier du jeu.
     #[test]
     #[ignore = "comparaison avec la référence Python, données locales"]
     fn compare_the_bias_estimation_with_the_python_reference() {
@@ -3921,7 +3936,7 @@ mod tests {
             })
             .collect();
         let poses = lire_poses_tsv(&dossier.join("poses.tsv"), &stacks);
-        let champs = estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap();
+        let champs = estimate_bias_fields(&stacks, &poses, &BiasConfig { ridge: 1e-3, ..Default::default() }).unwrap();
         let mut moyennes = Vec::new();
         for (s, stack) in stacks.iter().enumerate() {
             let v: Vec<f64> = stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).map(|((i, j, k), _)| champs.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz())).collect();
@@ -3931,7 +3946,7 @@ mod tests {
             moyennes.push(m);
         }
         println!("gains par rapport au stack 0 : {:+.3} {:+.3}", moyennes[1] - moyennes[0], moyennes[2] - moyennes[0]);
-        let config = BiasConfig::default();
+        let config = BiasConfig { ridge: 1e-3, ..Default::default() };
         for (nom, p) in [("vraies", poses.clone()), ("en-tête", SlicePoses::identity(&stacks))] {
             let champs = estimate_bias_fields(&stacks, &p, &config).unwrap();
             println!("poses {nom} : réduction de l'incohérence {:.3}", champs.inconsistency_reduction());
