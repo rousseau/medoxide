@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// DIAGNOSTIC (sans critère) de la PORTÉE DE CAPTURE sur DONNÉES RÉELLES, avec une référence de consensus : les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) sont corrigés du biais d'intensité aux poses de référence (`MEDOXIDE_POSES`, fichier de `--poses` d'un sujet bien recalé),
-    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence),
+    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence ; `MEDOXIDE_PERTURBATION` = `independante` par défaut ou `lisse`, une marche autorégressive le long du stack),
     /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
     /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
     #[test]
@@ -3495,7 +3495,8 @@ mod tests {
             })
             .collect();
         for a in amplitudes {
-            let perturbation = poses_aleatoires(&tous, a, a, 7);
+            // MEDOXIDE_PERTURBATION : `independante` (défaut) ou `lisse` (marche autorégressive le long du stack, coefficient 0,9)
+            let perturbation = if std::env::var("MEDOXIDE_PERTURBATION").map_or(false, |v| v.trim() == "lisse") { poses_lisses(&tous, a, a, 7, 0.9) } else { poses_aleatoires(&tous, a, a, 7) };
             let mut depart = SlicePoses::identity(&tous);
             for (si, stack) in tous.iter().enumerate() {
                 for k in 0..stack.dim().2 {
@@ -5124,6 +5125,29 @@ mod tests {
     }
 
     /// Lit un fichier de poses (stack, coupe, 16 valeurs en ordre colonne) pour des stacks donnés ; les coupes absentes gardent l'identité.
+    /// Mouvement par coupe LISSE le long de chaque stack : chaque paramètre suit une marche autorégressive d'ordre 1 de coefficient `rho` (écart type `amplitude / √3`, comme un tirage uniforme dans ± `amplitude`), borné à ± `amplitude` ; les coupes voisines ont donc des poses proches.
+    fn poses_lisses(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64) -> SlicePoses {
+        let mut alea = Alea(graine);
+        let mut gauss = move || {
+            let (u, v) = (alea.suivant().max(1e-12), alea.suivant());
+            (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
+        };
+        let mut poses = SlicePoses::identity(stacks);
+        for (si, stack) in stacks.iter().enumerate() {
+            let mut x = [0.0_f64; 6];
+            for coupe in stack.slices() {
+                for (p, v) in x.iter_mut().enumerate() {
+                    let amplitude = if p < 3 { degres } else { mm };
+                    let sigma = amplitude / 3.0_f64.sqrt();
+                    *v = (rho * *v + (1.0 - rho * rho).sqrt() * sigma * gauss()).clamp(-amplitude, amplitude);
+                }
+                let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
+                poses.set(si, coupe.index(), mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()));
+            }
+        }
+        poses
+    }
+
     fn lire_poses_tsv(chemin: &Path, stacks: &[Stack]) -> SlicePoses {
         let mut poses = SlicePoses::identity(stacks);
         for ligne in std::fs::read_to_string(chemin).expect("fichier de poses absent").lines() {
