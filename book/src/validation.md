@@ -199,7 +199,7 @@ La portée de capture d'un recalage local parti de l'en-tête est donc d'environ
 
 **5. Une brique qui l'atténue : le passe-haut des profils.** Avant la corrélation, on soustrait à chaque profil son lissage gaussien (25 mm, restreint au masque) : les variations lentes d'intensité disparaissent. En simulation avec biais, ±4 : 83 % (indépendant, 65 % sans) et 59 % (lisse, **3 % sans**), et sans biais le résultat est inchangé (79 % et 73 %). Sur données réelles, le juge à quatre stacks passe de 0,818 à **0,833** (+0,015, et le repli qui échouait passe de 0,735 à 0,776) ; à deux stacks sur les six sujets, +0,002 en moyenne (5 sujets sur 6 positifs, le pire −0,007). Il est donc actif par défaut (`--s2s-highpass-mm 25`), pour environ 15 à 25 % de temps en plus. **Il ne suffit pas à rendre la passe grossière utilisable** : avec le passe-haut, la passe grossière reste mauvaise sur le réel (juge à quatre stacks 0,706, contre 0,833 pour le passe-haut seul) et en simulation avec biais (±6 : 4 %).
 
-**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. Les mesures suivantes ([alignement par stack](#alignement-par-stack-ou-par-paquets), [comparaison avec NiftyMIC](#comparaison-avec-niftymic)) montrent que la portée est dépassée pour les **décalages de stack** (jusqu'à 8-10 mm en simulation) mais pas pour le mouvement **par coupe** intra-stack de l'agité 3, où même NiftyMIC rejette les coupes. L'**estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut) a été ajoutée depuis ([section](#correction-du-champ-de-biais-par-stack)) ; le retour à la passe grossière a été essayé ([section](#retour-au-gros-vers-fin-après-la-correction-de-biais)) : il réussit en simulation et échoue encore sur le réel. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
+**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. Les mesures suivantes ([alignement par stack](#alignement-par-stack-ou-par-paquets), [comparaison avec NiftyMIC](#comparaison-avec-niftymic)) montrent que la portée est dépassée pour les **décalages de stack** (jusqu'à 8-10 mm en simulation) mais pas pour le mouvement **par coupe** intra-stack de l'agité 3, où même NiftyMIC rejette les coupes. L'**estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut) a été ajoutée depuis ([section](#correction-du-champ-de-biais-par-stack)) ; le retour à la passe grossière a été essayé ([section](#retour-au-gros-vers-fin-après-la-correction-de-biais)) : il réussit en simulation et échoue encore sur le réel avec σ = 6 ; un flou adapté au réel (σ = 1) est activé par défaut. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
 
 ## Combien de coupes sont mal recalées ?
 
@@ -243,7 +243,35 @@ Le 90ᵉ centile reste élevé (14-16 mm) : une part des coupes échoue franchem
 
 Baisse sur les six sujets, de −0,002 à **−0,096** (agité 1). L'accord des poses le confirme : sur l'agité 1, le gros-vers-fin s'écarte de NiftyMIC, SVRTK et NeSVoR (écart médian 1,8 à 2,3 mm, 29 à 33 % des coupes à plus de 3 mm) alors que le défaut s'en écarte de 0,7 à 1,3 mm (4 à 11 %).
 
-**Ce que cela dit.** Une troisième fois, une méthode qui gagne en simulation (avec ou sans biais) échoue sur le réel : l'incohérence d'intensité basse fréquence n'était pas la seule cause, et la correction de biais ne suffit pas à rendre le gros-vers-fin utilisable. Il reste une propriété des données réelles absente du simulateur. Candidates, à tester une à une : variations d'intensité plus rapides que le champ polynomial (bandes de la séquence TRUFI, effets de B1), variations d'intensité d'une coupe à l'autre dans un stack (histoire de spin), différences de profil de coupe entre orientations, mouvement dans la coupe. Le gros-vers-fin reste expérimental et désactivé.
+**Ce que cela dit.** Une troisième fois, une méthode qui gagne en simulation (avec ou sans biais) échoue sur le réel : l'incohérence d'intensité basse fréquence n'était pas la seule cause, et la correction de biais ne suffit pas à rendre le gros-vers-fin utilisable. Il reste une propriété des données réelles absente du simulateur. Candidates, à tester une à une : variations d'intensité plus rapides que le champ polynomial (bandes de la séquence TRUFI, effets de B1), variations d'intensité d'une coupe à l'autre dans un stack (histoire de spin), différences de profil de coupe entre orientations, mouvement dans la coupe. Ce réglage (σ = 6) reste en échec sur le réel ; la section suivante en identifie la cause.
+
+## Un flou adapté aux données réelles : la portée de capture mesurée avec une référence de consensus
+
+**Un banc d'essai sur données réelles.** Pour un sujet calme, les poses de toutes les méthodes s'accordent à ~0,5 mm : on dispose d'une **référence de consensus**. Le diagnostic `diagnose_the_capture_range_on_real_data` perturbe ces poses par un mouvement rigide aléatoire indépendant par coupe (± *A* mm et ± *A* °), lance le recalage coupe-coupe depuis ces poses perturbées (stacks corrigés du biais, sans alignement par stack pour isoler le recalage par coupe) et mesure l'erreur par rapport à la référence. C'est la mesure de la portée de capture que la simulation ne pouvait pas donner (calme 2, part des coupes retrouvées à ≤ 1,5 mm) :
+
+| Amplitude *A* | 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| recalage fin seul | 100 % | 97 % | 86 % | 11 % | 1 % |
+| gros-vers-fin σ = 6 (2 niveaux) | 97 % | 90 % | 62 % | 4 % | 0 % |
+
+La portée réelle du recalage par coupe est d'environ **±2 mm**, contre ±4 mm en simulation (79-83 % à ±4 mm), et le flou σ = 6 la **réduit** à chaque amplitude (alors qu'il la portait à ±8 mm en simulation) : un flou de 6 pixels efface sur une image réelle, riche en détails (sillons), l'information qui guide le recalage. Partant de la référence (*A* = 0), le flou ne détruit pas la bonne solution (97 %, médiane 0,24 mm).
+
+**Balayage du flou à *A* = 3 mm** (1 niveau, 2 balayages sauf indication) :
+
+| Réglage | recalage fin seul | sans flou, +2 balayages (témoin) | σ = 0,5 | σ = 0,75 | **σ = 1** | σ = 1,5 | σ = 2 | σ = 3 |
+|---|---|---|---|---|---|---|---|---|
+| part ≤ 1,5 mm | 11 % | 20 % | 31 % | 46 % | **68 %** | 58 % | 46 % | 6 % |
+
+Le témoin sans flou (les mêmes balayages supplémentaires) donne 20 % : le gain du flou (68 %) est bien dû au flou, avec un optimum autour de 1 à 1,5 pixel. Avec 3 balayages : 72 % (σ = 1). À *A* = 4 mm : 13 % (σ = 1, 3 balayages, 1 niveau) et **37 % avec 2 niveaux** (σ = 1 puis 0,5) ; à *A* = 6 mm, 0 % partout. La portée réelle passe donc d'environ ±2 mm à ±3 mm bien couvert et ±4 mm en partie.
+
+**Adopté par défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5).**
+
+- **Réel, depuis l'en-tête, six sujets** (concordance aux intersections) : moyenne 0,797 → **0,811** (σ = 6 : 0,742), en hausse sur **les six sujets** : calmes +0,002 à +0,003, agité 1 +0,013, agité 3 +0,011, **agité 2 +0,051**.
+- **Accord des poses avec les autres méthodes** : neutre à mitigé. Mieux sur l'agité 2 (NeSVoR 3,8 → 3,2 mm, SVRTK 2,3 → 1,9 mm), inchangé sur l'agité 1 (NiftyMIC 0,7 mm), un peu moins bon sur l'agité 3 (NeSVoR 4,0 → 4,5 mm). La concordance est l'objectif que `s2s` optimise : le banc d'essai à référence de consensus est la preuve non circulaire, la concordance est un indice.
+- **Simulation (±4 mm, part ≤ 1,5 mm), défaut précédent → nouveau** : lisse avec biais 75 → 89 %, indépendant avec biais 79 → 82 %, lisse sans biais 83 → 88 %, indépendant sans biais 83 → 85 %. Aucune régression. À ±6 mm avec biais (lisse), 0 → 7 % (σ = 6 donnait 65 % en simulation, mais échoue sur le réel).
+- **Coût** : environ 25 % de temps de calcul en plus.
+
+**Ce que cela dit.** La quatrième occurrence de « le simulateur ne prédit pas le réel » a une cause identifiée : la portée de capture réelle est deux fois plus petite que celle du simulateur (le fantôme d'atlas est un tissu moyen, plus lisse que des images réelles). Le simulateur reste utile pour les régressions mais **le réglage du flou doit se faire sur le banc d'essai réel**. Il reste très en deçà des mouvements des sujets très agités (5-12 mm).
 
 ## Alignement par stack ou par paquets
 

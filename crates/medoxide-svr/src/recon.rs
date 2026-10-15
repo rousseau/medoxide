@@ -2961,7 +2961,7 @@ mod tests {
         let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
         // (a) coupe-coupe
         // tous les réglages sont NON défaut : un réglage ignoré par `reconstruct` ferait différer la sortie de l'appel direct
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_bias_rounds: 0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
@@ -3462,6 +3462,54 @@ mod tests {
         let q_hub = ligne_qualite("Huber", &c, &x, it, res, t);
         println!("gain de Huber sur Tikhonov : PSNR {:+.2} dB (critère ≥ 0,5), NCC {:+.4}, netteté {:.3} contre {:.3}", q_hub.1 - q_tik.1, q_hub.0 - q_tik.0, q_hub.2, q_tik.2);
         assert!(q_hub.1 - q_tik.1 >= 0.5, "gain de PSNR {}", q_hub.1 - q_tik.1);
+    }
+
+    /// DIAGNOSTIC (sans critère) de la PORTÉE DE CAPTURE sur DONNÉES RÉELLES, avec une référence de consensus : les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) sont corrigés du biais d'intensité aux poses de référence (`MEDOXIDE_POSES`, fichier de `--poses` d'un sujet bien recalé),
+    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence),
+    /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
+    /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
+    #[test]
+    #[ignore = "diagnostic sur données réelles locales"]
+    fn diagnose_the_capture_range_on_real_data() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::pipeline::correct_stacks;
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let tous = stacks_reels();
+        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let amplitudes: Vec<f64> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "0,4".into()).split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
+        let device = burn::tensor::Device::flex().autodiff();
+        let fin = S2sConfig { block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+        // MEDOXIDE_VARIANTES : réglages à comparer, séparés par des points-virgules : `fin` (recalage fin seul) ou `σ,balayages,niveaux` du gros-vers-fin (défaut : `fin;6,2,2`)
+        let variantes: Vec<(String, S2sConfig)> = std::env::var("MEDOXIDE_VARIANTES")
+            .unwrap_or_else(|_| "fin;6,2,2".into())
+            .split(';')
+            .map(|v| {
+                let v = v.trim();
+                if v == "fin" {
+                    ("fin".to_string(), fin)
+                } else {
+                    let c: Vec<&str> = v.split(',').collect();
+                    (format!("gros({v})"), S2sConfig { coarse_sigma_pixels: c[0].parse().unwrap(), coarse_sweeps: c[1].parse().unwrap(), coarse_levels: c[2].parse().unwrap(), ..fin })
+                }
+            })
+            .collect();
+        for a in amplitudes {
+            let perturbation = poses_aleatoires(&tous, a, a, 7);
+            let mut depart = SlicePoses::identity(&tous);
+            for (si, stack) in tous.iter().enumerate() {
+                for k in 0..stack.dim().2 {
+                    depart.set(si, k, perturbation.get(si, k) * reference.get(si, k));
+                }
+            }
+            for (nom, config) in &variantes {
+                let rapport = register_slices_s2s(&corriges, &depart, config, &device).unwrap();
+                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&tous, &rapport.poses, &reference).into_iter().filter(|v| v.is_finite()).collect();
+                e.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                let part = e.iter().filter(|&&v| v <= 1.5).count() as f64 / e.len() as f64;
+                println!("CAPTURE {a} {nom} {:.2} {:.2} {:.2}", part, e[e.len() / 2], e[(0.9 * (e.len() - 1) as f64) as usize]);
+            }
+        }
     }
 
     /// DIAGNOSTIC (sans critère) des résidus par coupe sur DONNÉES RÉELLES : pour chaque coupe de tous les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`), simule la coupe à sa pose (`MEDOXIDE_POSES`, fichier de `--poses`)
@@ -3989,7 +4037,7 @@ mod tests {
         let t = Temp::new("pipeline_biais");
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, ..Default::default() };
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, ..Default::default() };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let s2s = crate::s2s::S2sConfig { sweeps: 1, block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() };
         let direct = |alternances: usize, seuil: f64| {
@@ -4071,6 +4119,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_levels: 0, ..deux }), vec![(6.0, 2, false), (0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sweeps: 0, ..deux }), vec![(0.0, 3, true)]);
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
+        // défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5), puis 3 balayages nets
+        assert_eq!(sweep_schedule(&s2s_config(&ReconstructionConfig::default())), vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]);
         let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, ..Default::default() };
         let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
