@@ -199,7 +199,7 @@ La portée de capture d'un recalage local parti de l'en-tête est donc d'environ
 
 **5. Une brique qui l'atténue : le passe-haut des profils.** Avant la corrélation, on soustrait à chaque profil son lissage gaussien (25 mm, restreint au masque) : les variations lentes d'intensité disparaissent. En simulation avec biais, ±4 : 83 % (indépendant, 65 % sans) et 59 % (lisse, **3 % sans**), et sans biais le résultat est inchangé (79 % et 73 %). Sur données réelles, le juge à quatre stacks passe de 0,818 à **0,833** (+0,015, et le repli qui échouait passe de 0,735 à 0,776) ; à deux stacks sur les six sujets, +0,002 en moyenne (5 sujets sur 6 positifs, le pire −0,007). Il est donc actif par défaut (`--s2s-highpass-mm 25`), pour environ 15 à 25 % de temps en plus. **Il ne suffit pas à rendre la passe grossière utilisable** : avec le passe-haut, la passe grossière reste mauvaise sur le réel (juge à quatre stacks 0,706, contre 0,833 pour le passe-haut seul) et en simulation avec biais (±6 : 4 %).
 
-**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. Les mesures suivantes ([alignement par stack](#alignement-par-stack-ou-par-paquets), [comparaison avec NiftyMIC](#comparaison-avec-niftymic)) montrent que la portée est dépassée pour les **décalages de stack** (jusqu'à 8-10 mm en simulation) mais pas pour le mouvement **par coupe** intra-stack de l'agité 3, où même NiftyMIC rejette les coupes. L'**estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut) a été ajoutée depuis ([section](#correction-du-champ-de-biais-par-stack)) ; la brique suivante est le retour à la passe grossière. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
+**Ce que cela dit.** Pour les sujets très agités, le mouvement dépasse la portée des recalages locaux, et la voie évidente pour l'élargir est bloquée par les incohérences d'intensité entre stacks. Les mesures suivantes ([alignement par stack](#alignement-par-stack-ou-par-paquets), [comparaison avec NiftyMIC](#comparaison-avec-niftymic)) montrent que la portée est dépassée pour les **décalages de stack** (jusqu'à 8-10 mm en simulation) mais pas pour le mouvement **par coupe** intra-stack de l'agité 3, où même NiftyMIC rejette les coupes. L'**estimation explicite du champ de biais de chaque stack** (SVRTK la fait ; NeSVoR l'a désactivée par défaut) a été ajoutée depuis ([section](#correction-du-champ-de-biais-par-stack)) ; le retour à la passe grossière a été essayé ([section](#retour-au-gros-vers-fin-après-la-correction-de-biais)) : il réussit en simulation et échoue encore sur le réel. Tout ceci repose sur un simulateur dont le biais est un modèle simple (ondes planes de 100 à 200 mm) : il explique qualitativement l'échec, il ne le prouve pas.
 
 ## Combien de coupes sont mal recalées ?
 
@@ -218,6 +218,32 @@ Mesuré sur 9 jeux simulés avec vérité connue (72 à 74 coupes chacun ; part 
 - **Critère 2 : non atteint.** Avec le meilleur indicateur, 3 jeux sur 9 sont hors tolérance (30 coupes vraies mal recalées, 64 prédites ; 19 contre 10 ; 15 contre 10) : le niveau de concordance dépend du sujet (biais d'intensité, anatomie). **Le nombre n'est pas estimable de façon fiable ; le régime l'est.** Concordance moyenne ≥ 0,8 : au plus un quart des coupes mal recalées ; ≤ 0,45 : toutes.
 - **Sur les six sujets réels**, concordance moyenne après `s2s` : 0,85 à 0,89 pour les trois calmes (0 à 3 % des coupes sous 0,65), 0,76 pour l'agité 1 (12 %), 0,60 pour l'agité 2 (54 %) et 0,57 pour l'agité 3 (79 %) : les deux derniers sont, par ce critère, dans un régime où une grande partie des coupes est mal recalée.
 - **Une estimation indépendante** : NiftyMIC rejette les coupes de corrélation avec son modèle < 0,5, puis 0,65, puis 0,8 ([comparaison](#comparaison-avec-niftymic)). Il en rejette 0 sur 72 pour le sujet calme 1 (nous : 3 % sous 0,65), 12 % pour l'agité 1 (nous : 12 % ; l'AUC de notre concordance pour prédire son rejet est de 0,78), 80 % pour l'agité 2 (nous : 54 %) et 44 % pour l'agité 3 (nous : 79 %). Les deux estimations s'accordent sur le régime, pas sur le nombre.
+
+## Retour au gros-vers-fin après la correction de biais
+
+Le gros-vers-fin (`--s2s-coarse-sigma 6 --s2s-coarse-sweeps 2 --s2s-coarse-levels 2`) avait étendu la portée de capture en simulation propre mais s'était effondré avec un biais d'intensité, puis dégradé les données réelles. Hypothèse : le biais en était la cause ; il est maintenant corrigé. Critères fixés avant : à ±6 mm avec biais de 30 %, au moins 50 % des coupes à ≤ 1,5 mm (0 à 16 % avec le défaut actuel) ; sans biais, aucune baisse de plus de 5 points ; sur le réel, la concordance ne doit baisser de plus de 0,01 sur aucun sujet.
+
+**Simulation : critères atteints.** Part des coupes à ≤ 1,5 mm, à ±6 mm, défaut actuel (alignement par stack et correction de biais) puis avec le gros-vers-fin :
+
+| Jeu | défaut | + gros vers fin |
+|---|---|---|
+| lisse, biais 30 % | 0 % | **65 %** |
+| indépendant, biais 30 % | 16 % | **68 %** |
+| lisse, sans biais | 0 % | 40 % |
+| indépendant, sans biais | 0 % | 68 % |
+
+Le 90ᵉ centile reste élevé (14-16 mm) : une part des coupes échoue franchement. Au passage, une erreur de méthode a été corrigée : une première évaluation du défaut avait réutilisé d'anciens fichiers de sortie (le script réutilise les fichiers existants) et donnait 1 % ; la mesure directe donne 0 %.
+
+**Réel : critère manqué, sur les six sujets.** Concordance aux intersections (toutes paires, images brutes) :
+
+| | calme 1 | calme 2 | calme 3 | agité 1 | agité 2 | agité 3 | moyenne |
+|---|---|---|---|---|---|---|---|
+| défaut | 0,8764 | 0,9117 | 0,8985 | 0,7960 | 0,6922 | 0,5633 | 0,7897 |
+| + gros vers fin | 0,8746 | 0,8982 | 0,8425 | 0,7002 | 0,6392 | 0,4909 | 0,7409 |
+
+Baisse sur les six sujets, de −0,002 à **−0,096** (agité 1). L'accord des poses le confirme : sur l'agité 1, le gros-vers-fin s'écarte de NiftyMIC, SVRTK et NeSVoR (écart médian 1,8 à 2,3 mm, 29 à 33 % des coupes à plus de 3 mm) alors que le défaut s'en écarte de 0,7 à 1,3 mm (4 à 11 %).
+
+**Ce que cela dit.** Une troisième fois, une méthode qui gagne en simulation (avec ou sans biais) échoue sur le réel : l'incohérence d'intensité basse fréquence n'était pas la seule cause, et la correction de biais ne suffit pas à rendre le gros-vers-fin utilisable. Il reste une propriété des données réelles absente du simulateur. Candidates, à tester une à une : variations d'intensité plus rapides que le champ polynomial (bandes de la séquence TRUFI, effets de B1), variations d'intensité d'une coupe à l'autre dans un stack (histoire de spin), différences de profil de coupe entre orientations, mouvement dans la coupe. Le gros-vers-fin reste expérimental et désactivé.
 
 ## Alignement par stack ou par paquets
 

@@ -1439,4 +1439,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-15 — Quand le simulateur réussit et pas le réel, pour la troisième fois
+
+- **Quoi (méthode)** : on a refait l'essai le plus propre possible : ajouter au simulateur la propriété réelle qu'on soupçonnait (biais d'intensité), la corriger, et rejouer la méthode qui échouait (gros vers fin). Simulation : 0 → 65 % et 16 → 68 % à ±6 mm ; réel : concordance en baisse sur 6 sujets sur 6 (−0,05 en moyenne, −0,096 au pire). Le biais n'explique donc pas à lui seul l'échec ; il en reste au moins une autre, absente du simulateur. Sont testables une à une : variations d'intensité plus rapides que le champ, variations d'une coupe à l'autre, profil de coupe selon l'orientation, mouvement dans la coupe. Règle conservée : on ne décide qu'avec une mesure sur le réel, et on confirme une baisse de concordance par un second indicateur indépendant (accord avec d'autres méthodes).
+- **Quoi (outillage)** : un script qui **réutilise les fichiers existants** peut rendre un ancien résultat sous un nouveau nom (1 % rendu à la place de 0 % pour la même configuration) ; vérifier par une mesure directe quand un résultat est identique au chiffre près à un résultat antérieur ; reconstruire le binaire après un changement de défaut (les tests compilent leur propre version).
+- **Où** : `book/src/validation.md` (« Retour au gros-vers-fin après la correction de biais »).
+
+---
+
 *(à compléter à la prochaine étape)*
