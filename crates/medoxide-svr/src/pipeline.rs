@@ -97,6 +97,8 @@ pub struct ReconstructionConfig {
     pub s2s_block_sweeps: usize,
     /// Coupe-coupe : nombre d'alternances « estimer le champ de biais de chaque stack, corriger les stacks, recaler » (voir [`crate::bias`]) ; 0 : aucune correction de biais. Le volume est reconstruit à partir des stacks corrigés aux poses finales. Défaut 1 : en simulation avec un biais de 30 % (±4 mm), part des coupes à ≤ 1,5 mm de 3 → 75 % (mouvement lisse) et 71 → 79 % (indépendant) avec l'alignement par stack, sans changement sans biais (garde `s2s_bias_min_reduction`) ; sur données réelles, concordance aux intersections inchangée à 0,01 près sur 6 sujets et décalages de stack de l'alignement par blocs ramenés au consensus de NiftyMIC et NeSVoR sur le sujet le plus agité.
     pub s2s_bias_rounds: usize,
+    /// Coupe-coupe : poids λ (1/mm²) de la régularisation temporelle (pénalité sur l'écart entre le mouvement d'une coupe et celui de ses voisines directes du stack, voir [`crate::s2s::IntersectionProblem::with_temporal_prior`]) ; 0 : aucune.
+    pub s2s_temporal_weight: f64,
     /// Coupe-coupe : réduction relative minimale de l'incohérence d'intensité entre stacks (`1 − après / avant`, voir [`BiasFields::inconsistency_reduction`]) pour que la correction de biais estimée soit appliquée ; en deçà, le champ ne fait que s'ajuster au bruit d'anatomie (un mesuré : 0,4 % sans biais, 35 % avec un biais de 30 %) et les stacks restent inchangés. 0 : toujours appliquer.
     pub s2s_bias_min_reduction: f64,
     /// Coupe-coupe : demi-étendue (mm) de la recherche exhaustive d'un bloc (translations puis rotations en mm équivalents) ; 0 : pas de recherche.
@@ -142,6 +144,7 @@ impl Default for ReconstructionConfig {
             s2s_block_levels: 1,
             s2s_block_sweeps: 2,
             s2s_bias_rounds: 1,
+            s2s_temporal_weight: 0.0,
             s2s_bias_min_reduction: 0.1,
             s2s_block_search_mm: 12.0,
             s2v_cycles: 6,
@@ -317,6 +320,7 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         block_levels: config.s2s_block_levels,
         block_sweeps: config.s2s_block_sweeps,
         block_search_mm: config.s2s_block_search_mm,
+        temporal_weight: config.s2s_temporal_weight,
         intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() },
         ..Default::default()
     }

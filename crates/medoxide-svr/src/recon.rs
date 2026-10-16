@@ -4498,8 +4498,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
         // défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5), puis 3 balayages nets
         assert_eq!(sweep_schedule(&s2s_config(&ReconstructionConfig::default())), vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 
