@@ -1450,4 +1450,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 
 ---
 
+## 2026-10-16 — Vérifier les réglages d'un outil de comparaison avant de conclure qu'il est mauvais
+
+- **Quoi (méthode)** : les volumes NiftyMIC de la figure semblaient mauvais (bandes brillantes, doublons) et j'avais conclu à des « zones non recalées ». La cause était un réglage par défaut : `use-masks-srr = 0` (les masques ne servent qu'au recalage, la reconstruction finale utilise les images entières). Lire le fichier de configuration que l'outil écrit lui-même a suffi à le voir. Règle : quand un outil externe est mauvais, lire sa configuration complète et vérifier que la même entrée (ici les mêmes masques fetalBET) est réellement utilisée à toutes les étapes, avant d'en tirer une conclusion sur sa qualité.
+- **Quoi (outillage)** : plusieurs conteneurs émulés en parallèle sont tués faute de mémoire sans message d'erreur (le journal s'arrête au milieu d'une étape) : les lancer l'un après l'autre.
+- **Où** : `scripts/figure_reconstructions_tous.py` (masque commun, recalage avec métrique masquée), `book/src/validation.md` (« Comparaison avec NiftyMIC »).
+
+---
+
 *(à compléter à la prochaine étape)*

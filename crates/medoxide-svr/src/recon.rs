@@ -3486,7 +3486,7 @@ mod tests {
             .split(';')
             .map(|v| {
                 let v = v.trim();
-                // forme à jetons séparés par `+` : `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (recherche multi-départs de bloc), `fin` (rien)
+                // forme à jetons séparés par `+` : `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (recherche multi-départs de bloc), `t=poids` (régularisation temporelle), `fin` (rien)
                 if v.contains('=') {
                     let mut config = fin;
                     for jeton in v.split('+') {
@@ -3497,6 +3497,7 @@ mod tests {
                             "b" => (config.block_levels, config.block_search_mm) = (x[0] as usize, x[1]),
                             "bs" => config.block_sweeps = x[0] as usize,
                             "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
+                            "t" => config.temporal_weight = x[0],
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
                     }
@@ -3969,6 +3970,68 @@ mod tests {
         assert!(ecart(&sans, &active) > 1e-6, "(b) la fiabilité n'a aucun effet : {}", ecart(&sans, &active));
         let inverse = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.99, reliability_high: 0.95, ..base }, &device).unwrap().poses;
         assert_eq!(ecart(&sans, &inverse), 0.0, "(c)");
+    }
+
+    /// Régularisation temporelle (blobs, coupe 5 du stack coronal) : (a) sans a priori ou avec un poids nul, le coût est inchangé (exactement) ; (b) pour des paramètres de translation seule `t` (rotation nulle), le coût avec a priori vaut le coût sans a priori MOINS `λ · moyenne |P + t − Q|²`, calculé à la main (valeur exacte, à 1e-4 près en f32) ;
+    /// (c) l'écart de coût entre deux translations vaut la différence des pénalités plus celle des concordances : en particulier, avec `λ` énorme, la translation qui amène les points sur leurs cibles a un meilleur coût que la translation nulle ; (d) le dernier a priori posé remplace le précédent.
+    #[test]
+    fn the_temporal_prior_is_an_exact_penalty() {
+        use crate::s2s::{IntersectionConfig, IntersectionProblem, SliceAtlas};
+        let t = Temp::new("a_priori_temporel");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 5);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let depart = SlicePoses::identity(&stacks);
+        let (si, k) = (1usize, 5usize);
+        let prep = crate::align::preparer_coupe(&stacks[si], k, *depart.get(si, k)).unwrap();
+        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
+        let construire = || IntersectionProblem::build(&atlas, &stacks, &depart, si, k, &IntersectionConfig::default(), &device).unwrap();
+        let valeur = |p: &IntersectionProblem, params: [f32; 6]| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats(params, &device), pivot.clone(), prep.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let points: Vec<Vector3<f64>> = prep.points.iter().step_by((prep.points.len() / 6).max(1)).copied().collect();
+        let cibles: Vec<Vector3<f64>> = points.iter().enumerate().map(|(i, p)| p + Vector3::new(2.0, -1.0, 0.5 * i as f64)).collect();
+        let penalite = |t: [f64; 3], poids: f64| poids * points.iter().zip(&cibles).map(|(p, q)| (p + Vector3::from(t) - q).norm_squared()).sum::<f64>() / points.len() as f64;
+        let base = construire();
+        for params in [[0.0f32; 6], [0.0, 0.0, 0.0, 1.5, -0.5, 2.0], [0.0, 0.0, 0.0, 2.0, -1.0, 0.0]] {
+            let v0 = valeur(&base, params);
+            // (a)
+            assert_eq!(valeur(&construire().with_temporal_prior(&points, &cibles, 0.0), params), v0, "(a) poids nul");
+            // (b)
+            let avec = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05), params);
+            let attendu = v0 - penalite([params[3] as f64, params[4] as f64, params[5] as f64], 0.05);
+            assert!((avec - attendu).abs() < 1e-4, "(b) {avec} contre {attendu}");
+            // (d)
+            let remplace = valeur(&construire().with_temporal_prior(&points, &cibles, 5.0).with_temporal_prior(&points, &cibles, 0.05), params);
+            assert!((remplace - avec).abs() < 1e-6, "(d)");
+        }
+        // (c)
+        let enorme = construire().with_temporal_prior(&points, &cibles, 1000.0);
+        let vers_cible = valeur(&enorme, [0.0, 0.0, 0.0, 2.0, -1.0, 0.0]);
+        assert!(vers_cible > valeur(&enorme, [0.0; 6]), "(c) la translation vers les cibles doit être préférée : {vers_cible}");
+    }
+
+    /// Câblage de la régularisation temporelle dans le recalage coupe-coupe (blobs) : (a) poids nul (défaut) : poses EXACTEMENT identiques à celles obtenues sans le champ ; (b) poids actif (0,05) : les poses diffèrent d'au moins 1e-6 de celles sans régularisation ;
+    /// (c) un poids énorme tire chaque coupe vers le mouvement de ses voisines : l'écart de pose entre coupes voisines d'un même stack, mesuré après le recalage, est plus petit qu'avec un poids nul.
+    #[test]
+    fn the_temporal_regularisation_is_wired_into_the_s2s_sweeps() {
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let t = Temp::new("lissage_cablage");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let rugosite = |p: &SlicePoses| -> f64 { stacks.iter().enumerate().flat_map(|(si, s)| (1..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - p.get(si, k - 1)).abs().max()).sum::<f64>() };
+        let base = S2sConfig { sweeps: 2, ..Default::default() };
+        let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
+        let nul = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.0, temporal_points: 8, ..base }, &device).unwrap().poses;
+        assert_eq!(ecart(&sans, &nul), 0.0, "(a)");
+        let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.05, ..base }, &device).unwrap().poses;
+        assert!(ecart(&sans, &actif) > 1e-6, "(b) la régularisation n'a aucun effet");
+        let enorme = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 50.0, ..base }, &device).unwrap().poses;
+        println!("rugosité : sans {:.3}, poids 0,05 {:.3}, poids 50 {:.3}", rugosite(&sans), rugosite(&actif), rugosite(&enorme));
+        assert!(rugosite(&enorme) < rugosite(&sans), "(c) rugosité {} contre {}", rugosite(&enorme), rugosite(&sans));
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier

@@ -9,7 +9,7 @@ use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
 use ndarray::{Array2, ArrayView2};
 
-use crate::diff::{ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
+use crate::diff::{apply_pose, ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
 use crate::diff::pose_to_matrix;
 use crate::recon::SlicePoses;
@@ -286,6 +286,8 @@ pub struct IntersectionProblem {
     atlas_masks: Tensor<1>,
     /// Matrice du lissage gaussien du passe-haut des profils (`None` : pas de passe-haut).
     highpass: Option<Tensor<2>>,
+    /// A priori de lissage temporel : `(points [P, 3] de la coupe à sa pose courante, positions cibles [P, 3] déduites du mouvement de ses voisines, poids λ)` ; voir [`IntersectionProblem::with_temporal_prior`].
+    temporal_prior: Option<(Tensor<2>, Tensor<2>, f64)>,
     /// Poids de fiabilité de chaque partenaire (`[J]`) : `None` = moyenne simple ; `Some` = moyenne pondérée des corrélations (voir [`IntersectionProblem::with_partner_weights`]).
     partner_weights: Option<Tensor<1>>,
     /// Indices (stack, coupe) des partenaires, dans l'ordre des paires.
@@ -388,6 +390,7 @@ impl IntersectionProblem {
             atlas_masks: atlas.masks.clone(),
             highpass: (config.highpass_sigma_mm > 0.0).then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
             partner_weights: None,
+            temporal_prior: None,
             partners: partenaires.iter().map(|(s, j, _)| (*s, *j)).collect(),
         })
     }
@@ -401,6 +404,16 @@ impl IntersectionProblem {
         self
     }
 
+    /// **Régularisation temporelle** : les coupes d'un stack étant acquises l'une après l'autre, deux coupes voisines ont presque le même mouvement. Ajoute au coût une pénalité `λ · moyenne |P' − Q|²` (mm²) où `P'` sont les `points` de la coupe (à sa pose courante) après la correction et `Q` les `targets` : les positions
+    /// que leur donnerait le mouvement des coupes voisines. Le coût devient `concordance − λ · écart quadratique moyen` (à maximiser) : une coupe mal placée est tirée vers ses voisines, bien placées. `points` et `targets` ont la même longueur ; `weight` = 0 ne change rien.
+    pub fn with_temporal_prior(mut self, points: &[Vector3<f64>], targets: &[Vector3<f64>], weight: f64) -> IntersectionProblem {
+        assert_eq!(points.len(), targets.len(), "autant de cibles que de points");
+        let device = self.t_grid.device();
+        let tenseur = |v: &[Vector3<f64>]| Tensor::<2>::from_floats(TensorData::new(v.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect::<Vec<_>>(), [v.len(), 3]), &device);
+        self.temporal_prior = Some((tenseur(points), tenseur(targets), weight));
+        self
+    }
+
     /// Nombre de paires (partenaires gardés).
     pub fn n_pairs(&self) -> usize {
         self.n_pairs
@@ -411,6 +424,19 @@ impl IntersectionProblem {
     /// Une paire est valide si au moins `min_points` points sont dans les deux coupes et dans leurs masques (calculé sans dérivée). Les positions des points dépendent de `params` : le gradient existe
     /// partout où l'échantillonnage bilinéaire est différentiable.
     pub fn cost(&self, params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
+        let penalite = self.temporal_prior.as_ref().map(|(points, cibles, poids)| {
+            let ecart = apply_pose(points.clone(), pivot.clone(), params.clone(), rotation_scale_mm) - cibles.clone();
+            (ecart.clone() * ecart).sum().reshape([1]) * (*poids / points.dims()[0] as f64)
+        });
+        let concordance = self.cost_concordance(params, pivot, rotation_scale_mm);
+        match penalite {
+            Some(p) => concordance - p,
+            None => concordance,
+        }
+    }
+
+    /// La concordance seule (moyenne, éventuellement pondérée, des corrélations des paires), sans a priori temporel.
+    fn cost_concordance(&self, params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
         let (j, t) = (self.n_pairs, self.t_grid.dims()[0]);
         let phi = params.clone().narrow(0, 0, 3);
         let tr = params.narrow(0, 3, 3).reshape([1, 3]);
@@ -586,6 +612,10 @@ pub struct S2sConfig {
     pub block_multistart_deg: f64,
     /// Nombre de départs raffinés par la recherche multi-départs de bloc.
     pub block_multistart_keep: usize,
+    /// Régularisation temporelle (voir [`IntersectionProblem::with_temporal_prior`]) : poids λ (en 1/mm²) de la pénalité sur l'écart entre le mouvement d'une coupe et celui de ses voisines directes du stack (la coupe précédente et la suivante, quand elles sont recalables) ; 0 : désactivée.
+    pub temporal_weight: f64,
+    /// Nombre de points de la coupe (pixels de masque régulièrement espacés) sur lesquels l'écart de mouvement est mesuré.
+    pub temporal_points: usize,
     /// Fiabilité des partenaires : la concordance d'une coupe est la moyenne PONDÉRÉE des corrélations de ses paires, le poids d'un partenaire étant une rampe lisse de sa dernière concordance connue entre `reliability_low` (poids `reliability_floor`) et `reliability_high` (poids 1)
     /// (voir [`reliability_weight`]) ; la concordance d'une coupe est mise à jour pendant les balayages (1 avant toute information). Inactif si `reliability_high <= reliability_low` (moyenne simple).
     pub reliability_low: f64,
@@ -606,7 +636,7 @@ pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) ->
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
     }
 }
 
@@ -865,6 +895,24 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                 let courante = *courantes.get(si, k);
                 let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
                 let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+                let probleme = if config.temporal_weight > 0.0 {
+                    // positions que donnerait à 64 pixels de masque de la coupe le mouvement relatif de ses voisines directes (précédente et suivante du stack, recalables) ; moyenne sur les voisines
+                    let voisines: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
+                        .into_iter()
+                        .filter(|&kv| kv < stacks[si].dim().2 && preparer_coupe(&stacks[si], kv, *courantes.get(si, kv)).is_some())
+                        .map(|kv| courantes.get(si, kv) * courante.try_inverse().expect("une pose est inversible"))
+                        .collect();
+                    if voisines.is_empty() {
+                        probleme
+                    } else {
+                        let pas = (preparee.points.len() / config.temporal_points.max(1)).max(1);
+                        let points: Vec<Vector3<f64>> = preparee.points.iter().step_by(pas).copied().collect();
+                        let cibles: Vec<Vector3<f64>> = points.iter().map(|p| voisines.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / voisines.len() as f64).collect();
+                        probleme.with_temporal_prior(&points, &cibles, config.temporal_weight)
+                    }
+                } else {
+                    probleme
+                };
                 let probleme = if config.reliability_high > config.reliability_low {
                     probleme.with_partner_weights(|sj, kj| reliability_weight(scores[decalages[sj] + kj], config.reliability_low, config.reliability_high, config.reliability_floor))
                 } else {
