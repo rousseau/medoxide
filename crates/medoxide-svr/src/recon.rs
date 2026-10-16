@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// DIAGNOSTIC (sans critère) de la PORTÉE DE CAPTURE sur DONNÉES RÉELLES, avec une référence de consensus : les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) sont corrigés du biais d'intensité aux poses de référence (`MEDOXIDE_POSES`, fichier de `--poses` d'un sujet bien recalé),
-    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence ; `MEDOXIDE_PERTURBATION` = `independante` par défaut ou `lisse`, une marche autorégressive le long du stack),
+    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence ; `MEDOXIDE_PERTURBATION` = `independante` par défaut, `lisse` (marche autorégressive le long du stack) ou `stack` (un décalage rigide par stack entier, autour de son barycentre cérébral)),
     /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
     /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
     #[test]
@@ -3486,6 +3486,22 @@ mod tests {
             .split(';')
             .map(|v| {
                 let v = v.trim();
+                // forme à jetons séparés par `+` : `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (recherche multi-départs de bloc), `fin` (rien)
+                if v.contains('=') {
+                    let mut config = fin;
+                    for jeton in v.split('+') {
+                        let Some((nom, valeurs)) = jeton.split_once('=') else { continue };
+                        let x: Vec<f64> = valeurs.split(',').map(|y| y.parse().unwrap()).collect();
+                        match nom {
+                            "c" => (config.coarse_sigma_pixels, config.coarse_sweeps, config.coarse_levels) = (x[0], x[1] as usize, x[2] as usize),
+                            "b" => (config.block_levels, config.block_search_mm) = (x[0] as usize, x[1]),
+                            "bs" => config.block_sweeps = x[0] as usize,
+                            "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
+                            _ => panic!("jeton de variante inconnu : {nom}"),
+                        }
+                    }
+                    return (v.to_string(), config);
+                }
                 // suffixe optionnel `:bas,haut` : fiabilité des partenaires (voir `S2sConfig::reliability_low`)
                 let (base, fiabilite) = match v.split_once(':') {
                     Some((b, f)) => {
@@ -3506,12 +3522,20 @@ mod tests {
         for a in amplitudes {
             let graine: u64 = std::env::var("MEDOXIDE_GRAINE").map_or(7, |v| v.trim().parse().unwrap());
             // MEDOXIDE_PERTURBATION : `independante` (défaut) ou `lisse` (marche autorégressive le long du stack, coefficient 0,9)
-            let perturbation = if std::env::var("MEDOXIDE_PERTURBATION").map_or(false, |v| v.trim() == "lisse") { poses_lisses(&tous, a, a, graine, 0.9) } else { poses_aleatoires(&tous, a, a, graine) };
+            let perturbation = match std::env::var("MEDOXIDE_PERTURBATION").unwrap_or_default().trim() {
+                "lisse" => poses_lisses(&tous, a, a, graine, 0.9),
+                "stack" => poses_par_stack_reel(&tous, a, a, graine),
+                _ => poses_aleatoires(&tous, a, a, graine),
+            };
             let mut depart = SlicePoses::identity(&tous);
             for (si, stack) in tous.iter().enumerate() {
                 for k in 0..stack.dim().2 {
                     depart.set(si, k, perturbation.get(si, k) * reference.get(si, k));
                 }
+                // amplitude de la perturbation de la coupe du milieu : angle de rotation (degrés) et norme de la translation (mm)
+                let m = perturbation.get(si, stack.dim().2 / 2);
+                let angle = ((m.fixed_view::<3, 3>(0, 0).trace() - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+                println!("PERTURBATION stack {si} : rotation {angle:.1}° ; translation {:.1} mm", m.fixed_view::<3, 1>(0, 3).norm());
             }
             for (nom, config) in &variantes {
                 let rapport = register_slices_s2s(&corriges, &depart, config, &device).unwrap();
@@ -3966,6 +3990,46 @@ mod tests {
             assert_eq!(reliability_weight(score, 0.7, 0.7, floor), 1.0);
             assert_eq!(reliability_weight(score, 0.8, 0.5, floor), 1.0);
         }
+    }
+
+    /// Recherche multi-départs d'un bloc (blobs, stack coronal décalé de 3 mm en x, rotation fixée à zéro dans le problème) : (a) `block_cost_subset` d'une coupe sur 3 vaut la moyenne des concordances individuelles de ces coupes, et celle d'une coupe sur 1 est le coût du bloc ; (b) la recherche rend un historique `[zéro, final]` avec
+    /// un coût final au moins égal à celui du zéro (elle ne dégrade jamais) et des paramètres finis ; (c) elle retrouve un décalage de 3 mm : la concordance gagne au moins 0,05 et la translation x estimée est à 0,5 mm de 3 (mesuré : 0,832 → 0,899, 3,06 mm) ; (d) avec `keep = 0` aucun départ n'est raffiné : paramètres nuls et historique `[zéro, zéro]`.
+    #[test]
+    fn the_block_multistart_never_degrades_and_recovers_a_shift() {
+        use crate::diff::RegistrationConfig;
+        use crate::s2s::register_block_multistart;
+        let t = Temp::new("blocs_multidepart");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let mut vraies = SlicePoses::identity(&modeles);
+        for k in 0..12 {
+            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()));
+        }
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let (problemes, pivot, _, echelle) = problemes_de_bloc(&stacks, &SlicePoses::identity(&stacks), 1, &device);
+        let config = RegistrationConfig { learning_rate: 0.3, iterations: 60, lr_decay: 0.97, initial: [0.0; 6] };
+        // (a)
+        let individuelles: Vec<f64> = problemes.iter().map(|p| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats([0.0_f32; 6], &device), pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0])).collect();
+        let attendu_3 = individuelles.iter().step_by(3).sum::<f64>() / individuelles.iter().step_by(3).count() as f64;
+        let attendu_1 = individuelles.iter().sum::<f64>() / individuelles.len() as f64;
+        let r0 = register_block_multistart(&problemes, pivot.clone(), echelle, config, &[0.0], 3, 0, 1, 1.0);
+        assert!((r0.ncc_history[0] - attendu_1).abs() < 1e-5, "(a) zéro : {} contre {attendu_1}", r0.ncc_history[0]);
+        let zero = burn::tensor::Tensor::<1>::from_floats([0.0_f32; 6], &device);
+        let sous_ensemble = f64::from(crate::s2s::block_cost_subset(&problemes, 3, zero.clone(), pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let plein = f64::from(crate::s2s::block_cost_subset(&problemes, 1, zero, pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        assert!((sous_ensemble - attendu_3).abs() < 1e-5, "(a) une coupe sur 3 : {sous_ensemble} contre {attendu_3}");
+        assert!((plein - attendu_1).abs() < 1e-5, "(a) bloc entier : {plein} contre {attendu_1}");
+        // (d)
+        assert_eq!(r0.params, [0.0; 6], "(d)");
+        assert_eq!(r0.ncc_history[0], r0.ncc_history[1], "(d)");
+        // (b) et (c)
+        let r = register_block_multistart(&problemes, pivot, echelle, config, &[-4.0, 0.0, 4.0], 3, 2, 12, 1.0);
+        println!("multi-départs : concordance {:.3} -> {:.3}, paramètres {:.2?}", r.ncc_history[0], r.ncc_history[1], r.params);
+        assert!(r.ncc_history[1] >= r.ncc_history[0], "(b)");
+        assert!(r.params.iter().all(|v| v.is_finite()), "(b)");
+        assert!(r.ncc_history[1] - r.ncc_history[0] >= 0.05, "(c) gain de concordance {}", r.ncc_history[1] - r.ncc_history[0]);
+        assert!((r.params[3] - 3.0).abs() < 0.5, "(c) translation x estimée {}", r.params[3]);
     }
 
     /// Maxima locaux d'une grille de candidats (valeurs exactes) : grille 3 × 3 × 3 de concordance 0, avec deux pics (au coin `(0,0,0)` : 0,9 ; au centre : 0,7), un plateau de deux points égaux à 0,5 en `(2,2,1)` et `(2,2,2)` (jamais un maximum : l'inégalité est stricte) ; les maxima sont `(0,0,0)` puis le centre, triés par concordance décroissante ;
@@ -5374,6 +5438,22 @@ mod tests {
     }
 
     /// Lit un fichier de poses (stack, coupe, 16 valeurs en ordre colonne) pour des stacks donnés ; les coupes absentes gardent l'identité.
+    /// Un mouvement rigide par STACK (le même pour toutes ses coupes), autour du barycentre cérébral du stack, tiré dans ± `degres` et ± `mm` : un décalage de stack entier, ce que l'alignement par blocs doit corriger.
+    fn poses_par_stack_reel(stacks: &[Stack], degres: f64, mm: f64, graine: u64) -> SlicePoses {
+        let mut alea = Alea(graine);
+        let mut poses = SlicePoses::identity(stacks);
+        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
+        for (si, stack) in stacks.iter().enumerate() {
+            let centre = stack.brain_barycenter_world().unwrap_or_else(Vector3::zeros);
+            let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
+            let m = mouvement_rigide(&omega, &Vector3::new(tire(mm), tire(mm), tire(mm)), &centre);
+            for k in 0..stack.dim().2 {
+                poses.set(si, k, m);
+            }
+        }
+        poses
+    }
+
     /// Mouvement par coupe LISSE le long de chaque stack : chaque paramètre suit une marche autorégressive d'ordre 1 de coefficient `rho` (écart type `amplitude / √3`, comme un tirage uniforme dans ± `amplitude`), borné à ± `amplitude` ; les coupes voisines ont donc des poses proches.
     fn poses_lisses(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64) -> SlicePoses {
         let mut alea = Alea(graine);

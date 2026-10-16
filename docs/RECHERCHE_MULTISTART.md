@@ -100,3 +100,24 @@ Pas de gain robuste : un gain sur une graine, une perte totale sur une autre. **
 - les tableaux de portée de capture de la section « Un flou adapté aux données réelles » du livre sont des tirages uniques avec une référence de type notre sortie : les grands écarts (11 → 72 % à 3 mm) restent crédibles, les petits non.
 
 Pistes restantes : (B) multi-départ au niveau du bloc ou du stack avec rotations (FLIRT) ; (C) régularisation temporelle ; (A') agrégation robuste des corrélations de paires (M-estimateur, moyenne tronquée : « la coupe s'accorde avec un sous-ensemble cohérent de partenaires », sans estimer de fiabilité).
+
+## 7. Piste B (multi-départ au niveau du bloc, à la FLIRT) : pas de gain (2026-10-16)
+
+Implémentation : `register_block_multistart` (grille de rotations {−d, 0, +d}³ autour du pivot du bloc ; à chaque rotation, translations seules optimisées par Adam sur une coupe du bloc sur trois ; raffinement à six paramètres des `keep` meilleurs ; gardé seulement si son coût dépasse celui de la recherche actuelle) ; `S2sConfig::block_multistart_deg/keep` (désactivé par défaut, non exposé en ligne de commande) ; tests (`block_cost_subset`, jamais pire que zéro, retrouve un décalage de 3 mm).
+
+Banc d'essai « décalage de stack entier » (nouveau mode `MEDOXIDE_PERTURBATION=stack` : un mouvement rigide par stack, ± A mm et ± A °, autour de son barycentre cérébral ; calme 2, référence SVRTK, trois graines 7 / 11 / 13, flou σ = 1) :
+
+| Amplitude A | sans alignement par blocs | alignement par blocs actuel (recherche ±12 mm) |
+|---|---|---|
+| ±4 | 85 / 96 / 11 % | 96 / 96 / 90 % |
+| ±8 | 3 / 76 / 0 % | 94 / 94 / **0 %** |
+
+**Ce que vaut « ±A »** : pour la graine 13 à ±8, les perturbations mesurées sont des rotations de 10-11° et des translations de **19-20 mm** pour deux stacks (13-16 mm pour les graines 7 et 11) : un décalage bien au-delà de la grille de translation de ±12 mm de la recherche actuelle.
+
+Variantes testées sur la graine 13 :
+- ±6 mm : recherche actuelle 86 % ; avec multi-départs (grille ±6°, 2 raffinés) 79 % ; recherche élargie à ±20 mm 86 % (identique à l'actuelle) ;
+- ±8 mm : recherche actuelle 0 % ; multi-départs 0 % ; recherche élargie à ±20 mm et ±28 mm : 7 % chacune (identiques entre elles) ; coût : ces recherches élargies prennent plus d'une heure chacune (grille de translation en cube).
+
+**Conclusion** : l'alignement par stack actuel suffit pour les décalages réalistes (jusqu'à ±8 sur deux graines sur trois, c'est-à-dire des translations de 13 à 16 mm) ; ni le multi-départ ni l'élargissement de la grille ne rattrapent le cas extrême (graine 13 à ±8), où le **coût lui-même** préfère une mauvaise solution (les stacks, décalés de ~20 mm et ~11°, se recouvrent à peine). Le multi-départ a même rendu un résultat un peu moins bon à ±6 (79 contre 86 %) : une pose de concordance supérieure mais plus éloignée de la référence. Le critère de départ (±8 mm : trois graines ≥ 90 %) n'est donc pas atteint, et la cause n'est pas la rotation.
+
+Pistes restantes : (A') agrégation robuste des corrélations de paires ; (C) régularisation temporelle ; et pour les décalages très grands une initialisation non fondée sur l'intensité seule (géométrie : chevauchement des masques, barycentres) plutôt qu'une grille plus large.

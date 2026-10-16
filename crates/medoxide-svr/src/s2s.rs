@@ -480,7 +480,6 @@ pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotat
 }
 
 /// Module à trois paramètres (les translations) pour [`register_translation_s2s`].
-#[cfg(test)]
 #[derive(Module, Debug)]
 struct TranslationModule {
     params: Param<Tensor<1>>,
@@ -583,6 +582,10 @@ pub struct S2sConfig {
     pub block_search_mm: f64,
     /// Pas (mm) de la grille de la recherche exhaustive.
     pub block_search_step_mm: f64,
+    /// Recherche multi-départs de bloc ([`register_block_multistart`]) : pas angulaire (degrés) de la grille de rotations `{−d, 0, +d}³` ; 0 : désactivée. Le meilleur de cette recherche et de la recherche exhaustive par translation est gardé.
+    pub block_multistart_deg: f64,
+    /// Nombre de départs raffinés par la recherche multi-départs de bloc.
+    pub block_multistart_keep: usize,
     /// Fiabilité des partenaires : la concordance d'une coupe est la moyenne PONDÉRÉE des corrélations de ses paires, le poids d'un partenaire étant une rampe lisse de sa dernière concordance connue entre `reliability_low` (poids `reliability_floor`) et `reliability_high` (poids 1)
     /// (voir [`reliability_weight`]) ; la concordance d'une coupe est mise à jour pendant les balayages (1 avant toute information). Inactif si `reliability_high <= reliability_low` (moyenne simple).
     pub reliability_low: f64,
@@ -603,7 +606,7 @@ pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) ->
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
     }
 }
 
@@ -622,9 +625,15 @@ fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
 
 /// Concordance moyenne d'un bloc : la moyenne, sur les coupes du bloc, de la concordance de chacune (`IntersectionProblem::cost`) pour la MÊME transformation rigide `params` autour du MÊME `pivot`.
 fn block_cost(problems: &[IntersectionProblem], params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
-    let n = problems.len() as f64;
-    let mut somme = problems[0].cost(params.clone(), pivot.clone(), rotation_scale_mm);
-    for p in &problems[1..] {
+    block_cost_subset(problems, 1, params, pivot, rotation_scale_mm)
+}
+
+/// Comme [`block_cost`], sur une coupe du bloc sur `stride` (la première, puis de `stride` en `stride`) : un coût approché, `stride` fois moins cher, pour trier de nombreux candidats.
+pub(crate) fn block_cost_subset(problems: &[IntersectionProblem], stride: usize, params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
+    let n = problems.iter().step_by(stride).count() as f64;
+    let mut sous_ensemble = problems.iter().step_by(stride);
+    let mut somme = sous_ensemble.next().expect("bloc non vide").cost(params.clone(), pivot.clone(), rotation_scale_mm);
+    for p in sous_ensemble {
         somme = somme + p.cost(params.clone(), pivot.clone(), rotation_scale_mm);
     }
     somme / n
@@ -694,6 +703,58 @@ pub(crate) fn register_block_s2s(problems: &[IntersectionProblem], pivot: Tensor
     RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: vec![zero, apres] }
 }
 
+/// **Recherche multi-départs d'un bloc** (FLIRT, ROSI) : balaie une grille de rotations `angles_deg × angles_deg × angles_deg` (degrés autour de chaque axe, autour du pivot du bloc) ; à chaque rotation, les TRANSLATIONS seules sont optimisées (Adam, `translation_iterations` itérations de pas
+/// `translation_step_mm`, sur une coupe du bloc sur `stride` pour que le tri reste bon marché) ; les `keep` meilleurs départs sont raffinés à six paramètres sur le bloc entier (Adam, `config.iterations / 2` itérations). Rend le meilleur candidat et l'historique `[concordance au zéro, concordance finale]`
+/// sur le bloc entier. Diffère de la recherche de [`register_block_s2s`] (translation d'abord, à rotation nulle) : ici la rotation, dimension non convexe, est balayée et la translation suit.
+pub(crate) fn register_block_multistart(problems: &[IntersectionProblem], pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig, angles_deg: &[f64], stride: usize, keep: usize, translation_iterations: usize, translation_step_mm: f64) -> RegistrationResult {
+    let device = pivot.device();
+    let valeur = |t: Tensor<1>| f64::from(t.into_data().try_to_vec::<f32>().unwrap()[0]);
+    let zero = valeur(block_cost(problems, Tensor::<1>::from_floats([0.0_f32; 6], &device), pivot.clone(), rotation_scale_mm));
+    let mm = |angle_deg: f64| angle_deg.to_radians() * rotation_scale_mm;
+    let mut departs: Vec<([f64; 6], f64)> = Vec::new();
+    for &a in angles_deg {
+        for &b in angles_deg {
+            for &c in angles_deg {
+                let rotation = Tensor::<1>::from_floats([mm(a) as f32, mm(b) as f32, mm(c) as f32], &device);
+                let mut module = TranslationModule { params: Param::from_tensor(Tensor::<1>::from_floats([0.0_f32; 3], &device)) };
+                let mut optimiseur = AdamConfig::new().init();
+                let mut pas = translation_step_mm;
+                for _ in 0..translation_iterations {
+                    let concordance = block_cost_subset(problems, stride, Tensor::cat(vec![rotation.clone(), module.params.val()], 0), pivot.clone(), rotation_scale_mm);
+                    let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
+                    module = optimiseur.step(pas, module, gradients);
+                    pas *= 0.9;
+                }
+                let params = Tensor::cat(vec![rotation, module.params.val()], 0);
+                let v = valeur(block_cost_subset(problems, stride, params.clone(), pivot.clone(), rotation_scale_mm));
+                let p: Vec<f32> = params.into_data().try_to_vec::<f32>().unwrap();
+                departs.push((std::array::from_fn(|i| f64::from(p[i])), v));
+            }
+        }
+    }
+    departs.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (mut meilleur, mut valeur_max) = ([0.0; 6], zero);
+    for (depart, _) in departs.into_iter().take(keep) {
+        let initial: Vec<f32> = depart.iter().map(|&v| v as f32).collect();
+        let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(initial.as_slice(), &device)) };
+        let mut optimiseur = AdamConfig::new().init();
+        let mut pas = config.learning_rate;
+        for _ in 0..(config.iterations / 2).max(1) {
+            let concordance = block_cost(problems, module.params.val(), pivot.clone(), rotation_scale_mm);
+            let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
+            module = optimiseur.step(pas, module, gradients);
+            pas *= config.lr_decay;
+        }
+        let finale = module.params.val();
+        let v = valeur(block_cost(problems, finale.clone(), pivot.clone(), rotation_scale_mm));
+        if v > valeur_max {
+            let p: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
+            (meilleur, valeur_max) = (std::array::from_fn(|i| f64::from(p[i])), v);
+        }
+    }
+    RegistrationResult { params: meilleur, ncc_history: vec![zero, valeur_max] }
+}
+
 /// Partition des `n` coupes d'un stack en `2^niveau` blocs consécutifs de tailles presque égales (indices de coupes) ; niveau 0 : un seul bloc.
 pub(crate) fn block_partition(n: usize, niveau: usize) -> Vec<std::ops::Range<usize>> {
     let blocs = (1usize << niveau).min(n.max(1));
@@ -734,7 +795,15 @@ pub(crate) fn align_blocks_level(stacks: &[Stack], poses: &mut SlicePoses, atlas
                 let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
                 let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
                 let t_pivot = Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device);
-                let resultat = register_block_s2s(&problemes, t_pivot, echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+                let mut resultat = register_block_s2s(&problemes, t_pivot.clone(), echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+                if config.block_multistart_deg > 0.0 {
+                    let d = config.block_multistart_deg;
+                    let multi = register_block_multistart(&problemes, t_pivot, echelle, config.registration, &[-d, 0.0, d], 3, config.block_multistart_keep, 10, 1.0);
+                    if multi.ncc_history[1] > resultat.ncc_history[1] {
+                        resultat.params = multi.params;
+                        resultat.ncc_history[1] = multi.ncc_history[1];
+                    }
+                }
                 if resultat.ncc_history[1] >= resultat.ncc_history[0] {
                     let delta = pose_to_matrix(&resultat.params, &pivot, echelle);
                     for k in ks {
