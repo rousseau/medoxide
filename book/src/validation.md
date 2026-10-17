@@ -373,6 +373,18 @@ Banc : un sujet réel (géométrie des stacks et contenu), référence SVRTK, mo
 
 Le code est testé par mutation : 10 mutants du câblage (signe du terme, normalisation, poids transmis, cibles, voisines précédente et suivante, composition des poses, filtre des voisines recalables, pas d'échantillonnage, bord du stack, activation) sont tous tués. Un premier passage en laissait survivre cinq : le test de câblage ne vérifiait que l'existence d'un effet ; la construction des cibles a été isolée dans une fonction testée sur des valeurs exactes, et un test impose qu'une coupe laissée à l'identité dans un stack décalé soit tirée vers ses voisines.
 
+**Banc semi-synthétique à contenu réel (E2).** Les coupes sont simulées depuis une reconstruction réelle (géométrie des vrais stacks, mouvement vrai connu, bruit de 5 %), ce qui donne une vérité exacte sur du contenu d'image réel ; le banc est validé (sans correction, 0 % des coupes à ≤ 1,5 mm de la vérité pour 4 mm ; 95 % à 2 mm avec le réglage par défaut). Part des coupes à ≤ 1,5 mm, moyenne de trois graines, sans alignement par stack :
+
+| Variante | indépendant ±3 mm | lisse ±4 mm | lisse ±6 mm | sauts ±4 mm |
+|---|---|---|---|---|
+| λ = 0 | 56 % | 64 % | 8 % | 30 % |
+| **λ = 0,01 (défaut)** | 42 % | 83 % | 43 % | 76 % |
+| λ = 0,02 | 20 % | 80 % | 18 % | 64 % |
+| robuste, `c` fixe 2 mm | 75 % | 77 % | 3 % | 35 % |
+| robuste, `c` de 8 à 2 mm | 85 % | 85 % | 34 % | 77 % |
+
+Avec l'alignement par stack de production, `b=1` seul donne 56 / 54 / 8 / 14 % et `b=1` avec λ = 0,01 donne 45 / 82 / 29 / 61 % : l'a priori garde un grand intérêt. Les deux limites sont connues : (1) **un mouvement indépendant d'une coupe à l'autre** (peu physique en TRUFI, une coupe durant environ 1 s) fait perdre 11 à 14 points à l'a priori quadratique ; (2) la pénalité robuste à `c` décroissant règle (1) mais **échoue sur le banc de portée réel** (lisse ±6 mm : 45 % contre 85 %), car un petit `c` en fin de balayage ne tire plus les coupes encore éloignées de leurs voisines ; elle reste une option désactivée. Des niveaux de blocs supplémentaires (2 ou 3 niveaux) ne sont pas retenus (lisse ±6 mm : 14 et 8 % contre 29 %). L'historique complet des critères fixés avant chaque mesure est dans `docs/RECHERCHE_MULTISTART.md` (§ 11 à 15). Les tests de mutation couvrent aussi l'option robuste (11 mutants tués : formule, échelle décroissante, transmission de la configuration).
+
 **Limite.** Un saut de mouvement entre deux coupes voisines (le fœtus bouge au milieu d'un stack) est pénalisé par le terme ; la brique est faite pour un mouvement lisse par morceaux, et le banc à sauts (semi-synthétique, § 12 du document de recherche) doit mesurer ce que coûte un saut.
 
 ## Comparaison avec NiftyMIC

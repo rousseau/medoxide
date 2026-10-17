@@ -288,6 +288,8 @@ pub struct IntersectionProblem {
     highpass: Option<Tensor<2>>,
     /// A priori de lissage temporel : `(points [P, 3] de la coupe à sa pose courante, positions cibles [P, 3] déduites du mouvement de ses voisines, poids λ)` ; voir [`IntersectionProblem::with_temporal_prior`].
     temporal_prior: Option<(Tensor<2>, Tensor<2>, f64)>,
+    /// Échelle `c` (mm) de la pénalité robuste de l'a priori temporel (0 : quadratique) ; voir [`IntersectionProblem::with_temporal_robustness`].
+    temporal_robust_mm: f64,
     /// Poids de fiabilité de chaque partenaire (`[J]`) : `None` = moyenne simple ; `Some` = moyenne pondérée des corrélations (voir [`IntersectionProblem::with_partner_weights`]).
     partner_weights: Option<Tensor<1>>,
     /// Indices (stack, coupe) des partenaires, dans l'ordre des paires.
@@ -391,6 +393,7 @@ impl IntersectionProblem {
             highpass: (config.highpass_sigma_mm > 0.0).then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
             partner_weights: None,
             temporal_prior: None,
+            temporal_robust_mm: 0.0,
             partners: partenaires.iter().map(|(s, j, _)| (*s, *j)).collect(),
         })
     }
@@ -414,6 +417,14 @@ impl IntersectionProblem {
         self
     }
 
+    /// **A priori temporel robuste** : remplace, par point, l'écart quadratique `d²` de la pénalité par `d² / (1 + d²/c²)` (Geman-McClure, `c` en mm) : identique à `d²` pour `d ≪ c`, bornée par `c²` et de gradient décroissant au-delà, de sorte qu'un écart plus grand que `c` (saut de mouvement, voisine
+    /// mal placée) n'est plus tiré avec une force croissante. `c = 0` : pénalité quadratique (comportement par défaut). Sans effet tant qu'aucun a priori n'est posé par [`IntersectionProblem::with_temporal_prior`].
+    pub fn with_temporal_robustness(mut self, robust_mm: f64) -> IntersectionProblem {
+        assert!(robust_mm >= 0.0, "l'échelle robuste est positive ou nulle");
+        self.temporal_robust_mm = robust_mm;
+        self
+    }
+
     /// Nombre de paires (partenaires gardés).
     pub fn n_pairs(&self) -> usize {
         self.n_pairs
@@ -426,7 +437,12 @@ impl IntersectionProblem {
     pub fn cost(&self, params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
         let penalite = self.temporal_prior.as_ref().map(|(points, cibles, poids)| {
             let ecart = apply_pose(points.clone(), pivot.clone(), params.clone(), rotation_scale_mm) - cibles.clone();
-            (ecart.clone() * ecart).sum().reshape([1]) * (*poids / points.dims()[0] as f64)
+            let d2 = (ecart.clone() * ecart).sum_dim(1);
+            let par_point = match self.temporal_robust_mm > 0.0 {
+                true => d2.clone() / (d2.mul_scalar(1.0 / (self.temporal_robust_mm * self.temporal_robust_mm)).add_scalar(1.0)),
+                false => d2,
+            };
+            par_point.sum().reshape([1]) * (*poids / points.dims()[0] as f64)
         });
         let concordance = self.cost_concordance(params, pivot, rotation_scale_mm);
         match penalite {
@@ -616,6 +632,10 @@ pub struct S2sConfig {
     pub temporal_weight: f64,
     /// Nombre de points de la coupe (pixels de masque régulièrement espacés) sur lesquels l'écart de mouvement est mesuré.
     pub temporal_points: usize,
+    /// Échelle `c` (mm) de la pénalité robuste de la régularisation temporelle (voir [`IntersectionProblem::with_temporal_robustness`]) ; 0 : quadratique.
+    pub temporal_robust_mm: f64,
+    /// Échelle robuste de DÉPART (mm) : si > 0, l'échelle décroît géométriquement de cette valeur au premier balayage à `temporal_robust_mm` au dernier (voir [`robust_scale`]) ; 0 : échelle constante `temporal_robust_mm`.
+    pub temporal_robust_start_mm: f64,
     /// Fiabilité des partenaires : la concordance d'une coupe est la moyenne PONDÉRÉE des corrélations de ses paires, le poids d'un partenaire étant une rampe lisse de sa dernière concordance connue entre `reliability_low` (poids `reliability_floor`) et `reliability_high` (poids 1)
     /// (voir [`reliability_weight`]) ; la concordance d'une coupe est mise à jour pendant les balayages (1 avant toute information). Inactif si `reliability_high <= reliability_low` (moyenne simple).
     pub reliability_low: f64,
@@ -636,7 +656,7 @@ pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) ->
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, temporal_robust_mm: 0.0, temporal_robust_start_mm: 0.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
     }
 }
 
@@ -859,6 +879,14 @@ pub(crate) fn sweep_schedule(config: &S2sConfig) -> Vec<(f64, usize, bool)> {
     niveaux
 }
 
+/// Échelle robuste de la régularisation temporelle au balayage `balayage` (de 0 à `total − 1`, tous niveaux confondus) : `fin` si `debut <= 0` ou `fin <= 0` (échelle constante, ou quadratique si `fin = 0`) ; sinon décroissance géométrique de `debut` (premier balayage) à `fin` (dernier) : `debut · (fin/debut)^{balayage/(total−1)}`.
+pub(crate) fn robust_scale(debut: f64, fin: f64, balayage: usize, total: usize) -> f64 {
+    if debut <= 0.0 || fin <= 0.0 || total < 2 {
+        return fin;
+    }
+    debut * (fin / debut).powf(balayage.min(total - 1) as f64 / (total - 1) as f64)
+}
+
 /// Entrées de la régularisation temporelle d'une coupe `k` du stack `si` : `(points, cibles)`. Les `points` sont `n_points` pixels de masque de la coupe (pas régulier parmi `tous_les_points`) ; la cible de chacun est la moyenne, sur les voisines directes recalables (`k − 1` et `k + 1`, absentes aux bords ou si
 /// elles n'ont pas de pixel de masque), de la position que lui donnerait leur mouvement RELATIF `M_voisine · M_coupe⁻¹` (poses courantes). `None` si la coupe n'a aucune voisine recalable.
 pub(crate) fn temporal_prior_inputs(stack: &Stack, courantes: &SlicePoses, si: usize, k: usize, tous_les_points: &[Vector3<f64>], n_points: usize) -> Option<(Vec<Vector3<f64>>, Vec<Vector3<f64>>)> {
@@ -901,6 +929,7 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
         align_blocks(stacks, &mut courantes, &atlas, config, device);
     }
     let niveaux = sweep_schedule(config);
+    let total_balayages: usize = niveaux.iter().map(|n| n.1).sum();
     let mut decalage_graine = 0u64;
     // dernière concordance connue de chaque coupe (1 avant toute information) et position de chaque stack dans `coupes`, pour la fiabilité des partenaires
     let mut scores = vec![1.0_f64; coupes.len()];
@@ -915,7 +944,7 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                 let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
                 let probleme = match config.temporal_weight > 0.0 {
                     true => match temporal_prior_inputs(&stacks[si], &courantes, si, k, &preparee.points, config.temporal_points) {
-                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, config.temporal_weight),
+                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, config.temporal_weight).with_temporal_robustness(robust_scale(config.temporal_robust_start_mm, config.temporal_robust_mm, decalage_graine as usize + balayage, total_balayages)),
                         None => probleme,
                     },
                     false => probleme,

@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// Réglages du coupe-coupe à comparer, séparés par des points-virgules : `fin` (recalage fin seul), `σ,balayages,niveaux` du gros-vers-fin (éventuellement suivi de `:bas,haut` pour la fiabilité des partenaires), ou des jetons séparés par `+` :
-    /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle) ;
+    /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle), `r=c_mm` ou `r=c0_mm,c1_mm` (échelle de la pénalité temporelle robuste, constante ou décroissante) ;
     /// `bias=1` est ignoré ici (lu par l'appelant, qui corrige alors les stacks du biais avant le recalage).
     fn variantes_s2s(spec: &str, fin: crate::s2s::S2sConfig) -> Vec<(String, crate::s2s::S2sConfig)> {
         use crate::s2s::S2sConfig;
@@ -3483,6 +3483,7 @@ mod tests {
                             "bs" => config.block_sweeps = x[0] as usize,
                             "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
                             "t" => config.temporal_weight = x[0],
+                            "r" => (config.temporal_robust_start_mm, config.temporal_robust_mm) = if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) },
                             "bias" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
@@ -4101,7 +4102,7 @@ mod tests {
     }
 
     /// Régularisation temporelle (blobs, coupe 5 du stack coronal) : (a) sans a priori ou avec un poids nul, le coût est inchangé (exactement) ; (b) pour des paramètres de translation seule `t` (rotation nulle), le coût avec a priori vaut le coût sans a priori MOINS `λ · moyenne |P + t − Q|²`, calculé à la main (valeur exacte, à 1e-4 près en f32) ;
-    /// (c) l'écart de coût entre deux translations vaut la différence des pénalités plus celle des concordances : en particulier, avec `λ` énorme, la translation qui amène les points sur leurs cibles a un meilleur coût que la translation nulle ; (d) le dernier a priori posé remplace le précédent.
+    /// (c) l'écart de coût entre deux translations vaut la différence des pénalités plus celle des concordances : en particulier, avec `λ` énorme, la translation qui amène les points sur leurs cibles a un meilleur coût que la translation nulle ; (d) le dernier a priori posé remplace le précédent ; (e) la pénalité robuste de Geman-McClure vaut exactement `λ · moyenne d²/(1 + d²/c²)`, se confond avec la quadratique pour `c = 0` (aucun effet) et pour `c` très grand, et reste bornée par `λ c²`.
     #[test]
     fn the_temporal_prior_is_an_exact_penalty() {
         use crate::s2s::{IntersectionConfig, IntersectionProblem, SliceAtlas};
@@ -4134,10 +4135,42 @@ mod tests {
             let remplace = valeur(&construire().with_temporal_prior(&points, &cibles, 5.0).with_temporal_prior(&points, &cibles, 0.05), params);
             assert!((remplace - avec).abs() < 1e-6, "(d)");
         }
+        // (e) pénalité robuste de Geman-McClure : coût sans a priori MOINS λ · moyenne d²/(1 + d²/c²) (valeur exacte) ; c = 0 : quadratique ; c très grand : quadratique à 1e-4 près ; et la pénalité est bornée (λ c² au plus)
+        for params in [[0.0f32; 6], [0.0, 0.0, 0.0, 1.5, -0.5, 2.0], [0.0, 0.0, 0.0, 6.0, -5.0, 9.0]] {
+            let v0 = valeur(&base, params);
+            let tr = Vector3::new(params[3] as f64, params[4] as f64, params[5] as f64);
+            let robuste = |c: f64| 0.05 * points.iter().zip(&cibles).map(|(p, q)| { let d2 = (p + tr - q).norm_squared(); d2 / (1.0 + d2 / (c * c)) }).sum::<f64>() / points.len() as f64;
+            for c in [0.5, 2.0, 5.0] {
+                let avec = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(c), params);
+                assert!((avec - (v0 - robuste(c))).abs() < 1e-4, "(e) c = {c} : {avec} contre {}", v0 - robuste(c));
+                assert!(v0 - avec <= 0.05 * c * c + 1e-4, "(e) pénalité bornée par λ c²");
+            }
+            let quadratique = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05), params);
+            assert_eq!(valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(0.0), params), quadratique, "(e) c = 0");
+            assert!((valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(1e4), params) - quadratique).abs() < 1e-3, "(e) c très grand");
+        }
         // (c)
         let enorme = construire().with_temporal_prior(&points, &cibles, 1000.0);
         let vers_cible = valeur(&enorme, [0.0, 0.0, 0.0, 2.0, -1.0, 0.0]);
         assert!(vers_cible > valeur(&enorme, [0.0; 6]), "(c) la translation vers les cibles doit être préférée : {vers_cible}");
+    }
+
+    /// Échelle robuste décroissante : (a) sans départ (0) ou sans fin (0), l'échelle est la fin, quel que soit le balayage ; (b) elle vaut exactement le départ au premier balayage et la fin au dernier ; (c) elle décroît géométriquement (le rapport de deux balayages consécutifs est constant, ici (2/8)^(1/3) pour 4 balayages) ; (d) un seul balayage : la fin.
+    #[test]
+    fn the_robust_scale_decreases_geometrically_from_start_to_end() {
+        use crate::s2s::robust_scale;
+        for s in 0..4 {
+            assert_eq!(robust_scale(0.0, 2.0, s, 4), 2.0, "(a) sans départ");
+            assert_eq!(robust_scale(8.0, 0.0, s, 4), 0.0, "(a) sans fin");
+        }
+        assert_eq!(robust_scale(8.0, 2.0, 0, 4), 8.0, "(b) départ");
+        assert!((robust_scale(8.0, 2.0, 3, 4) - 2.0).abs() < 1e-12, "(b) fin");
+        let r = (2.0_f64 / 8.0).powf(1.0 / 3.0);
+        for s in 0..3 {
+            assert!((robust_scale(8.0, 2.0, s + 1, 4) / robust_scale(8.0, 2.0, s, 4) - r).abs() < 1e-12, "(c) {s}");
+        }
+        assert_eq!(robust_scale(8.0, 2.0, 0, 1), 2.0, "(d)");
+        assert_eq!(robust_scale(8.0, 2.0, 99, 4), 2.0, "balayage au-delà : borné à la fin");
     }
 
     /// Entrées de la régularisation temporelle (blobs, stack coronal, poses courantes connues) : (a) pour une coupe intérieure, chaque cible est la MOYENNE, sur ses deux voisines (k − 1 et k + 1), de `M_voisine · M_coupe⁻¹ · p` (valeur recalculée à la main, avec une rotation sur la coupe pour fixer l'ordre de composition) ; (b) pour une coupe dont la voisine suivante est
@@ -4211,6 +4244,26 @@ mod tests {
         let libre = register_slices_s2s(&stacks, &inegal, &S2sConfig { temporal_weight: 0.0, ..base }, &device).unwrap().poses;
         println!("(d) écart de la coupe 5 au décalage de ses voisines : départ 3, sans régularisation {:.3}, poids 50 {distance:.3}", (libre.get(1, 5) - decalage).abs().max());
         assert!(distance < 2.25, "(d) la coupe 5 doit être tirée vers le mouvement de ses voisines : {distance}");
+    }
+
+    /// Câblage de la pénalité temporelle robuste (blobs) : (a) avec un poids énorme (50) et une échelle minuscule (1e-3 mm), la pénalité est saturée (bornée par λ c² = 5e-5) : les poses diffèrent de plus de 1e-3 de celles du même poids quadratique (une comparaison avec le recalage sans régularisation est impossible : Adam normalise les gradients, et un résidu de gradient minuscule mais non nul suffit à déplacer une coupe sans information de concordance : mesuré 1,5 mm) ; (b) l'échelle décroissante est transmise, sur l'ensemble des balayages (un balayage gros-vers-fin puis un balayage fin, sans échelle intermédiaire : avec un indice local au niveau, le balayage fin garderait l'échelle de départ et le résultat redeviendrait exactement quadratique) : de 1e6 mm (quadratique) à 1e-3 mm (saturée), les poses diffèrent à la fois de la
+    /// version constante quadratique et de la version constante saturée (de plus de 1e-6) : ni le départ ni la fin ne sont ignorés.
+    #[test]
+    fn the_robust_temporal_prior_is_wired_into_the_s2s_sweeps() {
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let t = Temp::new("lissage_robuste_cablage");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let base = S2sConfig { sweeps: 1, coarse_sigma_pixels: 1.0, coarse_sweeps: 1, coarse_levels: 1, block_levels: 0, ..Default::default() };
+        let lancer = |poids: f64, debut: f64, fin: f64| register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: poids, temporal_robust_start_mm: debut, temporal_robust_mm: fin, ..base }, &device).unwrap().poses;
+        let quadratique = lancer(50.0, 0.0, 0.0);
+        let saturee = lancer(50.0, 0.0, 1e-3);
+        assert!(ecart(&saturee, &quadratique) > 1e-3, "(a) l'échelle doit être transmise : saturée et quadratique donnent les mêmes poses ({})", ecart(&saturee, &quadratique));
+        let decroissante = lancer(50.0, 1e6, 1e-3);
+        assert!(ecart(&decroissante, &quadratique) > 1e-6, "(b) la fin de l'échelle doit être transmise : {}", ecart(&decroissante, &quadratique));
+        assert!(ecart(&decroissante, &saturee) > 1e-6, "(b) le départ de l'échelle doit être transmis : {}", ecart(&decroissante, &saturee));
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier
@@ -4677,8 +4730,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
         // défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5), puis 3 balayages nets
         assert_eq!(sweep_schedule(&s2s_config(&ReconstructionConfig::default())), vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, s2s_temporal_robust_mm: 1.7, s2s_temporal_robust_start_mm: 6.5, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, temporal_robust_mm: 1.7, temporal_robust_start_mm: 6.5, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 

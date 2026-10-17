@@ -1462,6 +1462,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : la concordance ne peut pas servir à juger un a priori de régularité (c'est ce que le recalage maximise) : il faut une référence indépendante (SVRTK), plusieurs graines (variance ±15 points) et, sur données réelles, l'accord des poses. Le poids λ a été choisi parmi trois valeurs par cinq critères écrits avant la mesure ; le plus petit qui les satisfait est retenu.
 - **Où** : `crates/medoxide-svr/src/s2s.rs` (`IntersectionProblem::with_temporal_prior`), `book/src/validation.md` (« Régularisation temporelle »).
 
+## 2026-10-17 — Une pénalité robuste résout un cas et en perd un autre ; le banc le plus réaliste tranche
+
+- **Quoi (concept)** : une pénalité de Geman-McClure `d²/(1 + d²/c²)` (quadratique pour `d ≪ c`, bornée au-delà) rend l'a priori temporel tolérant aux écarts entre voisines ; avec une échelle `c` décroissante (non-convexité graduée), le même réglage tient les mouvements indépendants, lisses et à sauts sur un banc semi-synthétique. Mais sur le banc de portée réel (grand décalage lisse), un `c` petit en fin de balayage ne tire plus les coupes éloignées et le gain disparaît.
+- **Quoi (méthode)** : (1) un banc à vérité exacte et contenu réel (E2) est utile mais un banc plus proche de la réalité du mouvement (poses de consensus réelles perturbées) peut rejeter ce qu'il approuve : les critères écrits d'avance doivent donc couvrir les deux avant de changer un défaut ; (2) Adam normalise les gradients : une pénalité « saturée » de gradient minuscule mais non nul déplace une coupe sans information de concordance, donc un test ne peut pas exiger « presque pas d'effet » ; il compare des variantes entre elles ; (3) le test de mutation a révélé que le test de câblage ne distinguait pas un indice de balayage local d'un indice global : il a fallu un banc à deux balayages sans échelle intermédiaire pour que la différence devienne exacte ; (4) les bancs de comparaison excluaient l'alignement par stack de production : vérifier que le banc contient ce que le défaut contient.
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`with_temporal_robustness`, `robust_scale`, `temporal_prior_inputs`), `book/src/validation.md` (« Régularisation temporelle »), `docs/RECHERCHE_MULTISTART.md` (§ 12 à 15).
+
 ---
 
 *(à compléter à la prochaine étape)*
