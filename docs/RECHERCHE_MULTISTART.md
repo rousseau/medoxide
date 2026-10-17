@@ -165,3 +165,15 @@ Sources consultées (web) : état de l'art du recalage coupe-volume (Ferrante & 
 4. **O2 : agrégation robuste par non-convexité graduelle** des corrélations de paires (poids par paire) ; critère : gain sur le banc E2 au-delà de C, sans perte sur les sujets calmes.
 5. **F1 : base temporelle réduite (DCT ou B-splines)** comme alternative aux blocs et à λ ; critère : égal ou meilleur que C avec moins de paramètres, y compris avec des sauts.
 6. En réserve : O1 (CMA-ES en population, si la sélection des candidats devient fiable grâce à 3 et 4), O3 (pas de second ordre), O4 (détection des coupes aberrantes par résidu), F5 (cohérence intra-stack), F3 (cohérence de cycles), E3 (recouvrement de segmentations).
+
+## 11. Choix du défaut de la régularisation temporelle : critères fixés avant la mesure de λ = 0,01 (2026-10-17)
+
+Mesures disponibles (référence SVRTK, trois graines) : lisse ±6 mm : sans 23 %, λ = 0,005 : 74 %, 0,02 : 90 %, 0,1 : 36 % ; lisse ±4 mm : 68 / 89 / 90 / 88 % ; indépendant ±3 mm : 66 % sans, 88 % à 0,005 et à 0,02. Réel (six sujets, concordance moyenne, défaut 0,8154) : 0,8190 à 0,005 ; 0,8010 à 0,02 ; accord des poses avec NiftyMIC, SVRTK et NeSVoR égal ou meilleur dans les deux cas.
+**Critères de choix du défaut** (décision prise en autonomie, sur le meilleur λ parmi 0,005 / 0,01 / 0,02) : (1) banc lisse ±6 mm ≥ 80 % en moyenne ; (2) banc indépendant ±3 mm ≥ 85 % ; (3) réel : concordance moyenne ≥ défaut − 0,005 (la concordance est ce que le recalage maximise : on tolère une baisse faible, pas une hausse exigée) ; (4) réel : accord des poses avec les trois méthodes indépendantes non dégradé (écart médian et part > 3 mm, par sujet) ; (5) temps ≤ +10 %. Si plusieurs λ satisfont tout : le plus petit.
+
+## 12. Banc semi-synthétique à contenu réel (E2) : critères fixés avant mesure
+
+Les coupes sont simulées depuis une reconstruction réelle (SVRTK) avec la géométrie des vrais stacks, un mouvement vrai connu (`independante`, `lisse`, `sauts`, `stack`), du bruit (5 %) et éventuellement un biais. Le banc est **valide** si, avant toute comparaison de variantes :
+1. sans correction (poses d'en-tête), l'erreur est visible (part ≤ 1,5 mm < 0,6 pour une amplitude ≥ 4 mm) : le problème n'est pas trivial ;
+2. dans la portée de capture (amplitude 2 mm indépendante, graine 7), le recalage par défaut (`c=1,3,2`) retrouve ≥ 90 % des coupes à ≤ 1,5 mm : le simulateur et l'estimateur partagent la même convention de pose (sinon c'est un défaut du banc, pas de la méthode).
+Les variantes sont ensuite comparées sur ≥ 3 graines, part ≤ 1,5 mm moyenne et médiane.

@@ -1456,6 +1456,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (outillage)** : plusieurs conteneurs émulés en parallèle sont tués faute de mémoire sans message d'erreur (le journal s'arrête au milieu d'une étape) : les lancer l'un après l'autre.
 - **Où** : `scripts/figure_reconstructions_tous.py` (masque commun, recalage avec métrique masquée), `book/src/validation.md` (« Comparaison avec NiftyMIC »).
 
+## 2026-10-17 — Un a priori de régularité vaut mieux qu'un meilleur départ, et son poids se choisit par des critères écrits d'avance
+
+- **Quoi (concept)** : une pénalité quadratique sur l'écart entre le mouvement d'une coupe et celui de ses voisines (a priori de régularité temporelle) fait passer la part de coupes bien recalées de 23 à 85 % (mouvement lisse), là où trois variantes de multi-départ n'avaient rien donné : le goulot n'était pas l'optimisation mais l'information locale (une coupe seule est ambiguë, ses voisines lèvent l'ambiguïté).
+- **Quoi (méthode)** : la concordance ne peut pas servir à juger un a priori de régularité (c'est ce que le recalage maximise) : il faut une référence indépendante (SVRTK), plusieurs graines (variance ±15 points) et, sur données réelles, l'accord des poses. Le poids λ a été choisi parmi trois valeurs par cinq critères écrits avant la mesure ; le plus petit qui les satisfait est retenu.
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`IntersectionProblem::with_temporal_prior`), `book/src/validation.md` (« Régularisation temporelle »).
+
 ---
 
 *(à compléter à la prochaine étape)*

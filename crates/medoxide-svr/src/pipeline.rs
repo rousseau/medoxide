@@ -97,7 +97,7 @@ pub struct ReconstructionConfig {
     pub s2s_block_sweeps: usize,
     /// Coupe-coupe : nombre d'alternances « estimer le champ de biais de chaque stack, corriger les stacks, recaler » (voir [`crate::bias`]) ; 0 : aucune correction de biais. Le volume est reconstruit à partir des stacks corrigés aux poses finales. Défaut 1 : en simulation avec un biais de 30 % (±4 mm), part des coupes à ≤ 1,5 mm de 3 → 75 % (mouvement lisse) et 71 → 79 % (indépendant) avec l'alignement par stack, sans changement sans biais (garde `s2s_bias_min_reduction`) ; sur données réelles, concordance aux intersections inchangée à 0,01 près sur 6 sujets et décalages de stack de l'alignement par blocs ramenés au consensus de NiftyMIC et NeSVoR sur le sujet le plus agité.
     pub s2s_bias_rounds: usize,
-    /// Coupe-coupe : poids λ (1/mm²) de la régularisation temporelle (pénalité sur l'écart entre le mouvement d'une coupe et celui de ses voisines directes du stack, voir [`crate::s2s::IntersectionProblem::with_temporal_prior`]) ; 0 : aucune.
+    /// Coupe-coupe : poids λ (1/mm²) de la régularisation temporelle (pénalité sur l'écart entre le mouvement d'une coupe et celui de ses voisines directes du stack, voir [`crate::s2s::IntersectionProblem::with_temporal_prior`]) ; 0 : aucune. Défaut 0,01, le plus petit des λ essayés (0,005 / 0,01 / 0,02) qui satisfait cinq critères fixés avant la mesure : sur un sujet réel (référence SVRTK, trois graines), part des coupes à ≤ 1,5 mm de 23 % (sans) → 85 % pour un mouvement lisse de ±6 mm et de 66 → 90 % pour un mouvement indépendant de ±3 mm ; sur six sujets réels, concordance moyenne 0,8125 contre 0,8148 (0,8003 à λ = 0,02), accord des poses avec SVRTK, NeSVoR et NiftyMIC égal ou meilleur sauf une dégradation marginale (voir `docs/RECHERCHE_MULTISTART.md`, §11) ; temps CPU +5 % en moyenne (+0,5 % et +9 % sur deux répétitions).
     pub s2s_temporal_weight: f64,
     /// Coupe-coupe : réduction relative minimale de l'incohérence d'intensité entre stacks (`1 − après / avant`, voir [`BiasFields::inconsistency_reduction`]) pour que la correction de biais estimée soit appliquée ; en deçà, le champ ne fait que s'ajuster au bruit d'anatomie (un mesuré : 0,4 % sans biais, 35 % avec un biais de 30 %) et les stacks restent inchangés. 0 : toujours appliquer.
     pub s2s_bias_min_reduction: f64,
@@ -144,7 +144,7 @@ impl Default for ReconstructionConfig {
             s2s_block_levels: 1,
             s2s_block_sweeps: 2,
             s2s_bias_rounds: 1,
-            s2s_temporal_weight: 0.0,
+            s2s_temporal_weight: 0.01,
             s2s_bias_min_reduction: 0.1,
             s2s_block_search_mm: 12.0,
             s2v_cycles: 6,

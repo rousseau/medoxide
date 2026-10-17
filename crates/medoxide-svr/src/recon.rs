@@ -2961,7 +2961,7 @@ mod tests {
         let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
         // (a) coupe-coupe
         // tous les réglages sont NON défaut : un réglage ignoré par `reconstruct` ferait différer la sortie de l'appel direct
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
@@ -3464,29 +3464,14 @@ mod tests {
         assert!(q_hub.1 - q_tik.1 >= 0.5, "gain de PSNR {}", q_hub.1 - q_tik.1);
     }
 
-    /// DIAGNOSTIC (sans critère) de la PORTÉE DE CAPTURE sur DONNÉES RÉELLES, avec une référence de consensus : les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) sont corrigés du biais d'intensité aux poses de référence (`MEDOXIDE_POSES`, fichier de `--poses` d'un sujet bien recalé),
-    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence ; `MEDOXIDE_PERTURBATION` = `independante` par défaut, `lisse` (marche autorégressive le long du stack) ou `stack` (un décalage rigide par stack entier, autour de son barycentre cérébral)),
-    /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
-    /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
-    #[test]
-    #[ignore = "diagnostic sur données réelles locales"]
-    fn diagnose_the_capture_range_on_real_data() {
-        use crate::bias::{estimate_bias_fields, BiasConfig};
-        use crate::pipeline::correct_stacks;
-        use crate::s2s::{register_slices_s2s, S2sConfig};
-        let tous = stacks_reels();
-        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
-        let amplitudes: Vec<f64> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "0,4".into()).split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
-        let device = burn::tensor::Device::flex().autodiff();
-        let fin = S2sConfig { block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
-        // MEDOXIDE_VARIANTES : réglages à comparer, séparés par des points-virgules : `fin` (recalage fin seul) ou `σ,balayages,niveaux` du gros-vers-fin (défaut : `fin;6,2,2`)
-        let variantes: Vec<(String, S2sConfig)> = std::env::var("MEDOXIDE_VARIANTES")
-            .unwrap_or_else(|_| "fin;6,2,2".into())
-            .split(';')
+    /// Réglages du coupe-coupe à comparer, séparés par des points-virgules : `fin` (recalage fin seul), `σ,balayages,niveaux` du gros-vers-fin (éventuellement suivi de `:bas,haut` pour la fiabilité des partenaires), ou des jetons séparés par `+` :
+    /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle) ;
+    /// `bias=1` est ignoré ici (lu par l'appelant, qui corrige alors les stacks du biais avant le recalage).
+    fn variantes_s2s(spec: &str, fin: crate::s2s::S2sConfig) -> Vec<(String, crate::s2s::S2sConfig)> {
+        use crate::s2s::S2sConfig;
+        spec.split(';')
             .map(|v| {
                 let v = v.trim();
-                // forme à jetons séparés par `+` : `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (recherche multi-départs de bloc), `t=poids` (régularisation temporelle), `fin` (rien)
                 if v.contains('=') {
                     let mut config = fin;
                     for jeton in v.split('+') {
@@ -3498,6 +3483,7 @@ mod tests {
                             "bs" => config.block_sweeps = x[0] as usize,
                             "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
                             "t" => config.temporal_weight = x[0],
+                            "bias" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
                     }
@@ -3519,7 +3505,149 @@ mod tests {
                     (format!("gros({v})"), S2sConfig { coarse_sigma_pixels: c[0].parse().unwrap(), coarse_sweeps: c[1].parse().unwrap(), coarse_levels: c[2].parse().unwrap(), ..fin })
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    /// Mouvement par coupe À SAUTS le long de chaque stack : comme [`poses_lisses`] (marche autorégressive de coefficient `rho`, bornée à ± amplitude), mais à chaque coupe, avec la probabilité `proba`, chaque paramètre est retiré uniformément dans ± amplitude (un saut qui persiste ensuite).
+    fn poses_a_sauts(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64, proba: f64) -> SlicePoses {
+        let mut alea = Alea(graine);
+        let mut poses = SlicePoses::identity(stacks);
+        for (si, stack) in stacks.iter().enumerate() {
+            let mut x = [0.0_f64; 6];
+            for coupe in stack.slices() {
+                let saut = alea.suivant() < proba;
+                for (p, v) in x.iter_mut().enumerate() {
+                    let amplitude = if p < 3 { degres } else { mm };
+                    let (u, w) = (alea.suivant().max(1e-12), alea.suivant());
+                    let gauss = (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * w).cos();
+                    *v = if saut { (alea.suivant() * 2.0 - 1.0) * amplitude } else { (rho * *v + (1.0 - rho * rho).sqrt() * amplitude / 3.0_f64.sqrt() * gauss).clamp(-amplitude, amplitude) };
+                }
+                let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
+                poses.set(si, coupe.index(), mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()));
+            }
+        }
+        poses
+    }
+
+    /// Mouvement vrai d'un banc d'essai selon son modèle : `independante`, `lisse` (marche autorégressive, ρ = 0,9), `sauts` (lisse avec sauts de probabilité 0,08 par coupe) ou `stack` (un décalage rigide par stack).
+    fn mouvement_vrai(stacks: &[Stack], modele: &str, amplitude: f64, graine: u64) -> SlicePoses {
+        match modele {
+            "lisse" => poses_lisses(stacks, amplitude, amplitude, graine, 0.9),
+            "sauts" => poses_a_sauts(stacks, amplitude, amplitude, graine, 0.9, 0.08),
+            "stack" => poses_par_stack_reel(stacks, amplitude, amplitude, graine),
+            _ => poses_aleatoires(stacks, amplitude, amplitude, graine),
+        }
+    }
+
+    /// **Stacks semi-synthétiques à contenu réel** : simule, depuis un volume RÉEL reconstruit, les coupes des stacks `modeles` (géométrie, résolution et épaisseur des vrais stacks) avec le mouvement vrai `vraies`, avec un bruit gaussien de `bruit_pct` % de l'intensité moyenne et, si `biais_pct > 0`, un champ de biais multiplicatif lisse
+    /// par stack fixe dans le repère du scanner (4 ondes planes de 100 à 200 mm, plus un gain global, comme `make_pyrecon_benchmark.py`). Le masque d'un pixel : couvert et d'intensité > 3 % du maximum. La vérité est exacte (`vraies`) et le contenu est celui d'images réelles.
+    fn simuler_reel(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses, bruit_pct: f64, biais_pct: f64, graine: u64) -> Vec<Stack> {
+        let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
+        let moyenne = {
+            let (somme, n) = volume.data().iter().filter(|&&v| v > 0.03 * maximum).fold((0.0_f64, 0usize), |(s, n), &v| (s + f64::from(v), n + 1));
+            somme / n.max(1) as f64
+        };
+        let mut alea = Alea(graine.wrapping_mul(0x9E37_79B9) | 1);
+        let mut gauss = move || {
+            let (u, v) = (alea.suivant().max(1e-12), alea.suivant());
+            (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
+        };
+        let champ_de = |n: usize| -> Box<dyn Fn(&Vector3<f64>) -> f64> {
+            if biais_pct <= 0.0 {
+                return Box::new(|_| 1.0);
+            }
+            let mut rb = Alea(31000 + 17 * n as u64 + graine);
+            let mut tire = |a: f64, b: f64| a + (b - a) * rb.suivant();
+            let ondes: Vec<(Vector3<f64>, f64, f64)> = (0..4)
+                .map(|_| {
+                    let d = Vector3::new(tire(-1.0, 1.0), tire(-1.0, 1.0), tire(-1.0, 1.0)).normalize();
+                    (d, tire(100.0, 200.0), tire(0.0, 2.0 * std::f64::consts::PI))
+                })
+                .collect();
+            let gain = 1.0 + biais_pct / 100.0 * tire(-1.0, 1.0);
+            let amplitude = biais_pct / 100.0 / 2.0;
+            Box::new(move |x| gain * (1.0 + ondes.iter().map(|(d, l, p)| amplitude * (2.0 * std::f64::consts::PI * x.dot(d) / l + p).cos()).sum::<f64>()))
+        };
+        modeles
+            .iter()
+            .enumerate()
+            .map(|(n, modele)| {
+                let champ = champ_de(n);
+                let (mut data, mut masque) = (Array3::<f32>::zeros(modele.dim()), Array3::<u8>::zeros(modele.dim()));
+                for coupe in modele.slices() {
+                    let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
+                    let sim = volume.simulate_slice(&posee, &posee.psf());
+                    for ((i, j), &v) in sim.values.indexed_iter() {
+                        let nominale = (modele.affine() * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0)).xyz();
+                        data[[i, j, coupe.index()]] = ((f64::from(v) * champ(&nominale)) + bruit_pct / 100.0 * moyenne * gauss()) as f32;
+                        masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
+                    }
+                }
+                let e = modele.spacing();
+                stack_avec_masque(t, &format!("reel{n}"), &data, &masque, modele.affine(), [e[0] as f32, e[1] as f32, e[2] as f32])
+            })
+            .collect()
+    }
+
+    /// DIAGNOSTIC (sans critère) : BANC D'ESSAI SEMI-SYNTHÉTIQUE À CONTENU RÉEL. Les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) ne donnent que la géométrie ; les coupes sont simulées depuis le volume réel `MEDOXIDE_VOLUME` (NIfTI, par exemple une reconstruction SVRTK)
+    /// avec un mouvement vrai (`MEDOXIDE_MODELE` : `independante`, `lisse`, `sauts`, `stack` ; amplitudes `MEDOXIDE_AMPLITUDES`, graines `MEDOXIDE_GRAINES`), du bruit (`MEDOXIDE_BRUIT_PCT`, défaut 5) et un biais (`MEDOXIDE_BIAIS_PCT`, défaut 0). Chaque variante (`MEDOXIDE_VARIANTES`, voir `variantes_s2s` ; `bias=1` corrige
+    /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction.
+    #[test]
+    #[ignore = "diagnostic sur données réelles locales"]
+    fn diagnose_the_semi_synthetic_benchmark() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::pipeline::correct_stacks;
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let modeles = stacks_reels();
+        let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
+        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap());
+        let modele = lire("MEDOXIDE_MODELE", "independante");
+        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "3").split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let graines: Vec<u64> = lire("MEDOXIDE_GRAINES", "7").split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let (bruit, biais): (f64, f64) = (lire("MEDOXIDE_BRUIT_PCT", "5").parse().unwrap(), lire("MEDOXIDE_BIAIS_PCT", "0").parse().unwrap());
+        let fin = S2sConfig { block_levels: 0, coarse_sigma_pixels: 1.0, coarse_sweeps: 3, coarse_levels: 2, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+        let variantes = variantes_s2s(&lire("MEDOXIDE_VARIANTES", "fin"), fin);
+        let device = burn::tensor::Device::flex().autodiff();
+        let t = Temp::new("semi_synthetique");
+        for &a in &amplitudes {
+            for &graine in &graines {
+                let vraies = mouvement_vrai(&modeles, &modele, a, graine);
+                let stacks = simuler_reel(&t, &volume, &modeles, &vraies, bruit, biais, graine);
+                let part = |poses: &SlicePoses| {
+                    let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+                    e.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                    (e.iter().filter(|&&v| v <= 1.5).count() as f64 / e.len() as f64, e[e.len() / 2], e[(0.9 * (e.len() - 1) as f64) as usize])
+                };
+                let (p, m, q) = part(&SlicePoses::identity(&stacks));
+                println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
+                for (nom, config) in &variantes {
+                    let travail = if nom.contains("bias=1") { correct_stacks(&stacks, &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default()).unwrap(), 0.1) } else { stacks.clone() };
+                    let poses = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap().poses;
+                    let (p, m, q) = part(&poses);
+                    println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
+                }
+            }
+        }
+    }
+
+    /// DIAGNOSTIC (sans critère) de la PORTÉE DE CAPTURE sur DONNÉES RÉELLES, avec une référence de consensus : les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) sont corrigés du biais d'intensité aux poses de référence (`MEDOXIDE_POSES`, fichier de `--poses` d'un sujet bien recalé),
+    /// puis le recalage coupe-coupe (sans alignement par stack, pour isoler le recalage par coupe) est lancé, pour chaque réglage de `MEDOXIDE_VARIANTES`, depuis ces poses perturbées par un mouvement rigide aléatoire par coupe de ± `a` mm et ± `a` degrés (`MEDOXIDE_AMPLITUDES`, liste séparée par des virgules, 0 : départ exactement à la référence ; `MEDOXIDE_PERTURBATION` = `independante` par défaut, `lisse` (marche autorégressive le long du stack) ou `stack` (un décalage rigide par stack entier, autour de son barycentre cérébral)),
+    /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
+    /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
+    #[test]
+    #[ignore = "diagnostic sur données réelles locales"]
+    fn diagnose_the_capture_range_on_real_data() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        use crate::pipeline::correct_stacks;
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let tous = stacks_reels();
+        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let amplitudes: Vec<f64> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "0,4".into()).split(',').map(|v| v.trim().parse().unwrap()).collect();
+        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
+        let device = burn::tensor::Device::flex().autodiff();
+        let fin = S2sConfig { block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+        // MEDOXIDE_VARIANTES : réglages à comparer (voir `variantes_s2s`) ; défaut `fin;6,2,2`
+        let variantes = variantes_s2s(&std::env::var("MEDOXIDE_VARIANTES").unwrap_or_else(|_| "fin;6,2,2".into()), fin);
         for a in amplitudes {
             let graine: u64 = std::env::var("MEDOXIDE_GRAINE").map_or(7, |v| v.trim().parse().unwrap());
             // MEDOXIDE_PERTURBATION : `independante` (défaut) ou `lisse` (marche autorégressive le long du stack, coefficient 0,9)
@@ -4012,8 +4140,45 @@ mod tests {
         assert!(vers_cible > valeur(&enorme, [0.0; 6]), "(c) la translation vers les cibles doit être préférée : {vers_cible}");
     }
 
-    /// Câblage de la régularisation temporelle dans le recalage coupe-coupe (blobs) : (a) poids nul (défaut) : poses EXACTEMENT identiques à celles obtenues sans le champ ; (b) poids actif (0,05) : les poses diffèrent d'au moins 1e-6 de celles sans régularisation ;
-    /// (c) un poids énorme tire chaque coupe vers le mouvement de ses voisines : l'écart de pose entre coupes voisines d'un même stack, mesuré après le recalage, est plus petit qu'avec un poids nul.
+    /// Entrées de la régularisation temporelle (blobs, stack coronal, poses courantes connues) : (a) pour une coupe intérieure, chaque cible est la MOYENNE, sur ses deux voisines (k − 1 et k + 1), de `M_voisine · M_coupe⁻¹ · p` (valeur recalculée à la main, avec une rotation sur la coupe pour fixer l'ordre de composition) ; (b) pour une coupe dont la voisine suivante est
+    /// absente (dernière coupe), la cible n'utilise que la voisine précédente ; (c) les points sont `n_points` pixels de masque à pas régulier (au plus `n_points`), et leur nombre est celui des cibles ; (d) sans aucune voisine (stack d'une seule coupe), le résultat est `None`.
+    #[test]
+    fn the_temporal_prior_inputs_average_the_relative_motion_of_the_neighbours() {
+        use crate::s2s::temporal_prior_inputs;
+        let t = Temp::new("a_priori_temporel_entrees");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let si = 1usize;
+        let n = stacks[si].dim().2;
+        let mut poses = SlicePoses::identity(&stacks);
+        let centre = Vector3::new(1.0, 2.0, 3.0);
+        let m = |rot: [f64; 3], tr: [f64; 3]| mouvement_rigide(&Vector3::from(rot).map(f64::to_radians), &Vector3::from(tr), &centre);
+        let (k, dernier) = (5usize, n - 1);
+        poses.set(si, k, m([3.0, -2.0, 4.0], [0.0, 2.0, 1.0]));
+        poses.set(si, k - 1, m([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
+        poses.set(si, k + 1, m([-2.0, 1.0, 0.0], [3.0, -1.0, 0.5]));
+        poses.set(si, dernier, m([1.0, 1.0, -1.0], [0.0, 0.5, 2.0]));
+        poses.set(si, dernier - 1, m([0.0, 2.0, 0.0], [-1.0, 0.0, 1.0]));
+        let tous: Vec<Vector3<f64>> = (0..200).map(|i| Vector3::new(i as f64 * 0.7 - 30.0, (i % 13) as f64 * 3.0, (i % 7) as f64 - 20.0)).collect();
+        let a_la_main = |coupe: usize, voisines: &[usize], p: &Vector3<f64>| {
+            let moyenne = voisines.iter().map(|&v| (poses.get(si, v) * poses.get(si, coupe).try_inverse().unwrap() * p.push(1.0)).xyz()).sum::<Vector3<f64>>();
+            moyenne / voisines.len() as f64
+        };
+        for (coupe, voisines) in [(k, vec![k - 1, k + 1]), (dernier, vec![dernier - 1])] {
+            let (points, cibles) = temporal_prior_inputs(&stacks[si], &poses, si, coupe, &tous, 20).expect("voisines");
+            assert_eq!(points.len(), cibles.len());
+            assert!(points.len() >= 20 && points.len() <= 40, "(c) {} points", points.len());
+            assert_eq!(points[1] - points[0], tous[10] - tous[0], "(c) pas régulier");
+            for (p, c) in points.iter().zip(&cibles) {
+                assert!((c - a_la_main(coupe, &voisines, p)).norm() < 1e-9, "(a)/(b) coupe {coupe} : {c} contre {}", a_la_main(coupe, &voisines, p));
+            }
+        }
+        // (d) un stack d'une seule coupe n'a pas de voisine
+        let seule = stack_avec_masque(&t, "seule", &Array3::<f32>::ones((8, 8, 1)), &Array3::<u8>::ones((8, 8, 1)), stacks[si].affine(), { let e = stacks[si].spacing(); [e[0] as f32, e[1] as f32, e[2] as f32] });
+        assert!(temporal_prior_inputs(&seule, &SlicePoses::identity(std::slice::from_ref(&seule)), 0, 0, &tous, 20).is_none(), "(d)");
+    }
+
+    /// Câblage de la régularisation temporelle dans le recalage coupe-coupe (blobs) : (a) poids nul (défaut) : poses EXACTEMENT identiques à celles obtenues sans le champ ; (b) poids actif (0,05) : les poses diffèrent d'au moins 1e-6 de celles sans régularisation, et de celles obtenues avec 0,5 (le poids est transmis) ;
+    /// (c) un poids énorme tire chaque coupe vers le mouvement de ses voisines : l'écart de pose entre coupes voisines d'un même stack, mesuré après le recalage, est plus petit qu'avec un poids nul ; (d) une coupe laissée à l'identité dans un stack décalé de 3 mm est tirée vers le décalage de ses voisines.
     #[test]
     fn the_temporal_regularisation_is_wired_into_the_s2s_sweeps() {
         use crate::s2s::{register_slices_s2s, S2sConfig};
@@ -4029,9 +4194,23 @@ mod tests {
         assert_eq!(ecart(&sans, &nul), 0.0, "(a)");
         let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.05, ..base }, &device).unwrap().poses;
         assert!(ecart(&sans, &actif) > 1e-6, "(b) la régularisation n'a aucun effet");
+        let intermediaire = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.5, ..base }, &device).unwrap().poses;
+        assert!(ecart(&actif, &intermediaire) > 1e-6, "(b') le poids configuré doit être transmis : 0,05 et 0,5 donnent les mêmes poses");
         let enorme = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 50.0, ..base }, &device).unwrap().poses;
         println!("rugosité : sans {:.3}, poids 0,05 {:.3}, poids 50 {:.3}", rugosite(&sans), rugosite(&actif), rugosite(&enorme));
         assert!(rugosite(&enorme) < rugosite(&sans), "(c) rugosité {} contre {}", rugosite(&enorme), rugosite(&sans));
+        // (d) les cibles viennent des VOISINES : dans le stack 1, toutes les coupes partent d'un décalage de 3 mm en x sauf la coupe 5 (identité) ; avec un poids énorme, la coupe 5 est tirée vers ce décalage (écart de pose de 3 au départ, 3,11 sans régularisation, 1,50 mesuré avec un poids de 50 : les voisines se relâchent aussi vers la coupe, d'où la moitié de l'écart ; seuil à 2,25), pas laissée où elle est
+        let decalage = mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros());
+        let mut inegal = SlicePoses::identity(&stacks);
+        for k in 0..stacks[1].dim().2 {
+            inegal.set(1, k, decalage);
+        }
+        inegal.set(1, 5, Matrix4::identity());
+        let tiree = register_slices_s2s(&stacks, &inegal, &S2sConfig { temporal_weight: 50.0, ..base }, &device).unwrap().poses;
+        let distance = (tiree.get(1, 5) - decalage).abs().max();
+        let libre = register_slices_s2s(&stacks, &inegal, &S2sConfig { temporal_weight: 0.0, ..base }, &device).unwrap().poses;
+        println!("(d) écart de la coupe 5 au décalage de ses voisines : départ 3, sans régularisation {:.3}, poids 50 {distance:.3}", (libre.get(1, 5) - decalage).abs().max());
+        assert!(distance < 2.25, "(d) la coupe 5 doit être tirée vers le mouvement de ses voisines : {distance}");
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier
@@ -4414,7 +4593,7 @@ mod tests {
         let t = Temp::new("pipeline_biais");
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, ..Default::default() };
+        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, s2s_temporal_weight: 0.0, ..Default::default() };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let s2s = crate::s2s::S2sConfig { sweeps: 1, block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() };
         let direct = |alternances: usize, seuil: f64| {

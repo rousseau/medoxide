@@ -859,6 +859,24 @@ pub(crate) fn sweep_schedule(config: &S2sConfig) -> Vec<(f64, usize, bool)> {
     niveaux
 }
 
+/// Entrées de la régularisation temporelle d'une coupe `k` du stack `si` : `(points, cibles)`. Les `points` sont `n_points` pixels de masque de la coupe (pas régulier parmi `tous_les_points`) ; la cible de chacun est la moyenne, sur les voisines directes recalables (`k − 1` et `k + 1`, absentes aux bords ou si
+/// elles n'ont pas de pixel de masque), de la position que lui donnerait leur mouvement RELATIF `M_voisine · M_coupe⁻¹` (poses courantes). `None` si la coupe n'a aucune voisine recalable.
+pub(crate) fn temporal_prior_inputs(stack: &Stack, courantes: &SlicePoses, si: usize, k: usize, tous_les_points: &[Vector3<f64>], n_points: usize) -> Option<(Vec<Vector3<f64>>, Vec<Vector3<f64>>)> {
+    let courante = *courantes.get(si, k);
+    let relatives: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
+        .into_iter()
+        .filter(|&kv| kv < stack.dim().2 && preparer_coupe(stack, kv, *courantes.get(si, kv)).is_some())
+        .map(|kv| courantes.get(si, kv) * courante.try_inverse().expect("une pose est inversible"))
+        .collect();
+    if relatives.is_empty() {
+        return None;
+    }
+    let pas = (tous_les_points.len() / n_points.max(1)).max(1);
+    let points: Vec<Vector3<f64>> = tous_les_points.iter().step_by(pas).copied().collect();
+    let cibles = points.iter().map(|p| relatives.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / relatives.len() as f64).collect();
+    Some((points, cibles))
+}
+
 /// **Estimation du mouvement coupe-coupe, sans reconstruction** : `config.sweeps` balayages sur toutes les coupes de tous les stacks, dans un ordre aléatoire (graine `config.seed`, ordre différent à chaque
 /// balayage). Pour chaque coupe : le problème d'intersection est construit aux poses COURANTES (les partenaires déjà recalés comptent), la coupe est recalée par [`register_slice_s2s`] depuis la pose nulle
 /// (6 paramètres autour de son pivot P3), et sa pose devient `D · M` aussitôt (Gauss–Seidel : les coupes suivantes voient la pose mise à jour). La mise à jour n'est **acceptée que si la concordance ne baisse
@@ -895,23 +913,12 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                 let courante = *courantes.get(si, k);
                 let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
                 let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
-                let probleme = if config.temporal_weight > 0.0 {
-                    // positions que donnerait à 64 pixels de masque de la coupe le mouvement relatif de ses voisines directes (précédente et suivante du stack, recalables) ; moyenne sur les voisines
-                    let voisines: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
-                        .into_iter()
-                        .filter(|&kv| kv < stacks[si].dim().2 && preparer_coupe(&stacks[si], kv, *courantes.get(si, kv)).is_some())
-                        .map(|kv| courantes.get(si, kv) * courante.try_inverse().expect("une pose est inversible"))
-                        .collect();
-                    if voisines.is_empty() {
-                        probleme
-                    } else {
-                        let pas = (preparee.points.len() / config.temporal_points.max(1)).max(1);
-                        let points: Vec<Vector3<f64>> = preparee.points.iter().step_by(pas).copied().collect();
-                        let cibles: Vec<Vector3<f64>> = points.iter().map(|p| voisines.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / voisines.len() as f64).collect();
-                        probleme.with_temporal_prior(&points, &cibles, config.temporal_weight)
-                    }
-                } else {
-                    probleme
+                let probleme = match config.temporal_weight > 0.0 {
+                    true => match temporal_prior_inputs(&stacks[si], &courantes, si, k, &preparee.points, config.temporal_points) {
+                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, config.temporal_weight),
+                        None => probleme,
+                    },
+                    false => probleme,
                 };
                 let probleme = if config.reliability_high > config.reliability_low {
                     probleme.with_partner_weights(|sj, kj| reliability_weight(scores[decalages[sj] + kj], config.reliability_low, config.reliability_high, config.reliability_floor))

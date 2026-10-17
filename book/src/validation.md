@@ -355,6 +355,26 @@ Aucune baisse supérieure à 0,01 sur les six sujets (le pire : −0,0014) ; les
 
 Le code est testé par mutation (14 mutants du câblage et de la garde, 19 de l'estimateur et 5 de l'écrêtage).
 
+## Régularisation temporelle
+
+**Idée.** En TRUFI les coupes d'un stack sont acquises l'une après l'autre (≈ 1 s) : deux coupes voisines dans l'espace sont voisines dans le temps, donc leurs mouvements sont presque égaux. Le coupe-coupe, qui estime chaque coupe seule, ne l'utilise pas ; une coupe dont les intersections sont peu informatives dérive. Le coût d'une coupe devient la concordance moins λ · moyenne |P′ − Q|² (mm⁻² pour λ), où P′ sont 64 points du masque déplacés par la pose candidate et Q les positions que donnerait le mouvement relatif de ses voisines directes (k ± 1, recalées elles aussi). Voir `--s2s-temporal-weight` et `docs/RECHERCHE_MULTISTART.md` (§ 11).
+
+**Critères fixés avant la mesure du défaut** (meilleur λ parmi 0,005 / 0,01 / 0,02 ; le plus petit qui satisfait tout) : (1) banc lisse ±6 mm ≥ 80 % des coupes à ≤ 1,5 mm en moyenne ; (2) banc indépendant ±3 mm ≥ 85 % ; (3) réel : concordance moyenne ≥ celle du défaut − 0,005 ; (4) accord des poses avec SVRTK, NeSVoR et NiftyMIC non dégradé ; (5) temps ≤ +10 %.
+
+| λ | lisse ±6 mm | lisse ±4 mm | indépendant ±3 mm | concordance réelle (6 sujets) |
+|---|---|---|---|---|
+| 0 | 23 % | 68 % | 66 % | 0,8148 |
+| 0,005 | 74 % ✗ | 89 % | 88 % | 0,8184 |
+| **0,01** | **85 %** | 90 % | **90 %** | **0,8125** |
+| 0,02 | 90 % | 90 % | 88 % | 0,8003 ✗ |
+| 0,1 | 36 % | 88 % | — | — |
+
+Banc : un sujet réel (géométrie des stacks et contenu), référence SVRTK, moyenne sur trois graines (7, 11, 13) ; la variance entre graines est de ±15 points. À λ = 0,1 le terme domine la concordance et la méthode échoue. **λ = 0,01 est le défaut.** Accord des poses à λ = 0,01 (médiane / part à plus de 3 mm, par rapport au défaut) : égal ou meilleur sur cinq sujets sur six (par exemple NiftyMIC sur l'agité 3 : 41 → 12 % de coupes à plus de 3 mm) ; une dégradation marginale sur l'agité 3 avec NeSVoR (38 → 44 %, médiane inchangée, 34 coupes). Temps CPU sur ce sujet, deux répétitions : 848 s contre 852 s, puis 866 s contre 942 s, soit +5 % en moyenne (+0,5 % et +9 % : le coût du terme est faible mais la mesure est bruitée ; critère ≤ +10 % tenu en moyenne).
+
+Le code est testé par mutation : 10 mutants du câblage (signe du terme, normalisation, poids transmis, cibles, voisines précédente et suivante, composition des poses, filtre des voisines recalables, pas d'échantillonnage, bord du stack, activation) sont tous tués. Un premier passage en laissait survivre cinq : le test de câblage ne vérifiait que l'existence d'un effet ; la construction des cibles a été isolée dans une fonction testée sur des valeurs exactes, et un test impose qu'une coupe laissée à l'identité dans un stack décalé soit tirée vers ses voisines.
+
+**Limite.** Un saut de mouvement entre deux coupes voisines (le fœtus bouge au milieu d'un stack) est pénalisé par le terme ; la brique est faite pour un mouvement lisse par morceaux, et le banc à sauts (semi-synthétique, § 12 du document de recherche) doit mesurer ce que coûte un saut.
+
 ## Comparaison avec NiftyMIC
 
 NiftyMIC ([Ebner et al., 2020](algorithmes.md#références)) fait un recalage volume-vers-volume des stacks (recherche jusqu'à 45°), puis un recalage coupe-volume hiérarchique, une correction d'intensité par stack et un rejet des coupes aberrantes. Il est exécuté dans Docker (image `renbem/niftymic`, amd64 émulé : 9 à 13 minutes par sujet ; convention validée sur cinq des six sujets, imposée pour le sixième dont le volume n'a pas été écrit), réglages par défaut sauf la résolution (0,8 mm), la correction du champ de biais (désactivée) et l'utilisation des masques dans la reconstruction (`--use-masks-srr 1`, voir ci-dessous) ; ses transformations par coupe (`.tfm` ITK, LPS) sont lues par `scripts/read_niftymic_poses.py`. **Convention validée par mesure**, comme pour SVRTK : la corrélation entre les pixels de masque d'une coupe et le volume de NiftyMIC échantillonné à sa pose est de 0,935 (sujet calme 1) et 0,921 (agité 1) avec la transformation par coupe lue telle quelle, contre 0,652 et 0,376 sans correction et 0,44 avec l'inverse.
