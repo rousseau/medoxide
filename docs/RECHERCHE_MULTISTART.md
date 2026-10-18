@@ -311,3 +311,21 @@ Les critères du § 18 reposaient sur l'accord avec d'autres méthodes et sur la
 | 2 | 0,9202 / 0,0798 / 399 s | 0,9096 / 0,0769 / 887 s |
 
 Le raffinement est **plus mauvais sur les trois replis** : juge −0,008 à −0,011 (critère : +0,01), netteté −2,8 à −4,7 % (critère : pas plus de −2 %), et temps ×2,3. **Le raffinement coupe-volume après le coupe-coupe est définitivement non retenu** (trois mesures indépendantes concordantes : accord des poses, concordance, juge et netteté), alors que le banc exact le donne gagnant : le banc exact simule avec le modèle direct de l'estimateur volumique, le réel non. L'option reste dans le code, désactivée.
+
+## 20. Gain de l'a priori temporel sur six sujets (2026-10-18)
+
+Le § 17 n'a mesuré le gain de l'a priori (`b=1,12 + t=0,01` contre `b=1,12`) que sur deux sujets. Quatre sujets de plus, chacun avec sa propre géométrie de stacks et comme contenu **sa reconstruction SVRTK** ; banc E2, trois graines (7, 11, 13), scénarios lisse ±6, sauts ±4 et indépendant ±3 mm. **Critères fixés avant la mesure** (sur les six sujets, deux du § 17 inclus, la moyenne portant sur les sujets) : l'a priori est **confirmé comme défaut** si (a) le gain moyen sur lisse ±6 est d'au moins +10 points ; (b) le gain moyen sur sauts ±4 est d'au moins +5 points ; (c) la perte moyenne sur indépendant ±3 ne dépasse pas 15 points ; (d) aucun sujet ne perd plus de 15 points sur lisse ±6 ou sauts ±4. Sinon, le défaut est à rediscuter (par exemple λ plus faible, ou a priori seulement si le mouvement estimé est lisse).
+
+**Résultats du § 20 (banc E2, trois graines, part ≤ 1,5 mm ; `b=1,12` → `b=1,12 + t=0,01`).**
+
+| Sujet | lisse ±6 | sauts ±4 | indépendant ±3 |
+|---|---|---|---|
+| agité 1 | 26 → 72 % (+46) | 50 → 58 % (+8) | 88 → 78 % (−10) |
+| agité 2 | 33 → 42 % (+9) | 29 → 32 % (+3) | 83 → 55 % (−28) |
+| agité 3 | 6 → 26 % (+20) | 16 → 26 % (+11) | 17 → 34 % (+17) |
+| calme 3 | 69 → 74 % (+5) | 67 → 69 % (+2) | 83 → 65 % (−17) |
+| calme 2 (contenu de notre reconstruction) | 8 → 29 % (+22) | 14 → 61 % (+47) | 56 → 45 % (−10) |
+| calme 1 (contenu SVRTK, § 17) | 42 → 76 % (+34) | 78 → 84 % (+6) | 87 → 81 % (−6) |
+| **moyenne** | **+22,6** | **+12,9** | **−9,2** |
+
+Critères : (a) lisse ±6 : +22,6 (≥ +10) **tenu** ; (b) sauts ±4 : +12,9 (≥ +5) **tenu** ; (c) indépendant ±3 : −9,2 (≥ −15) **tenu** ; (d) aucun sujet ne perd sur lisse ±6 ou sauts ±4 (pire écart : +4,7 et +2,3) **tenu**. **L'a priori temporel λ = 0,01 est confirmé comme défaut sur six sujets.** Limite à conserver : pour un mouvement indépendant d'une coupe à l'autre (peu physique en TRUFI), la perte atteint 28 points sur un sujet (agité 2), 17 sur un autre (calme 3) ; elle est compensée par le gain sur les mouvements lisses ou à sauts (jusqu'à +47) et par l'accord sur données réelles (§ 11).
