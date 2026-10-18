@@ -329,3 +329,22 @@ Le § 17 n'a mesuré le gain de l'a priori (`b=1,12 + t=0,01` contre `b=1,12`) q
 | **moyenne** | **+22,6** | **+12,9** | **−9,2** |
 
 Critères : (a) lisse ±6 : +22,6 (≥ +10) **tenu** ; (b) sauts ±4 : +12,9 (≥ +5) **tenu** ; (c) indépendant ±3 : −9,2 (≥ −15) **tenu** ; (d) aucun sujet ne perd sur lisse ±6 ou sauts ±4 (pire écart : +4,7 et +2,3) **tenu**. **L'a priori temporel λ = 0,01 est confirmé comme défaut sur six sujets.** Limite à conserver : pour un mouvement indépendant d'une coupe à l'autre (peu physique en TRUFI), la perte atteint 28 points sur un sujet (agité 2), 17 sur un autre (calme 3) ; elle est compensée par le gain sur les mouvements lisses ou à sauts (jusqu'à +47) et par l'accord sur données réelles (§ 11).
+
+## 21. A priori temporel : juge hors échantillon et netteté sur six sujets (2026-10-18)
+
+**Lacune.** La preuve réelle de l'a priori λ = 0,01 repose sur la concordance (que le coupe-coupe maximise) et l'accord des poses avec d'autres méthodes ; le juge hors échantillon et la netteté (mesure indépendante, § 19) n'ont pas été lancés pour lui. Six sujets, un repli par stack (`scripts/benchmark_variantes_s2s.py`), sans correction de biais pour les deux variantes (le juge est invalide avec) : `base0 = --s2s-bias-rounds 0 --s2s-temporal-weight 0` et `prior = --s2s-bias-rounds 0` (a priori λ = 0,01 du défaut).
+**Critères fixés avant la mesure** : le défaut λ = 0,01 est **confirmé** si (1) le juge moyen (tous replis, tous sujets) de `prior` n'est pas inférieur à celui de `base0` de plus de 0,005 ; (2) la netteté moyenne de `prior` n'est pas inférieure de plus de 2 % ; (3) aucun sujet ne perd plus de 0,02 de juge moyen. Le juge favorisant le lissage, un gain de juge sans la condition (2) ne compte pas. Si (1) ou (3) échoue, λ est à rediscuter (valeur plus faible, ou a priori conditionné à la rugosité du mouvement estimé) ; si seule (2) échoue, le gain de juge est à interpréter comme du lissage et le défaut reste à discuter.
+
+**Résultats du § 21 (juge hors échantillon et netteté, six sujets, trois replis par sujet, sans correction de biais).**
+
+| Sujet | juge `base0` | juge `prior` | écart | netteté |
+|---|---|---|---|---|
+| calme 1 | 0,8770 | 0,8776 | +0,0006 | +0,1 % |
+| agité 1 | 0,8372 | 0,8603 | +0,0231 | +3,0 % |
+| agité 2 | 0,7443 | 0,7615 | +0,0172 | +2,0 % |
+| calme 2 | 0,9183 | 0,9191 | +0,0008 | +0,2 % |
+| calme 3 | 0,8997 | 0,9000 | +0,0003 | +0,0 % |
+| agité 3 | 0,6707 | 0,7305 | +0,0598 | +1,4 % |
+| **moyenne (18 replis)** | | | **+0,0170** | **+1,2 %** |
+
+Critères : (1) juge moyen : +0,0170 (≥ −0,005) **tenu** ; (2) netteté : +1,2 % (≥ −2 %) **tenu** ; (3) aucun sujet en perte (pire écart : +0,0003) **tenu**. **Le défaut λ = 0,01 est confirmé par une mesure indépendante de la concordance** : neutre sur les sujets calmes, nettement favorable sur les sujets agités (jusqu'à +0,060 de juge sans perte de netteté, donc pas un simple lissage). Avec les six sujets du banc E2 (§ 20), les quatre mesures (concordance, accord des poses, banc exact, juge hors échantillon) convergent.
