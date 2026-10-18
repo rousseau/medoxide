@@ -335,16 +335,36 @@ Critères : (a) lisse ±6 : +22,6 (≥ +10) **tenu** ; (b) sauts ±4 : +12,9 (�
 **Lacune.** La preuve réelle de l'a priori λ = 0,01 repose sur la concordance (que le coupe-coupe maximise) et l'accord des poses avec d'autres méthodes ; le juge hors échantillon et la netteté (mesure indépendante, § 19) n'ont pas été lancés pour lui. Six sujets, un repli par stack (`scripts/benchmark_variantes_s2s.py`), sans correction de biais pour les deux variantes (le juge est invalide avec) : `base0 = --s2s-bias-rounds 0 --s2s-temporal-weight 0` et `prior = --s2s-bias-rounds 0` (a priori λ = 0,01 du défaut).
 **Critères fixés avant la mesure** : le défaut λ = 0,01 est **confirmé** si (1) le juge moyen (tous replis, tous sujets) de `prior` n'est pas inférieur à celui de `base0` de plus de 0,005 ; (2) la netteté moyenne de `prior` n'est pas inférieure de plus de 2 % ; (3) aucun sujet ne perd plus de 0,02 de juge moyen. Le juge favorisant le lissage, un gain de juge sans la condition (2) ne compte pas. Si (1) ou (3) échoue, λ est à rediscuter (valeur plus faible, ou a priori conditionné à la rugosité du mouvement estimé) ; si seule (2) échoue, le gain de juge est à interpréter comme du lissage et le défaut reste à discuter.
 
-**Résultats du § 21 (juge hors échantillon et netteté, six sujets, trois replis par sujet, sans correction de biais).**
+**Résultats du § 21 (juge hors échantillon et netteté, six sujets, un repli par stack : trois par sujet, quatre pour l'agité 1, sans correction de biais).**
 
 | Sujet | juge `base0` | juge `prior` | écart | netteté |
 |---|---|---|---|---|
 | calme 1 | 0,8770 | 0,8776 | +0,0006 | +0,1 % |
-| agité 1 | 0,8372 | 0,8603 | +0,0231 | +3,0 % |
+| agité 1 (4 replis) | 0,8430 | 0,8623 | +0,0193 | +2,5 % |
 | agité 2 | 0,7443 | 0,7615 | +0,0172 | +2,0 % |
 | calme 2 | 0,9183 | 0,9191 | +0,0008 | +0,2 % |
 | calme 3 | 0,8997 | 0,9000 | +0,0003 | +0,0 % |
 | agité 3 | 0,6707 | 0,7305 | +0,0598 | +1,4 % |
-| **moyenne (18 replis)** | | | **+0,0170** | **+1,2 %** |
+| **moyenne (19 replis)** | | | **+0,0165** | **+1,2 %** |
 
-Critères : (1) juge moyen : +0,0170 (≥ −0,005) **tenu** ; (2) netteté : +1,2 % (≥ −2 %) **tenu** ; (3) aucun sujet en perte (pire écart : +0,0003) **tenu**. **Le défaut λ = 0,01 est confirmé par une mesure indépendante de la concordance** : neutre sur les sujets calmes, nettement favorable sur les sujets agités (jusqu'à +0,060 de juge sans perte de netteté, donc pas un simple lissage). Avec les six sujets du banc E2 (§ 20), les quatre mesures (concordance, accord des poses, banc exact, juge hors échantillon) convergent.
+Critères : (1) juge moyen : +0,0165 (≥ −0,005) **tenu** ; (2) netteté : +1,2 % (≥ −2 %) **tenu** ; (3) aucun sujet en perte (pire écart : +0,0003) **tenu**. **Le défaut λ = 0,01 est confirmé par une mesure indépendante de la concordance** : neutre sur les sujets calmes, nettement favorable sur les sujets agités (jusqu'à +0,060 de juge sans perte de netteté, donc pas un simple lissage). Avec les six sujets du banc E2 (§ 20), les quatre mesures (concordance, accord des poses, banc exact, juge hors échantillon) convergent.
+
+## 22. Coupes de bord : la qualité de recalage prédit-elle les échecs ? (2026-10-18)
+
+**Question.** Les échecs restants (plages contiguës aux extrémités des stacks, coupes de petite surface) peuvent-ils être repérés **sans vérité** pour être exclus ou pondérés à la reconstruction ? Le rapport du coupe-coupe donne à chaque coupe sa concordance finale (`ncc_final`). **Mesure (étape A)** : sur le banc E2 en production (`b=1,12 + t=0,01`, détail par coupe), sujets A (contenu propre) et B (contenu SVRTK), lisse ±6 et sauts ±4, trois graines, aire sous la courbe ROC (AUC) de `ncc_final` pour prédire l'échec de pose (erreur > 1,5 mm) ; en comparaison, l'AUC de la surface du masque. **Critère fixé avant la mesure** : la piste « exclure ou pondérer les coupes peu fiables à la reconstruction » n'est poursuivie que si l'AUC de `ncc_final` est d'au moins 0,75 dans la moyenne des quatre cas et d'au moins 0,65 dans chacun ; sinon elle est abandonnée (la concordance ne sépare pas les coupes mal recalées). Si elle est poursuivie, l'étape B (exclusion des coupes sous un quantile de concordance, ou poids lisse à la reconstruction) sera jugée par le juge hors échantillon et la netteté sur les six sujets, critères à écrire avant.
+
+**Résultat de l'étape A (§ 22), trois graines, production `b=1,12 + t=0,01`.**
+
+| Cas | coupes | échecs (> 1,5 mm) | AUC concordance finale | AUC surface du masque |
+|---|---|---|---|---|
+| sujet A, lisse ±6 | 246 | 67 % | 0,72 | 0,46 |
+| sujet A, sauts ±4 | 246 | 37 % | 0,86 | 0,52 |
+| sujet B, lisse ±6 | 294 | 19 % | 0,74 | 0,59 |
+| sujet B, sauts ±4 | 294 | 13 % | 0,80 | 0,64 |
+| **moyenne** | | | **0,78** (min 0,72) | 0,55 |
+
+Critère (moyenne ≥ 0,75, minimum ≥ 0,65) **tenu** : la concordance finale d'une coupe prédit modérément bien son échec de pose ; la surface du masque, non (0,55) : l'hypothèse « les échecs sont les coupes de bord, à peu de tissu » est donc **faible** (elle ne l'explique que pour les sauts du sujet A, 0,52 à 0,80 selon les cas). **La piste est poursuivie (étape B).**
+
+**Étape B : exclure à la reconstruction les coupes les moins bien recalées.** Option `--s2s-exclude-fraction q` (0 : aucune) : après le coupe-coupe, la fraction `q` de coupes (tous stacks confondus) ayant la plus faible concordance finale est écartée de la reconstruction (masque de coupe mis à zéro) ; les poses ne changent pas. **Critères fixés avant la mesure** : juge hors échantillon et netteté sur les six sujets, trois replis (`scripts/benchmark_variantes_s2s.py`, sans correction de biais), variante `q = 0,15` contre la base `--s2s-bias-rounds 0` du § 21 (mêmes poses, seule la reconstruction diffère). Retenue (en option puis en défaut) si (1) le juge moyen n'est pas inférieur de plus de 0,005 à la base ; (2) la netteté moyenne gagne au moins 1 % ; (3) aucun sujet ne perd plus de 0,02 de juge ; (4) aucun trou de couverture n'apparaît (le juge est calculé sur le même nombre de coupes de test). Si (2) est tenu mais pas (1), l'exclusion est un compromis netteté / prédiction à discuter, pas un gain.
+
+**Erratum (même jour).** La première version de ce tableau donnait pour l'agité 1 (+0,0231 ; +3,0 %) et pour la moyenne (+0,0170 sur 18 replis) des valeurs calculées alors que le quatrième repli de ce sujet n'était pas terminé : le marqueur de fin n'avait pas été vérifié. Chiffres corrigés ci-dessus (quatre replis, +0,0193 ; +2,5 %, moyenne +0,0165 sur 19 replis) ; les trois critères restent tenus.
