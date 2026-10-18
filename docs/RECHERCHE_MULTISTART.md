@@ -296,3 +296,18 @@ Critères (a) et (b) du § 18 : **tenus** pour `v=2` (gain de +27 à +48 points 
 (défaut → raffiné).
 
 **Pourquoi le banc E2 et le réel divergent.** Sur le banc E2 (vérité exacte, contenu réel simulé avec le **même modèle direct** que celui du coupe-volume), le raffinement gagne +27 à +48 points sur les mouvements difficiles et ne dégrade pas la médiane ; sur données réelles, l'accord avec les trois méthodes volumiques indépendantes baisse légèrement presque partout (médianes de 0,4 à 0,6 mm sur les sujets calmes) et nettement sur le sujet agité 2 (NiftyMIC : 74 → 89 % de coupes à plus de 3 mm). C'est la quatrième fois que le simulateur qui partage le modèle de l'estimateur est plus favorable que le réel (§ LEARNING du 2026-10-15). Hypothèses, non testées : la reconstruction de raffinement à 2 mm a un plancher de précision (de l'ordre de 1 mm, mesuré sur blobs), et un modèle direct imparfait (mouvement intra-coupe, intensité) pénalise un critère volumique plus qu'un critère d'intersection. Un test à résolution plus fine (1 mm) n'a pas été fait. `v=4` (4 cycles) était déjà moins bon que `v=2` sur le banc E2 (71 % contre 87 % en lisse ±4 sur le sujet A).
+
+## 19. Raffinement coupe-volume : juge hors échantillon et netteté (2026-10-18)
+
+Les critères du § 18 reposaient sur l'accord avec d'autres méthodes et sur la concordance (biaisée en faveur du coupe-coupe). Une mesure indépendante de ces deux-là existe : le **juge hors échantillon** (un stack mis de côté ; NCC après recalage contre le volume reconstruit avec les autres stacks) et la **netteté** (`scripts/benchmark_variantes_s2s.py`). Le juge est invalide quand la correction de biais est active (il compare des coupes brutes à un volume corrigé) : les deux variantes sont donc lancées avec `--s2s-bias-rounds 0`. Variantes : `--s2s-bias-rounds 0` (base) et `--s2s-bias-rounds 0 --s2v-refine-cycles 2`. Deux sujets (un calme à trois stacks, un agité à quatre), un repli par stack.
+**Critères fixés avant la mesure** : la décision du § 18 est **revue** (mesure sur les six sujets) si, sur les deux sujets, le juge moyen du raffinement dépasse la base d'au moins 0,01 **et** la netteté ne baisse pas de plus de 2 % ; sinon le raffinement est définitivement non retenu (le juge favorise le lissage, d'où la condition sur la netteté).
+
+**Résultat (sujet calme à trois stacks ; le second sujet n'a pas été lancé, un échec sur le premier suffisant).** Juge hors échantillon / netteté / temps CPU, sans correction de biais :
+
+| Stack mis de côté | base | raffinement (2 cycles) |
+|---|---|---|
+| 0 | 0,9276 / 0,0787 / 403 s | 0,9195 / 0,0750 / 932 s |
+| 1 | 0,9094 / 0,0786 / 379 s | 0,9017 / 0,0764 / 852 s |
+| 2 | 0,9202 / 0,0798 / 399 s | 0,9096 / 0,0769 / 887 s |
+
+Le raffinement est **plus mauvais sur les trois replis** : juge −0,008 à −0,011 (critère : +0,01), netteté −2,8 à −4,7 % (critère : pas plus de −2 %), et temps ×2,3. **Le raffinement coupe-volume après le coupe-coupe est définitivement non retenu** (trois mesures indépendantes concordantes : accord des poses, concordance, juge et netteté), alors que le banc exact le donne gagnant : le banc exact simule avec le modèle direct de l'estimateur volumique, le réel non. L'option reste dans le code, désactivée.
