@@ -105,6 +105,10 @@ pub struct ReconstructionConfig {
     pub s2s_temporal_robust_start_mm: f64,
     /// Coupe-coupe : exposant de la pondération du poids temporel par l'information de la coupe (nombre de points d'intersection valides) ; 0 : poids constant.
     pub s2s_temporal_info_exponent: f64,
+    /// Coupe-coupe : nombre de cycles coupe-volume qui suivent le coupe-coupe (partant de ses poses, sur les stacks corrigés du biais), reconstruits à la résolution `s2v_refine_resolution_mm` ; 0 : aucun (défaut, option).
+    pub s2v_refine_cycles: usize,
+    /// Résolution de la reconstruction des cycles coupe-volume de raffinement (mm).
+    pub s2v_refine_resolution_mm: f64,
     /// Coupe-coupe : réduction relative minimale de l'incohérence d'intensité entre stacks (`1 − après / avant`, voir [`BiasFields::inconsistency_reduction`]) pour que la correction de biais estimée soit appliquée ; en deçà, le champ ne fait que s'ajuster au bruit d'anatomie (un mesuré : 0,4 % sans biais, 35 % avec un biais de 30 %) et les stacks restent inchangés. 0 : toujours appliquer.
     pub s2s_bias_min_reduction: f64,
     /// Coupe-coupe : demi-étendue (mm) de la recherche exhaustive d'un bloc (translations puis rotations en mm équivalents) ; 0 : pas de recherche.
@@ -154,6 +158,8 @@ impl Default for ReconstructionConfig {
             s2s_temporal_robust_mm: 0.0,
             s2s_temporal_robust_start_mm: 0.0,
             s2s_temporal_info_exponent: 0.0,
+            s2v_refine_cycles: 0,
+            s2v_refine_resolution_mm: 2.0,
             s2s_bias_min_reduction: 0.1,
             s2s_block_search_mm: 12.0,
             s2v_cycles: 6,
@@ -252,7 +258,7 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
         Motion::SliceToSlice => {
             if config.s2s_bias_rounds == 0 {
                 let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
-                let (poses, slices) = (rapport.poses, rapport.slices);
+                let (poses, slices) = refine_with_slice_to_volume(stacks, rapport.poses, rapport.slices, config, device)?;
                 let volume = reconstruct_with_poses(&grid, stacks, &poses, config)?;
                 return Ok(ReconstructionOutput { grid, volume, poses, slices });
             }
@@ -265,6 +271,7 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
                 (poses, slices) = (rapport.poses, rapport.slices);
             }
             let corriges = correct_stacks(stacks, &estimate_bias_fields(stacks, &poses, &biais)?, config.s2s_bias_min_reduction);
+            let (poses, slices) = refine_with_slice_to_volume(&corriges, poses, slices, config, device)?;
             let volume = reconstruct_with_poses(&grid, &corriges, &poses, config)?;
             Ok(ReconstructionOutput { grid, volume, poses, slices })
         }
@@ -277,6 +284,19 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
             Ok(ReconstructionOutput { grid, volume, poses: result.poses, slices })
         }
     }
+}
+
+/// **Raffinement coupe-volume** après le coupe-coupe : `config.s2v_refine_cycles` cycles de la boucle coupe-volume ([`reconstruct_with_motion_correction`]) partant des `poses` du coupe-coupe, avec une reconstruction à la résolution `config.s2v_refine_resolution_mm` (grossière, pour borner le temps). Rend les poses finales et le rapport par coupe du dernier cycle
+/// (`slices` inchangé si aucun cycle n'a de rapport). Sans effet (poses et rapport rendus tels quels) si `s2v_refine_cycles = 0`.
+pub(crate) fn refine_with_slice_to_volume(stacks: &[Stack], poses: SlicePoses, slices: Vec<SliceReport>, config: &ReconstructionConfig, device: &Device) -> Result<(SlicePoses, Vec<SliceReport>), SvrError> {
+    if config.s2v_refine_cycles == 0 {
+        return Ok((poses, slices));
+    }
+    let grille = reconstruction_grid(stacks, config.s2v_refine_resolution_mm, config.margin_mm)?;
+    let reglages = loop_config(&ReconstructionConfig { s2v_cycles: config.s2v_refine_cycles, ..config.clone() });
+    let resultat = reconstruct_with_motion_correction(&grille, stacks, &poses, reglages, device, |_, _, _| {})?;
+    let slices = resultat.cycles.last().map(|r| r.slices.clone()).unwrap_or(slices);
+    Ok((resultat.poses, slices))
 }
 
 /// Copie des `stacks` corrigés du champ de biais `champs` (chaque stack divisé par l'exponentielle de son champ, aux positions nominales) si la correction réduit l'incohérence d'intensité d'au moins `min_reduction` (voir [`BiasFields::inconsistency_reduction`]) ; sinon copie inchangée.

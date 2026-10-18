@@ -3466,7 +3466,7 @@ mod tests {
 
     /// Réglages du coupe-coupe à comparer, séparés par des points-virgules : `fin` (recalage fin seul), `σ,balayages,niveaux` du gros-vers-fin (éventuellement suivi de `:bas,haut` pour la fiabilité des partenaires), ou des jetons séparés par `+` :
     /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle), `i=γ` (pondération du poids temporel par l'information), `r=c_mm` ou `r=c0_mm,c1_mm` (échelle de la pénalité temporelle robuste, constante ou décroissante) ;
-    /// `bias=1` est ignoré ici (lu par l'appelant, qui corrige alors les stacks du biais avant le recalage).
+    /// `bias=1` et `v=N` sont ignorés ici (lus par l'appelant : `bias=1` corrige les stacks du biais avant le recalage, `v=N` fait suivre le coupe-coupe de `N` cycles coupe-volume partant de ses poses).
     fn variantes_s2s(spec: &str, fin: crate::s2s::S2sConfig) -> Vec<(String, crate::s2s::S2sConfig)> {
         use crate::s2s::S2sConfig;
         spec.split(';')
@@ -3485,7 +3485,7 @@ mod tests {
                             "t" => config.temporal_weight = x[0],
                             "i" => config.temporal_info_exponent = x[0],
                             "r" => (config.temporal_robust_start_mm, config.temporal_robust_mm) = if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) },
-                            "bias" => {}
+                            "bias" | "v" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
                     }
@@ -3625,7 +3625,13 @@ mod tests {
                 println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
                 for (nom, config) in &variantes {
                     let travail = if nom.contains("bias=1") { correct_stacks(&stacks, &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default()).unwrap(), 0.1) } else { stacks.clone() };
-                    let poses = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap().poses;
+                    let mut poses = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap().poses;
+                    if let Some(cycles) = nom.split('+').find_map(|j| j.strip_prefix("v=")).and_then(|v| v.parse::<usize>().ok()) {
+                        // chaînage : cycles coupe-volume partant des poses du coupe-coupe (reconstruction à 2 mm pour borner le temps)
+                        let reglages = crate::pipeline::ReconstructionConfig { s2v_cycles: cycles, resolution_mm: 2.0, margin_mm: 4.0, ..Default::default() };
+                        let grille = reconstruction_grid(&travail, 2.0, 4.0).unwrap();
+                        poses = crate::align::reconstruct_with_motion_correction(&grille, &travail, &poses, crate::pipeline::loop_config(&reglages), &device, |_, _, _| {}).unwrap().poses;
+                    }
                     let (p, m, q) = part(&poses);
                     println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
                     if detail {
@@ -4335,6 +4341,63 @@ mod tests {
         assert_eq!(ecart(&sans, &nul), 0.0, "γ = 0 : inchangé");
         let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_info_exponent: 1.0, ..base }, &device).unwrap().poses;
         assert!(ecart(&sans, &actif) > 1e-6, "γ = 1 : aucun effet");
+    }
+
+    /// Raffinement coupe-volume après le coupe-coupe (blobs, poses de départ à ± 2 mm de la vérité) : (a) 0 cycle : poses rendues telles quelles (identiques) ; (b) 2 cycles à 2 mm : les poses sont finies et diffèrent d'au moins 1e-6 du départ ; (c) câblage du pipeline : `reconstruct` en mode coupe-coupe avec `s2v_refine_cycles = 2` rend EXACTEMENT les poses que donne
+    /// `refine_with_slice_to_volume` appliqué aux poses de `reconstruct` sans raffinement (déterministe) ; (d) le raffinement agit aussi dans la branche avec correction de biais. Aucune affirmation d'amélioration n'est faite ici : sur ces blobs analytiques (peu de structure), le raffinement à 2 mm dégrade les poses (mesuré : médiane 2,07 → 2,59 mm depuis ± 2 mm, 0,52 → 1,5 depuis ± 0,5 mm), alors que sur du contenu réel simulé il les améliore ;
+    /// l'effet est mesuré par `diagnose_the_semi_synthetic_benchmark` (variante `v=N`) et sur les sujets réels.
+    #[test]
+    fn the_slice_to_volume_refinement_is_applied_to_the_s2s_poses_by_the_pipeline() {
+        use crate::pipeline::{reconstruct, refine_with_slice_to_volume, Motion, ReconstructionConfig};
+        let t = Temp::new("raffinement_s2v");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecarts = poses_aleatoires(&stacks, 2.0, 2.0, 77);
+        let mut depart = SlicePoses::identity(&stacks);
+        for (si, s) in stacks.iter().enumerate() {
+            for k in 0..s.dim().2 {
+                depart.set(si, k, ecarts.get(si, k) * vraies.get(si, k));
+            }
+        }
+        let base = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, ..Default::default() };
+        // (a) 0 cycle : poses et rapport rendus tels quels (rapport sentinelle d'une entrée)
+        let sentinelle = vec![crate::align::SliceReport { stack: 9, slice: 9, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }];
+        let (rendues, rapport) = refine_with_slice_to_volume(&stacks, depart.clone(), sentinelle, &ReconstructionConfig { s2v_refine_cycles: 0, ..base.clone() }, &device).unwrap();
+        assert_eq!(ecart(&rendues, &depart), 0.0, "(a)");
+        assert!(rapport.len() == 1 && rapport[0].stack == 9, "(a) le rapport doit être rendu tel quel");
+        // (b) 2 cycles : poses modifiées ; le rapport est celui du dernier cycle (une entrée par coupe) ; les cycles, la résolution et la marge de la reconstruction sont pris en compte (poses différentes dès qu'on en change un)
+        let (affinees, rapport) = refine_with_slice_to_volume(&stacks, depart.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
+        let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
+        assert!(rapport.len() == n_coupes, "(b) rapport de {} entrées pour {n_coupes} coupes", rapport.len());
+        assert!(ecart(&affinees, &depart) > 1e-6, "(b) aucune modification");
+        let (depuis_en_tete, _) = refine_with_slice_to_volume(&stacks, SlicePoses::identity(&stacks), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
+        assert!(ecart(&depuis_en_tete, &affinees) > 1e-6, "(b) le raffinement doit partir des poses données : même résultat depuis l'en-tête");
+        for (nom, autre) in [("cycles", ReconstructionConfig { s2v_refine_cycles: 1, ..base.clone() }), ("résolution", ReconstructionConfig { s2v_refine_cycles: 2, s2v_refine_resolution_mm: 3.0, ..base.clone() }), ("marge", ReconstructionConfig { s2v_refine_cycles: 2, margin_mm: 9.0, ..base.clone() })] {
+            let (p, _) = refine_with_slice_to_volume(&stacks, depart.clone(), Vec::new(), &autre, &device).unwrap();
+            assert!(ecart(&p, &affinees) > 1e-6, "(b) {nom} sans effet");
+        }
+        assert!(stacks.iter().enumerate().all(|(si, s)| (0..s.dim().2).all(|k| affinees.get(si, k).iter().all(|v| v.is_finite()))), "(b) poses non finies");
+        // (c)
+        let sans = reconstruct(&stacks, &base, &device).unwrap();
+        let avec = reconstruct(&stacks, &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
+        assert!(ecart(&sans.poses, &avec.poses) > 1e-6, "(c) le raffinement n'a aucun effet dans le pipeline");
+        let (manuelle, _) = refine_with_slice_to_volume(&stacks, sans.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base }, &device).unwrap();
+        assert!(ecart(&avec.poses, &manuelle) < 1e-9, "(c) le pipeline doit appliquer le raffinement aux poses du coupe-coupe : {}", ecart(&avec.poses, &manuelle));
+        // (d) branche avec correction de biais (une alternance), sur des stacks avec un biais marqué (le champ corrigé change réellement les stacks) : le pipeline applique le raffinement aux poses du coupe-coupe SUR LES STACKS CORRIGÉS, c'est-à-dire exactement ce que donne `refine_with_slice_to_volume`
+        // appliqué aux poses du pipeline sans raffinement et aux stacks corrigés des champs estimés à ces poses
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        let champ = |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
+        let biaises = simuler_blobs_avec_champ(&t, &volume_de_blobs(), &modeles_de_blobs_larges(&t), &vraies, Some(&champ));
+        let avec_biais = ReconstructionConfig { s2s_bias_rounds: 1, s2s_bias_min_reduction: 0.0, ..base.clone() };
+        let sans_raffinement = reconstruct(&biaises, &avec_biais, &device).unwrap();
+        let avec_raffinement = reconstruct(&biaises, &ReconstructionConfig { s2v_refine_cycles: 2, ..avec_biais.clone() }, &device).unwrap();
+        assert!(ecart(&sans_raffinement.poses, &avec_raffinement.poses) > 1e-6, "(d) le raffinement n'a aucun effet avec la correction de biais");
+        let corriges = crate::pipeline::correct_stacks(&biaises, &estimate_bias_fields(&biaises, &sans_raffinement.poses, &BiasConfig::default()).unwrap(), 0.0);
+        let (attendues, _) = refine_with_slice_to_volume(&corriges, sans_raffinement.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..avec_biais }, &device).unwrap();
+        assert!(ecart(&avec_raffinement.poses, &attendues) < 1e-9, "(d) le raffinement doit porter sur les stacks corrigés : {}", ecart(&avec_raffinement.poses, &attendues));
+        let (sur_bruts, _) = refine_with_slice_to_volume(&biaises, sans_raffinement.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base }, &device).unwrap();
+        assert!(ecart(&sur_bruts, &attendues) > 1e-6, "(d) la correction de biais doit changer le raffinement (sinon le test ne distingue pas stacks corrigés et bruts)");
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier

@@ -246,3 +246,53 @@ Critères du § 12 pour λ = 0,01 quadratique : (a) lisse ±4 : +19 points (< 20
 | `γ = 1` | 42 % | 78 % | 26 % | 52 % |
 
 Critère (a) (lisse ±6 : +10 points) : manqué (+2 et −3). Critère (b) (pas plus de −5 ailleurs) : manqué (jusqu'à −9 en sauts pour γ = 1, −8 en lisse ±4 pour γ = 0,5). **Non retenue : le poids reste constant** ; l'option (`--s2s-temporal-info-exponent`, 0 par défaut) est conservée. L'hypothèse (les coupes de bord, à peu d'échantillons, échouent faute de contrainte, donc il faut les tirer plus fort vers leurs voisines) est donc fausse ou insuffisante : tirer plus fort une coupe de bord vers des voisines elles-mêmes peu fiables ne la rapproche pas de la vérité. Les plages d'échecs ne se réduisent pas par un réglage du poids de l'a priori.
+
+## 17. Robustesse des conclusions au contenu : autre sujet, contenu SVRTK (2026-10-18)
+
+Toutes les mesures E2 des § 12 à 16 simulent le contenu à partir de **notre propre reconstruction** d'un seul sujet (lissée comme nos reconstructions) ; rien ne dit qu'un a priori qui aide sur ce contenu aide sur un autre. Répétition de la comparaison clé sur **un autre sujet** (autre géométrie de stacks) avec comme contenu une **reconstruction SVRTK** (indépendante de nos choix, plus nette) : variantes `b=1,12` (production sans a priori) et `b=1,12 + t=0,01` (défaut), banc E2, trois graines, indépendant ±3, lisse ±4, lisse ±6, sauts ±4. **Critères fixés avant la mesure** : la conclusion « l'a priori temporel aide pour un mouvement lisse ou à sauts » est **confirmée** si le gain de `t=0,01` sur `b=1,12` est d'au moins +10 points sur chacun de lisse ±4, lisse ±6 et sauts ±4 ; la limite connue (indépendant) est **confirmée** si la perte n'y dépasse pas 15 points. Sinon la conclusion dépend du contenu et le défaut est à rediscuter.
+
+**Verdict (§ 17), autre sujet, contenu SVRTK, trois graines, part ≤ 1,5 mm.**
+
+| Variante | indépendant ±3 | lisse ±4 | lisse ±6 | sauts ±4 |
+|---|---|---|---|---|
+| `b=1,12` | 87 % | 91 % | 42 % | 78 % |
+| `b=1,12 + t=0,01` | 81 % | 90 % | 76 % | 84 % |
+| écart | −6 | −1 | **+34** | +6 |
+
+Premier sujet (contenu de notre reconstruction), pour mémoire : 56 / 54 / 8 / 14 % sans a priori et 45 / 82 / 29 / 61 % avec (écarts −11, +28, +21, +47). Critères du § 17 : gain d'au moins +10 sur lisse ±4, lisse ±6 et sauts : **seul lisse ±6 est confirmé** (+34) ; lisse ±4 (−1) et sauts (+6) ne le sont pas parce que **la base est déjà proche du plafond** (91 % et 78 %) sur ce sujet à contenu net : il n'y a pas de dégradation, mais pas de marge de gain. La limite (indépendant : perte ≤ 15 points) est confirmée (−6 contre −11). **Conclusion** : l'ampleur du gain de l'a priori dépend du sujet et du contenu (grand quand la base est mauvaise, nul quand elle est déjà bonne) ; il ne dégrade jamais de plus de 11 points sur les huit comparaisons mesurées (deux sujets × quatre scénarios) et gagne jusqu'à +47 ; le défaut est conservé. Une mesure sur plus de deux sujets resterait nécessaire pour chiffrer le gain moyen.
+
+## 18. Piste H : coupe-coupe puis coupe-volume (initialisation robuste + critère de volume) (2026-10-18)
+
+**Idée.** Le coupe-coupe (avec l'a priori temporel) donne des poses sans volume, robustes aux grands décalages mais limitées par la précision des intersections ; le coupe-volume (`s2v`) recale chaque coupe contre un volume reconstruit sans elle, critère plus riche, mais il s'effondre quand il part de l'en-tête sur un sujet agité (portée de capture trop courte). Les chaîner (c'est la structure d'un pipeline classique : alignement des stacks, puis coupe-volume) pourrait cumuler leurs forces : `s2s` donne le bassin, `s2v` affine. `reconstruct_with_motion_correction` accepte déjà des poses initiales : aucun nouveau code de recalage, seulement un chaînage.
+
+**Évaluation (banc E2, vérité exacte, deux sujets, trois graines ; reconstruction à 2 mm pour borner le temps).** Variantes : `b=1,12 + t=0,01` (production) ; la même suivie de `v=2` et de `v=4` cycles coupe-volume partant des poses du coupe-coupe. Scénarios : indépendant ±3, lisse ±4, lisse ±6, sauts ±4. **Critères fixés avant la mesure** : une variante est retenue si (a) sur chacun des deux sujets, lisse ±6 **ou** sauts ±4 gagne au moins +10 points ; (b) aucun scénario ne perd plus de 5 points sur aucun sujet ; (c) le temps de calcul de l'étape coupe-volume ne dépasse pas 3 fois celui du coupe-coupe (à mesurer sur le meilleur candidat). Si une variante est retenue, elle devient l'option `--motion s2s-then-s2v` (non défaut tant que la mesure sur les six sujets réels n'a pas été faite : accord des poses avec SVRTK, NeSVoR et NiftyMIC non dégradé, et juge hors échantillon non dégradé).
+
+**Résultats de la piste H (banc E2, trois graines, part ≤ 1,5 mm ; reconstruction à 2 mm pour l'étape coupe-volume).**
+
+| Sujet | Variante | indépendant ±3 | lisse ±4 | lisse ±6 | sauts ±4 |
+|---|---|---|---|---|---|
+| A (contenu de notre reconstruction) | `b=1,12 + t=0,01` | 45 % | 82 % | 29 % | 61 % |
+| | + `v=2` | **87 %** | **87 %** | **77 %** | **88 %** |
+| | + `v=4` | 76 % (2 graines) | 71 % | 76 % | 74 % (2 graines) |
+| B (contenu SVRTK) | `b=1,12 + t=0,01` | 81 % | 90 % | 76 % | 84 % |
+| | + `v=2` | **92 %** | **94 %** | **91 %** | **94 %** |
+| | + `v=4` | 94 % (2 graines) | 94 % (2 graines) | 93 % (2 graines) | 95 % (2 graines) |
+
+Critères (a) et (b) du § 18 : **tenus** pour `v=2` (gain de +27 à +48 points sur le sujet A et de +10 à +15 sur le sujet B en lisse ±6 et sauts ; aucun scénario en perte, le pire écart étant +4). `v=4` fait moins bien que `v=2` sur le sujet A (lisse ±4 : 71 % contre 87 %) : plus de cycles n'aident pas et peuvent dégrader. Reste le critère (c) (temps) et la validation sur données réelles.
+
+**Intégration (option, désactivée par défaut).** `--s2v-refine-cycles N` (0 : aucun, valeur testée : 2) fait suivre le coupe-coupe (avec correction de biais) de `N` cycles coupe-volume partant de ses poses, sur les stacks corrigés, avec une reconstruction **à résolution grossière** `--s2v-refine-resolution-mm` (défaut 2 mm) pour borner le coût ; la reconstruction finale se fait à la résolution demandée avec les poses finales. **Critères fixés avant la mesure sur les six sujets réels** : (1) accord des poses avec SVRTK, NeSVoR et NiftyMIC non dégradé : pour au moins 5 sujets sur 6, la part de coupes à plus de 3 mm d'au moins deux des trois méthodes ne monte pas de plus de 5 points par rapport au défaut actuel, et la moyenne des six parts baisse ; (2) la concordance aux intersections (que le coupe-coupe maximise, donc biaisée en sa faveur) ne baisse pas de plus de 0,03 en moyenne ; (3) temps total ≤ 3 fois celui du défaut. Si les trois sont tenus, l'option devient le défaut.
+
+**Verdict de la piste H sur six sujets réels (option `--s2v-refine-cycles 2`, reconstruction de raffinement à 2 mm).**
+
+| Sujet | part > 3 mm avec SVRTK | avec NeSVoR | avec NiftyMIC |
+|---|---|---|---|
+| agité 1 | 5 → 7 % | 12 → 13 % | 2 → 4 % |
+| calme 1 | 6 → 7 % | 1 → 6 % | 1 → 6 % |
+| agité 3 | 100 → 100 % | 44 → 38 % | 12 → 26 % |
+| agité 2 | 47 → 53 % | 58 → 63 % | 74 → 89 % |
+| calme 2 | 4 → 4 % | 1 → 3 % | 0 → 1 % |
+| calme 3 | 4 → 7 % | 0 → 4 % | 0 → 4 % |
+
+(défaut → raffiné).
+
+**Pourquoi le banc E2 et le réel divergent.** Sur le banc E2 (vérité exacte, contenu réel simulé avec le **même modèle direct** que celui du coupe-volume), le raffinement gagne +27 à +48 points sur les mouvements difficiles et ne dégrade pas la médiane ; sur données réelles, l'accord avec les trois méthodes volumiques indépendantes baisse légèrement presque partout (médianes de 0,4 à 0,6 mm sur les sujets calmes) et nettement sur le sujet agité 2 (NiftyMIC : 74 → 89 % de coupes à plus de 3 mm). C'est la quatrième fois que le simulateur qui partage le modèle de l'estimateur est plus favorable que le réel (§ LEARNING du 2026-10-15). Hypothèses, non testées : la reconstruction de raffinement à 2 mm a un plancher de précision (de l'ordre de 1 mm, mesuré sur blobs), et un modèle direct imparfait (mouvement intra-coupe, intensité) pénalise un critère volumique plus qu'un critère d'intersection. Un test à résolution plus fine (1 mm) n'a pas été fait. `v=4` (4 cycles) était déjà moins bon que `v=2` sur le banc E2 (71 % contre 87 % en lisse ±4 sur le sujet A).
