@@ -266,6 +266,8 @@ pub(crate) fn highpass_profiles(p: Tensor<2>, w: Tensor<2>, k: Tensor<2>) -> Ten
 /// `min_points` points communs aux deux coupes et à leurs masques), et tout ce qu'il faut pour calculer [`IntersectionProblem::cost`].
 pub struct IntersectionProblem {
     n_pairs: usize,
+    /// Nombre total de points d'intersection valides (somme, sur les paires gardées, des points communs aux deux coupes et à leurs masques à la pose de construction).
+    n_samples: usize,
     t_grid: Tensor<1>,
     min_points: f64,
     // coupe mobile
@@ -306,6 +308,7 @@ impl IntersectionProblem {
         let n_t = (2.0 * config.reach_mm / config.step_mm).round() as usize + 1;
         let t_valeurs: Vec<f64> = (0..n_t).map(|i| -config.reach_mm + i as f64 * config.step_mm).collect();
         let mut partenaires: Vec<(usize, usize, Plan)> = Vec::new();
+        let mut echantillons = 0usize;
         for (sj, stack) in stacks.iter().enumerate() {
             if sj == si || config.anchor_stack.is_some_and(|a| si != a && sj != a) {
                 continue;
@@ -334,6 +337,7 @@ impl IntersectionProblem {
                 }
                 if compte >= config.min_points {
                     partenaires.push((sj, j, autre));
+                    echantillons += compte;
                 }
             }
         }
@@ -341,6 +345,7 @@ impl IntersectionProblem {
             return None;
         }
         let jn = partenaires.len();
+        let n_samples = echantillons;
         let lisse = |v: &[f64]| Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), device);
         let fk = mobile.inverse.fixed_view::<3, 3>(0, 0).into_owned();
         let mut pn = Vec::new();
@@ -374,6 +379,7 @@ impl IntersectionProblem {
         let max_j_int: Vec<i64> = mj.iter().map(|&v| v as i64).collect();
         Some(IntersectionProblem {
             n_pairs: jn,
+            n_samples,
             t_grid: lisse(&t_valeurs),
             min_points: config.min_points as f64,
             image: atlas.images.clone().narrow(0, atlas.entries[si][k].0, nx * ny),
@@ -423,6 +429,11 @@ impl IntersectionProblem {
         assert!(robust_mm >= 0.0, "l'échelle robuste est positive ou nulle");
         self.temporal_robust_mm = robust_mm;
         self
+    }
+
+    /// Nombre de points d'intersection valides de la coupe, tous partenaires gardés confondus (voir [`information_weight`]).
+    pub fn n_samples(&self) -> usize {
+        self.n_samples
     }
 
     /// Nombre de paires (partenaires gardés).
@@ -636,6 +647,8 @@ pub struct S2sConfig {
     pub temporal_robust_mm: f64,
     /// Échelle robuste de DÉPART (mm) : si > 0, l'échelle décroît géométriquement de cette valeur au premier balayage à `temporal_robust_mm` au dernier (voir [`robust_scale`]) ; 0 : échelle constante `temporal_robust_mm`.
     pub temporal_robust_start_mm: f64,
+    /// Exposant `γ` de la pondération du poids temporel par l'information de la coupe (voir [`information_weight`]) ; 0 : poids constant.
+    pub temporal_info_exponent: f64,
     /// Fiabilité des partenaires : la concordance d'une coupe est la moyenne PONDÉRÉE des corrélations de ses paires, le poids d'un partenaire étant une rampe lisse de sa dernière concordance connue entre `reliability_low` (poids `reliability_floor`) et `reliability_high` (poids 1)
     /// (voir [`reliability_weight`]) ; la concordance d'une coupe est mise à jour pendant les balayages (1 avant toute information). Inactif si `reliability_high <= reliability_low` (moyenne simple).
     pub reliability_low: f64,
@@ -656,7 +669,7 @@ pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) ->
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, temporal_robust_mm: 0.0, temporal_robust_start_mm: 0.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
+        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, temporal_robust_mm: 0.0, temporal_robust_start_mm: 0.0, temporal_info_exponent: 0.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
     }
 }
 
@@ -879,6 +892,24 @@ pub(crate) fn sweep_schedule(config: &S2sConfig) -> Vec<(f64, usize, bool)> {
     niveaux
 }
 
+/// Facteur de pondération du poids temporel d'une coupe selon son information : `clamp((n_median / n_coupe)^γ, ¼, 4)`. Une coupe à peu d'échantillons d'intersection (`n_coupe < n_median`) est tirée plus fort vers ses voisines, une coupe bien contrainte moins ; `γ = 0` ou `n_coupe = 0` ou `n_median = 0` : 1 (poids inchangé).
+pub(crate) fn information_weight(n_coupe: f64, n_median: f64, gamma: f64) -> f64 {
+    if gamma == 0.0 || n_coupe <= 0.0 || n_median <= 0.0 {
+        return 1.0;
+    }
+    (n_median / n_coupe).powf(gamma).clamp(0.25, 4.0)
+}
+
+/// Médiane des valeurs finies strictement positives de `valeurs` (0 s'il n'y en a pas).
+pub(crate) fn median_of_known(valeurs: &[f64]) -> f64 {
+    let mut connues: Vec<f64> = valeurs.iter().copied().filter(|v| v.is_finite() && *v > 0.0).collect();
+    if connues.is_empty() {
+        return 0.0;
+    }
+    connues.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    connues[connues.len() / 2]
+}
+
 /// Échelle robuste de la régularisation temporelle au balayage `balayage` (de 0 à `total − 1`, tous niveaux confondus) : `fin` si `debut <= 0` ou `fin <= 0` (échelle constante, ou quadratique si `fin = 0`) ; sinon décroissance géométrique de `debut` (premier balayage) à `fin` (dernier) : `debut · (fin/debut)^{balayage/(total−1)}`.
 pub(crate) fn robust_scale(debut: f64, fin: f64, balayage: usize, total: usize) -> f64 {
     if debut <= 0.0 || fin <= 0.0 || total < 2 {
@@ -933,6 +964,8 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
     let mut decalage_graine = 0u64;
     // dernière concordance connue de chaque coupe (1 avant toute information) et position de chaque stack dans `coupes`, pour la fiabilité des partenaires
     let mut scores = vec![1.0_f64; coupes.len()];
+    // dernier nombre de points d'intersection valides de chaque coupe (0 : pas encore vu), pour la pondération du poids temporel par l'information
+    let mut echantillons = vec![0.0_f64; coupes.len()];
     let decalages: Vec<usize> = stacks.iter().scan(0usize, |cumul, s| { let d = *cumul; *cumul += s.dim().2; Some(d) }).collect();
     for (sigma, balayages, net) in niveaux {
         let atlas = SliceAtlas::new_blurred(stacks, device, sigma)?;
@@ -942,9 +975,11 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                 let courante = *courantes.get(si, k);
                 let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
                 let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+                echantillons[n] = probleme.n_samples() as f64;
+                let poids_temporel = config.temporal_weight * information_weight(echantillons[n], median_of_known(&echantillons), config.temporal_info_exponent);
                 let probleme = match config.temporal_weight > 0.0 {
                     true => match temporal_prior_inputs(&stacks[si], &courantes, si, k, &preparee.points, config.temporal_points) {
-                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, config.temporal_weight).with_temporal_robustness(robust_scale(config.temporal_robust_start_mm, config.temporal_robust_mm, decalage_graine as usize + balayage, total_balayages)),
+                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, poids_temporel).with_temporal_robustness(robust_scale(config.temporal_robust_start_mm, config.temporal_robust_mm, decalage_graine as usize + balayage, total_balayages)),
                         None => probleme,
                     },
                     false => probleme,

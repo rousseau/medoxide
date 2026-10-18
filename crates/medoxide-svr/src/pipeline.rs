@@ -103,6 +103,8 @@ pub struct ReconstructionConfig {
     pub s2s_temporal_robust_mm: f64,
     /// Coupe-coupe : échelle robuste de départ (mm) de la régularisation temporelle ; > 0 : l'échelle décroît géométriquement de cette valeur à `s2s_temporal_robust_mm` au fil des balayages (0 : échelle constante).
     pub s2s_temporal_robust_start_mm: f64,
+    /// Coupe-coupe : exposant de la pondération du poids temporel par l'information de la coupe (nombre de points d'intersection valides) ; 0 : poids constant.
+    pub s2s_temporal_info_exponent: f64,
     /// Coupe-coupe : réduction relative minimale de l'incohérence d'intensité entre stacks (`1 − après / avant`, voir [`BiasFields::inconsistency_reduction`]) pour que la correction de biais estimée soit appliquée ; en deçà, le champ ne fait que s'ajuster au bruit d'anatomie (un mesuré : 0,4 % sans biais, 35 % avec un biais de 30 %) et les stacks restent inchangés. 0 : toujours appliquer.
     pub s2s_bias_min_reduction: f64,
     /// Coupe-coupe : demi-étendue (mm) de la recherche exhaustive d'un bloc (translations puis rotations en mm équivalents) ; 0 : pas de recherche.
@@ -151,6 +153,7 @@ impl Default for ReconstructionConfig {
             s2s_temporal_weight: 0.01,
             s2s_temporal_robust_mm: 0.0,
             s2s_temporal_robust_start_mm: 0.0,
+            s2s_temporal_info_exponent: 0.0,
             s2s_bias_min_reduction: 0.1,
             s2s_block_search_mm: 12.0,
             s2v_cycles: 6,
@@ -329,6 +332,7 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         temporal_weight: config.s2s_temporal_weight,
         temporal_robust_mm: config.s2s_temporal_robust_mm,
         temporal_robust_start_mm: config.s2s_temporal_robust_start_mm,
+        temporal_info_exponent: config.s2s_temporal_info_exponent,
         intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() },
         ..Default::default()
     }

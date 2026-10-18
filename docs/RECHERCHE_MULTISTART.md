@@ -226,3 +226,23 @@ Critères du § 12 pour λ = 0,01 quadratique : (a) lisse ±4 : +19 points (< 20
 | `b=3,12 + t=0,01` | 41 % (2 graines) | 78 % (2 graines) | 8 % (2 graines) | 50 % (2 graines) |
 
 **Question 1** (l'a priori garde-t-il son intérêt avec l'alignement par stack ?) : lisse ±4 +28, lisse ±6 +21, sauts +47 points (critère : +10, tenu) ; indépendant −11 points (critère : pas plus de −10 : **manqué d'un point**, avec une variance entre graines de ±15). Selon la règle écrite, « il faut revoir le défaut » ; le λ = 0 avec alignement par stack est pourtant bien pire sur trois scénarios sur quatre (jusqu'à −47 points), et le banc de portée sur mouvement réel et la concordance sur six sujets réels (§ 11, § 14) soutiennent l'a priori. **Décision (écart documenté à la règle)** : le défaut λ = 0,01 est conservé ; l'écart de 1 point sur un scénario à mouvement indépendant (peu physique en TRUFI) ne justifie pas de perdre 21 à 47 points sur les trois autres. **Question 2** : aucun niveau de blocs supplémentaire n'est retenu : lisse ±6 mm 14 % (b = 2) et 8 % (b = 3) contre 29 % pour `b=1` (critère : +10), des niveaux de blocs plus fins perdent de la capture parce que de petits blocs de coupes sont plus mal contraints par leurs intersections (même mécanisme que les multi-départs de bloc, § 3 à 5).
+
+## 16. Piste G : poids temporel pondéré par l'information de chaque coupe (2026-10-18)
+
+**Constat (détail par coupe, lisse ±6 mm, production `b=1,12 + t=0,01`, graines 7 et 11, 164 coupes).** Les échecs (> 1,5 mm) forment des **plages contiguës de 3 à 13 coupes**, souvent au début ou à la fin d'un stack ; le succès tombe à 15 % au premier quintile du stack et monte à 69 % au quatrième alors que le déplacement vrai médian est le même (4,1 à 4,5 mm). Les coupes de **petite surface de masque** (bords du volume, ≤ 1 700 px) réussissent à 26 % contre 45-47 % pour les autres, avec une erreur médiane de 2,8 mm contre 1,6 : ce sont des coupes peu contraintes, à peu d'échantillons d'intersection.
+
+**Correction d'un raisonnement antérieur (§ 13).** J'avais écarté F2 (pondération par l'information) en disant que la solution MAP pondère déjà par l'information. C'est vrai si le terme de données est une vraisemblance, dont la courbure croît avec le nombre d'échantillons ; or notre concordance est une **corrélation moyenne normalisée** : sa valeur et son échelle ne dépendent pas du nombre d'échantillons, si bien qu'une coupe de bord à 200 échantillons pèse autant, face à l'a priori, qu'une coupe centrale à 2 000. Pondérer l'a priori par l'inverse de l'information restitue le comportement bayésien.
+
+**Piste.** Poids temporel de la coupe `λ_k = λ · clamp((N_med / N_k)^γ, ¼, 4)`, avec `N_k` le nombre de points d'intersection valides de la coupe (somme sur ses paires gardées, à la pose courante) et `N_med` la médiane des `N` déjà vus (courante, déterministe pour une graine donnée). `γ = 0` : poids constant (comportement actuel). Option `temporal_info_exponent`.
+
+**Critères fixés avant la mesure** (banc E2, trois graines, production `b=1,12 + t=0,01`, base : indépendant 45 %, lisse ±4 82 %, lisse ±6 29 %, sauts 61 %) : une variante (`γ = 0,5` et `γ = 1`) est retenue si (a) lisse ±6 : au moins +10 points ; (b) aucun des trois autres scénarios ne perd plus de 5 points ; puis sur données réelles (c) banc de portée (réf. SVRTK, graines 7/11/13) : lisse ±6 et indépendant ±3 pas plus de 5 points sous la base quadratique ; (d) concordance réelle moyenne (six sujets) ≥ base − 0,005. Si les deux γ conviennent : le plus petit. Sinon le poids reste constant.
+
+**Verdict de la piste G (trois graines, banc E2, production `b=1,12 + t=0,01`).**
+
+| Variante | indépendant ±3 | lisse ±4 | lisse ±6 | sauts ±4 |
+|---|---|---|---|---|
+| base (poids constant) | 45 % | 82 % | 29 % | 61 % |
+| `γ = 0,5` | 39 % | 74 % | 31 % | 55 % |
+| `γ = 1` | 42 % | 78 % | 26 % | 52 % |
+
+Critère (a) (lisse ±6 : +10 points) : manqué (+2 et −3). Critère (b) (pas plus de −5 ailleurs) : manqué (jusqu'à −9 en sauts pour γ = 1, −8 en lisse ±4 pour γ = 0,5). **Non retenue : le poids reste constant** ; l'option (`--s2s-temporal-info-exponent`, 0 par défaut) est conservée. L'hypothèse (les coupes de bord, à peu d'échantillons, échouent faute de contrainte, donc il faut les tirer plus fort vers leurs voisines) est donc fausse ou insuffisante : tirer plus fort une coupe de bord vers des voisines elles-mêmes peu fiables ne la rapproche pas de la vérité. Les plages d'échecs ne se réduisent pas par un réglage du poids de l'a priori.

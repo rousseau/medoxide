@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// Réglages du coupe-coupe à comparer, séparés par des points-virgules : `fin` (recalage fin seul), `σ,balayages,niveaux` du gros-vers-fin (éventuellement suivi de `:bas,haut` pour la fiabilité des partenaires), ou des jetons séparés par `+` :
-    /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle), `r=c_mm` ou `r=c0_mm,c1_mm` (échelle de la pénalité temporelle robuste, constante ou décroissante) ;
+    /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle), `i=γ` (pondération du poids temporel par l'information), `r=c_mm` ou `r=c0_mm,c1_mm` (échelle de la pénalité temporelle robuste, constante ou décroissante) ;
     /// `bias=1` est ignoré ici (lu par l'appelant, qui corrige alors les stacks du biais avant le recalage).
     fn variantes_s2s(spec: &str, fin: crate::s2s::S2sConfig) -> Vec<(String, crate::s2s::S2sConfig)> {
         use crate::s2s::S2sConfig;
@@ -3483,6 +3483,7 @@ mod tests {
                             "bs" => config.block_sweeps = x[0] as usize,
                             "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
                             "t" => config.temporal_weight = x[0],
+                            "i" => config.temporal_info_exponent = x[0],
                             "r" => (config.temporal_robust_start_mm, config.temporal_robust_mm) = if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) },
                             "bias" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
@@ -3592,7 +3593,7 @@ mod tests {
 
     /// DIAGNOSTIC (sans critère) : BANC D'ESSAI SEMI-SYNTHÉTIQUE À CONTENU RÉEL. Les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) ne donnent que la géométrie ; les coupes sont simulées depuis le volume réel `MEDOXIDE_VOLUME` (NIfTI, par exemple une reconstruction SVRTK)
     /// avec un mouvement vrai (`MEDOXIDE_MODELE` : `independante`, `lisse`, `sauts`, `stack` ; amplitudes `MEDOXIDE_AMPLITUDES`, graines `MEDOXIDE_GRAINES`), du bruit (`MEDOXIDE_BRUIT_PCT`, défaut 5) et un biais (`MEDOXIDE_BIAIS_PCT`, défaut 0). Chaque variante (`MEDOXIDE_VARIANTES`, voir `variantes_s2s` ; `bias=1` corrige
-    /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction.
+    /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction. Avec `MEDOXIDE_DETAIL=1`, une ligne `SLICE modèle amplitude graine variante stack coupe déplacement_vrai_mm erreur_mm surface_du_masque_en_pixels` par coupe suit chaque variante.
     #[test]
     #[ignore = "diagnostic sur données réelles locales"]
     fn diagnose_the_semi_synthetic_benchmark() {
@@ -3608,6 +3609,7 @@ mod tests {
         let (bruit, biais): (f64, f64) = (lire("MEDOXIDE_BRUIT_PCT", "5").parse().unwrap(), lire("MEDOXIDE_BIAIS_PCT", "0").parse().unwrap());
         let fin = S2sConfig { block_levels: 0, coarse_sigma_pixels: 1.0, coarse_sweeps: 3, coarse_levels: 2, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
         let variantes = variantes_s2s(&lire("MEDOXIDE_VARIANTES", "fin"), fin);
+        let detail = std::env::var("MEDOXIDE_DETAIL").is_ok_and(|v| v == "1");
         let device = burn::tensor::Device::flex().autodiff();
         let t = Temp::new("semi_synthetique");
         for &a in &amplitudes {
@@ -3626,6 +3628,18 @@ mod tests {
                     let poses = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap().poses;
                     let (p, m, q) = part(&poses);
                     println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
+                    if detail {
+                        // une ligne par coupe : stack, coupe, déplacement vrai (écart de l'en-tête à la vérité) et erreur après recalage (mm)
+                        let (avant, apres) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &SlicePoses::identity(&stacks), &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &poses, &vraies));
+                        let mut i = 0;
+                        for (si, s) in stacks.iter().enumerate() {
+                            for k in 0..s.dim().2 {
+                                let surface = s.brain_mask().unwrap().voxels().index_axis(Axis(2), k).iter().filter(|&&m| m).count();
+                                println!("SLICE {modele} {a} {graine} {nom} {si} {k} {:.2} {:.2} {surface}", avant[i], apres[i]);
+                                i += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4155,6 +4169,46 @@ mod tests {
         assert!(vers_cible > valeur(&enorme, [0.0; 6]), "(c) la translation vers les cibles doit être préférée : {vers_cible}");
     }
 
+    /// Poids selon l'information (valeurs exactes) : (a) `γ = 0` ou un effectif nul : 1 ; (b) à effectif égal à la médiane : 1 ; (c) médiane 100, coupe 50 : 2 pour γ = 1 et √2 pour γ = 0,5 ; coupe 200 : ½ ; (d) bornes : coupe 10 (rapport 10) → 4 et coupe 1000 (rapport 0,1) → ¼ ; (e) décroissant en l'effectif de la coupe. `median_of_known` : médiane des valeurs finies strictement positives ([0, 4, 1, 0, 5, 2, 3, NaN] → 3 ; les zéros ne comptent pas), 0 si aucune.
+    #[test]
+    fn the_information_weight_is_a_clamped_power_law() {
+        use crate::s2s::{information_weight, median_of_known};
+        assert_eq!(information_weight(50.0, 100.0, 0.0), 1.0, "(a) γ = 0");
+        assert_eq!(information_weight(0.0, 100.0, 1.0), 1.0, "(a) effectif nul");
+        assert_eq!(information_weight(50.0, 0.0, 1.0), 1.0, "(a) médiane nulle");
+        assert_eq!(information_weight(100.0, 100.0, 1.0), 1.0, "(b)");
+        assert!((information_weight(50.0, 100.0, 1.0) - 2.0).abs() < 1e-12, "(c) γ = 1");
+        assert!((information_weight(50.0, 100.0, 0.5) - 2.0_f64.sqrt()).abs() < 1e-12, "(c) γ = 0,5");
+        assert!((information_weight(200.0, 100.0, 1.0) - 0.5).abs() < 1e-12, "(c) coupe plus informative");
+        assert_eq!(information_weight(10.0, 100.0, 1.0), 4.0, "(d) borne haute");
+        assert_eq!(information_weight(1000.0, 100.0, 1.0), 0.25, "(d) borne basse");
+        let poids: Vec<f64> = [40.0, 60.0, 80.0, 100.0, 150.0, 300.0].iter().map(|&n| information_weight(n, 100.0, 0.7)).collect();
+        assert!(poids.windows(2).all(|w| w[1] < w[0]), "(e) {poids:?}");
+        assert_eq!(median_of_known(&[0.0, 4.0, 1.0, 0.0, 5.0, 2.0, 3.0, f64::NAN]), 3.0);
+        assert_eq!(median_of_known(&[0.0, f64::NAN]), 0.0);
+    }
+
+    /// Nombre d'échantillons d'une coupe (blobs, coupe 5 du stack coronal) : (a) il est compris entre `min_points × paires` et le nombre de points de la droite × paires ; (b) en doublant le pas d'échantillonnage (0,5 → 1 mm), il est divisé par deux à 15 % près (les points valides sont répartis le long de la droite) ; (c) il ne dépend pas de la pose de construction d'une façon aberrante : deux constructions identiques donnent le même nombre.
+    #[test]
+    fn the_sample_count_scales_with_the_number_of_intersection_points() {
+        use crate::s2s::{IntersectionConfig, IntersectionProblem, SliceAtlas};
+        let t = Temp::new("compte_echantillons");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 5);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let depart = SlicePoses::identity(&stacks);
+        let construire = |pas: f64| IntersectionProblem::build(&atlas, &stacks, &depart, 1, 5, &IntersectionConfig { step_mm: pas, ..Default::default() }, &device).unwrap();
+        let (fin, grossier) = (construire(0.5), construire(1.0));
+        let points_par_droite = (2.0 * 150.0 / 0.5 + 1.0) as usize;
+        assert!(fin.n_samples() >= 20 * fin.n_pairs() && fin.n_samples() <= points_par_droite * fin.n_pairs(), "(a) {} échantillons pour {} paires", fin.n_samples(), fin.n_pairs());
+        let rapport = grossier.n_samples() as f64 / fin.n_samples() as f64;
+        assert!((rapport - 0.5).abs() < 0.075, "(b) rapport {rapport}");
+        assert_eq!(construire(0.5).n_samples(), fin.n_samples(), "(c)");
+    }
+
     /// Échelle robuste décroissante : (a) sans départ (0) ou sans fin (0), l'échelle est la fin, quel que soit le balayage ; (b) elle vaut exactement le départ au premier balayage et la fin au dernier ; (c) elle décroît géométriquement (le rapport de deux balayages consécutifs est constant, ici (2/8)^(1/3) pour 4 balayages) ; (d) un seul balayage : la fin.
     #[test]
     fn the_robust_scale_decreases_geometrically_from_start_to_end() {
@@ -4264,6 +4318,23 @@ mod tests {
         let decroissante = lancer(50.0, 1e6, 1e-3);
         assert!(ecart(&decroissante, &quadratique) > 1e-6, "(b) la fin de l'échelle doit être transmise : {}", ecart(&decroissante, &quadratique));
         assert!(ecart(&decroissante, &saturee) > 1e-6, "(b) le départ de l'échelle doit être transmis : {}", ecart(&decroissante, &saturee));
+    }
+
+    /// Câblage de la pondération par l'information (blobs, un balayage) : avec un poids temporel fort (5) et `γ = 1`, les poses diffèrent (de plus de 1e-6) de celles avec `γ = 0` (les coupes de la jeu n'ont pas toutes le même nombre d'échantillons) ; avec `γ = 0` elles sont EXACTEMENT celles obtenues sans le champ.
+    #[test]
+    fn the_information_weighting_is_wired_into_the_s2s_sweeps() {
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let t = Temp::new("poids_information_cablage");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let base = S2sConfig { sweeps: 1, coarse_sigma_pixels: 0.0, block_levels: 0, temporal_weight: 5.0, ..Default::default() };
+        let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
+        let nul = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_info_exponent: 0.0, ..base }, &device).unwrap().poses;
+        assert_eq!(ecart(&sans, &nul), 0.0, "γ = 0 : inchangé");
+        let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_info_exponent: 1.0, ..base }, &device).unwrap().poses;
+        assert!(ecart(&sans, &actif) > 1e-6, "γ = 1 : aucun effet");
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier
@@ -4730,8 +4801,8 @@ mod tests {
         assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
         // défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5), puis 3 balayages nets
         assert_eq!(sweep_schedule(&s2s_config(&ReconstructionConfig::default())), vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, s2s_temporal_robust_mm: 1.7, s2s_temporal_robust_start_mm: 6.5, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, temporal_robust_mm: 1.7, temporal_robust_start_mm: 6.5, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
+        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, s2s_temporal_robust_mm: 1.7, s2s_temporal_robust_start_mm: 6.5, s2s_temporal_info_exponent: 0.8, ..Default::default() };
+        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, temporal_robust_mm: 1.7, temporal_robust_start_mm: 6.5, temporal_info_exponent: 0.8, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 
