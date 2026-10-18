@@ -1474,6 +1474,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : (1) un indicateur à seuil (part ≤ 1,5 mm) peut masquer un plancher de précision : regarder aussi médiane et 90ᵉ centile ; (2) mon étiquetage des sujets dans un tableau a été faux parce que j'ai supposé l'ordre des sujets au lieu de le relire : toujours recopier l'ordre depuis la commande ; (3) un test qui compare deux appels de la même fonction ne détecte pas une erreur dans cette fonction : le test de câblage doit comparer à un calcul indépendant, ou vérifier que chaque entrée change le résultat ; (4) des mutants « équivalents » existent (zéro cycle = identité) : les reconnaître plutôt que d'allonger les tests.
 - **Où** : `crates/medoxide-svr/src/pipeline.rs` (`refine_with_slice_to_volume`), `book/src/validation.md`, `docs/RECHERCHE_MULTISTART.md` (§ 18).
 
+## 2026-10-18 — Une bonne prédiction d'échec ne suffit pas à justifier une exclusion ; vérifier la fin d'un calcul avant de tabuler
+
+- **Quoi (concept)** : la concordance finale de chaque coupe prédit son échec de pose (AUC 0,72 à 0,86), mais écarter les moins bien recalées dégrade la netteté : retirer des données coûte plus (bruit, flou) que les erreurs de pose évitées. Un prédicteur modéré justifie au mieux une pondération douce, pas une exclusion.
+- **Quoi (méthode)** : (1) j'ai tabulé un résultat avant la fin d'un des calculs (le quatrième repli d'un sujet) sans vérifier le fichier marqueur de fin : le tableau commité avait des chiffres faux pour ce sujet, corrigé dans un erratum le jour même ; règle : tabuler seulement quand le marqueur de fin existe et que le nombre de lignes est celui attendu ; (2) pour juger une option de reconstruction, réutiliser les volumes de la base (mêmes poses) fait gagner la moitié du calcul ; (3) un mutant d'indexation (`<` remplacé par `<=`) n'est détecté que si le test essaie exactement la valeur limite.
+- **Où** : `crates/medoxide-svr/src/pipeline.rs` (`slices_to_exclude`, `without_excluded_slices`), `crates/medoxide-svr/src/lib.rs` (`without_slices`), `docs/RECHERCHE_MULTISTART.md` (§ 22).
+
 ---
 
 *(à compléter à la prochaine étape)*

@@ -368,3 +368,14 @@ Critère (moyenne ≥ 0,75, minimum ≥ 0,65) **tenu** : la concordance finale d
 **Étape B : exclure à la reconstruction les coupes les moins bien recalées.** Option `--s2s-exclude-fraction q` (0 : aucune) : après le coupe-coupe, la fraction `q` de coupes (tous stacks confondus) ayant la plus faible concordance finale est écartée de la reconstruction (masque de coupe mis à zéro) ; les poses ne changent pas. **Critères fixés avant la mesure** : juge hors échantillon et netteté sur les six sujets, trois replis (`scripts/benchmark_variantes_s2s.py`, sans correction de biais), variante `q = 0,15` contre la base `--s2s-bias-rounds 0` du § 21 (mêmes poses, seule la reconstruction diffère). Retenue (en option puis en défaut) si (1) le juge moyen n'est pas inférieur de plus de 0,005 à la base ; (2) la netteté moyenne gagne au moins 1 % ; (3) aucun sujet ne perd plus de 0,02 de juge ; (4) aucun trou de couverture n'apparaît (le juge est calculé sur le même nombre de coupes de test). Si (2) est tenu mais pas (1), l'exclusion est un compromis netteté / prédiction à discuter, pas un gain.
 
 **Erratum (même jour).** La première version de ce tableau donnait pour l'agité 1 (+0,0231 ; +3,0 %) et pour la moyenne (+0,0170 sur 18 replis) des valeurs calculées alors que le quatrième repli de ce sujet n'était pas terminé : le marqueur de fin n'avait pas été vérifié. Chiffres corrigés ci-dessus (quatre replis, +0,0193 ; +2,5 %, moyenne +0,0165 sur 19 replis) ; les trois critères restent tenus.
+
+**Résultat de l'étape B (§ 22), juge hors échantillon et netteté, trois sujets terminés (calme 1, agité 2, calme 3 ; trois replis chacun), `q = 0,15` contre la base du § 21.**
+
+| Sujet | juge base | juge `q = 0,15` | écart | netteté |
+|---|---|---|---|---|
+| calme 1 | 0,8776 | 0,8699 | −0,0077 | −2,7 % |
+| agité 2 | 0,7615 | 0,7642 | +0,0027 | −2,2 % |
+| calme 3 | 0,9000 | 0,8938 | −0,0062 | −3,8 % |
+| moyenne (9 replis) | | | −0,0037 | −2,9 % |
+
+Critère (2) (netteté : au moins +1 %) : **échec net** sur chacun des trois sujets (−2,2 à −3,8 %) ; critère (1) (juge : pas plus de −0,005) : −0,0037 en moyenne mais −0,0077 sur un sujet. Les trois autres sujets, qui n'auraient pu inverser la moyenne, n'ont pas été attendus. **L'exclusion des coupes les moins bien recalées est non retenue** : écarter 15 % des coupes appauvrit la reconstruction (moins de données par voxel, donc plus de bruit et de flou) plus qu'elle n'élimine d'erreurs de pose ; la concordance finale (AUC 0,78) ne sépare pas assez les coupes mal recalées des bonnes. L'option `--s2s-exclude-fraction` reste dans le code, désactivée. Une pondération douce plutôt qu'une exclusion franche reste possible, mais le signal (AUC 0,72 à 0,86) est modeste.

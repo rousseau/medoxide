@@ -3593,7 +3593,7 @@ mod tests {
 
     /// DIAGNOSTIC (sans critère) : BANC D'ESSAI SEMI-SYNTHÉTIQUE À CONTENU RÉEL. Les stacks du sujet (`MEDOXIDE_DONNEES_REELLES`, `MEDOXIDE_SUJET`) ne donnent que la géométrie ; les coupes sont simulées depuis le volume réel `MEDOXIDE_VOLUME` (NIfTI, par exemple une reconstruction SVRTK)
     /// avec un mouvement vrai (`MEDOXIDE_MODELE` : `independante`, `lisse`, `sauts`, `stack` ; amplitudes `MEDOXIDE_AMPLITUDES`, graines `MEDOXIDE_GRAINES`), du bruit (`MEDOXIDE_BRUIT_PCT`, défaut 5) et un biais (`MEDOXIDE_BIAIS_PCT`, défaut 0). Chaque variante (`MEDOXIDE_VARIANTES`, voir `variantes_s2s` ; `bias=1` corrige
-    /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction. Avec `MEDOXIDE_DETAIL=1`, une ligne `SLICE modèle amplitude graine variante stack coupe déplacement_vrai_mm erreur_mm surface_du_masque_en_pixels` par coupe suit chaque variante.
+    /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction. Avec `MEDOXIDE_DETAIL=1`, une ligne `SLICE modèle amplitude graine variante stack coupe déplacement_vrai_mm erreur_mm surface_du_masque_en_pixels concordance_finale` par coupe suit chaque variante.
     #[test]
     #[ignore = "diagnostic sur données réelles locales"]
     fn diagnose_the_semi_synthetic_benchmark() {
@@ -3625,7 +3625,9 @@ mod tests {
                 println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
                 for (nom, config) in &variantes {
                     let travail = if nom.contains("bias=1") { correct_stacks(&stacks, &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default()).unwrap(), 0.1) } else { stacks.clone() };
-                    let mut poses = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap().poses;
+                    let rapport = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap();
+                    let ncc_finale: std::collections::HashMap<(usize, usize), f64> = rapport.slices.iter().map(|s| ((s.stack, s.slice), s.ncc_final)).collect();
+                    let mut poses = rapport.poses;
                     if let Some(cycles) = nom.split('+').find_map(|j| j.strip_prefix("v=")).and_then(|v| v.parse::<usize>().ok()) {
                         // chaînage : cycles coupe-volume partant des poses du coupe-coupe (reconstruction à 2 mm pour borner le temps)
                         let reglages = crate::pipeline::ReconstructionConfig { s2v_cycles: cycles, resolution_mm: 2.0, margin_mm: 4.0, ..Default::default() };
@@ -3641,7 +3643,7 @@ mod tests {
                         for (si, s) in stacks.iter().enumerate() {
                             for k in 0..s.dim().2 {
                                 let surface = s.brain_mask().unwrap().voxels().index_axis(Axis(2), k).iter().filter(|&&m| m).count();
-                                println!("SLICE {modele} {a} {graine} {nom} {si} {k} {:.2} {:.2} {surface}", avant[i], apres[i]);
+                                println!("SLICE {modele} {a} {graine} {nom} {si} {k} {:.2} {:.2} {surface} {:.4}", avant[i], apres[i], ncc_finale.get(&(si, k)).copied().unwrap_or(f64::NAN));
                                 i += 1;
                             }
                         }
@@ -4398,6 +4400,79 @@ mod tests {
         assert!(ecart(&avec_raffinement.poses, &attendues) < 1e-9, "(d) le raffinement doit porter sur les stacks corrigés : {}", ecart(&avec_raffinement.poses, &attendues));
         let (sur_bruts, _) = refine_with_slice_to_volume(&biaises, sans_raffinement.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base }, &device).unwrap();
         assert!(ecart(&sur_bruts, &attendues) > 1e-6, "(d) la correction de biais doit changer le raffinement (sinon le test ne distingue pas stacks corrigés et bruts)");
+    }
+
+    /// Exclusion des coupes les moins bien recalées (valeurs exactes) : (a) sur 10 coupes recalées de concordance 0,1 à 1,0 (dans le désordre, sur deux stacks) et 2 coupes non recalées (concordance 0), la fraction 0,3 écarte exactement les 3 plus basses (0,1, 0,2, 0,3), triées par (stack, coupe) ; les non recalées ne comptent ni dans l'effectif ni parmi les écartées ; (b) 0,25 → partie entière de 2,5 = 2 coupes ; 0 ou négatif → aucune ; 1 ou plus → toutes les recalées ; (c) à concordance égale, l'ordre (stack, coupe) départage ;
+    /// (d) `Stack::without_slices` vide exactement les plans demandés du masque (les autres plans et les données sont inchangés, les plans hors grille ignorés) ; `without_excluded_slices` applique la liste à chaque stack.
+    #[test]
+    fn the_exclusion_removes_exactly_the_lowest_concordance_slices() {
+        use crate::align::SliceReport;
+        use crate::pipeline::{slices_to_exclude, without_excluded_slices};
+        let rapport = |stack: usize, slice: usize, ncc: f64, recalee: bool| SliceReport { stack, slice, registered: recalee, ncc_first: 0.0, ncc_final: ncc, runs: 0, correction_rms_mm: 0.0 };
+        let ordre = [7usize, 2, 9, 4, 0, 5, 1, 8, 3, 6];
+        let mut rapports: Vec<SliceReport> = ordre.iter().map(|&i| rapport(i % 2, i, 0.1 * (i as f64 + 1.0), true)).collect();
+        rapports.push(rapport(0, 10, 0.0, false));
+        rapports.push(rapport(1, 11, 0.0, false));
+        assert_eq!(slices_to_exclude(&rapports, 0.3), vec![(0, 2), (0, 0), (1, 1)].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(), "(a)");
+        assert_eq!(slices_to_exclude(&rapports, 0.25), vec![(0, 0), (1, 1)], "(b) 2,5 → 2");
+        assert!(slices_to_exclude(&rapports, 0.0).is_empty() && slices_to_exclude(&rapports, -0.5).is_empty(), "(b) aucune");
+        assert_eq!(slices_to_exclude(&rapports, 1.0).len(), 10, "(b) toutes les recalées");
+        assert_eq!(slices_to_exclude(&rapports, 2.0).len(), 10, "(b) borné à 1");
+        let egales = vec![rapport(1, 4, 0.5, true), rapport(0, 9, 0.5, true), rapport(0, 3, 0.5, true), rapport(1, 0, 0.9, true)];
+        assert_eq!(slices_to_exclude(&egales, 0.5), vec![(0, 3), (0, 9)], "(c)");
+        // (d)
+        let t = Temp::new("exclusion_coupes");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let s = &stacks[1];
+        let sans = s.without_slices(&[2, 5, s.dim().2, 999]); // l'indice égal au nombre de coupes (premier hors grille) doit être ignoré, pas provoquer une erreur d'indexation
+        let (avant, apres) = (s.brain_mask().unwrap().voxels(), sans.brain_mask().unwrap().voxels());
+        for k in 0..s.dim().2 {
+            let plan_avant = avant.index_axis(Axis(2), k);
+            let plan_apres = apres.index_axis(Axis(2), k);
+            if k == 2 || k == 5 {
+                assert!(plan_apres.iter().all(|&v| !v), "(d) plan {k} non vidé");
+                assert!(plan_avant.iter().any(|&v| v), "(d) le plan {k} du jeu d'essai doit avoir des pixels de masque");
+            } else {
+                assert_eq!(plan_avant, plan_apres, "(d) plan {k} modifié");
+            }
+        }
+        assert_eq!(s.dim(), sans.dim());
+        let liste = vec![rapport(1, 3, 0.1, true), rapport(1, 4, 0.2, true), rapport(0, 6, 0.3, true), rapport(2, 7, 0.9, true)];
+        let appliquee = without_excluded_slices(&stacks, &liste, 0.75);
+        assert!(appliquee[1].brain_mask().unwrap().voxels().index_axis(Axis(2), 3).iter().all(|&v| !v) && appliquee[1].brain_mask().unwrap().voxels().index_axis(Axis(2), 4).iter().all(|&v| !v), "(d) stack 1");
+        assert!(appliquee[0].brain_mask().unwrap().voxels().index_axis(Axis(2), 6).iter().all(|&v| !v), "(d) stack 0");
+        assert!(appliquee[2].brain_mask().unwrap().voxels().index_axis(Axis(2), 7).iter().any(|&v| v), "(d) la coupe de meilleure concordance est conservée");
+    }
+
+    /// Câblage de l'exclusion dans le pipeline (blobs, coupe-coupe) : avec `s2s_exclude_fraction = 0,3` les POSES sont exactement celles obtenues sans exclusion, et le volume est exactement celui que reconstruit `reconstruct_with_poses` sur les stacks privés des coupes désignées par `without_excluded_slices` à partir du rapport du pipeline sans exclusion ; il diffère du volume sans exclusion.
+    #[test]
+    fn the_exclusion_is_applied_to_the_reconstruction_only() {
+        use crate::pipeline::{reconstruct, without_excluded_slices, Motion, ReconstructionConfig};
+        let t = Temp::new("exclusion_pipeline");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let base = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, ..Default::default() };
+        let sans = reconstruct(&stacks, &base, &device).unwrap();
+        let avec = reconstruct(&stacks, &ReconstructionConfig { s2s_exclude_fraction: 0.3, ..base.clone() }, &device).unwrap();
+        let ecart_poses = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (sans.poses.get(si, k) - avec.poses.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        assert_eq!(ecart_poses, 0.0, "les poses ne doivent pas changer");
+        let attendu = crate::pipeline::reconstruct_with_poses(&sans.grid, &without_excluded_slices(&stacks, &sans.slices, 0.3), &sans.poses, &base).unwrap();
+        let ecart_volume = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f64, f64::max);
+        assert!(ecart_volume(&avec.volume, &attendu) < 1e-9, "le volume doit être la reconstruction sans les coupes écartées : {}", ecart_volume(&avec.volume, &attendu));
+        assert!(ecart_volume(&avec.volume, &sans.volume) > 1e-9, "l'exclusion n'a aucun effet sur le volume");
+        // branche avec correction de biais (stacks avec un biais marqué : le champ corrigé change réellement les stacks) : l'exclusion porte sur les stacks CORRIGÉS
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        let (_, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let champ = |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
+        let biaises = simuler_blobs_avec_champ(&t, &volume_de_blobs(), &modeles_de_blobs_larges(&t), &vraies, Some(&champ));
+        let avec_biais = ReconstructionConfig { s2s_bias_rounds: 1, s2s_bias_min_reduction: 0.0, ..base.clone() };
+        let sans_b = reconstruct(&biaises, &avec_biais, &device).unwrap();
+        let avec_b = reconstruct(&biaises, &ReconstructionConfig { s2s_exclude_fraction: 0.3, ..avec_biais.clone() }, &device).unwrap();
+        let corriges = crate::pipeline::correct_stacks(&biaises, &estimate_bias_fields(&biaises, &sans_b.poses, &BiasConfig::default()).unwrap(), 0.0);
+        let attendu_b = crate::pipeline::reconstruct_with_poses(&sans_b.grid, &without_excluded_slices(&corriges, &sans_b.slices, 0.3), &sans_b.poses, &avec_biais).unwrap();
+        assert!(ecart_volume(&avec_b.volume, &attendu_b) < 1e-9, "avec correction de biais, l'exclusion doit porter sur les stacks corrigés : {}", ecart_volume(&avec_b.volume, &attendu_b));
+        let sur_bruts = crate::pipeline::reconstruct_with_poses(&sans_b.grid, &without_excluded_slices(&biaises, &sans_b.slices, 0.3), &sans_b.poses, &avec_biais).unwrap();
+        assert!(ecart_volume(&sur_bruts, &attendu_b) > 1e-9, "la correction de biais doit changer le volume (sinon le test ne distingue pas stacks corrigés et bruts)");
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier

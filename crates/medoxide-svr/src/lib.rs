@@ -173,6 +173,16 @@ impl BrainMask {
         Ok(BrainMask { voxels, discarded: total - gardes, barycenter: somme / gardes as f64 })
     }
 
+    /// Copie du masque dont les coupes `exclues` (plans `z = k`) sont vidées : aucun de leurs pixels n'est plus dans le masque. Les coupes hors de la grille sont ignorées ; le barycentre et le compte des voxels écartés sont conservés.
+    pub fn without_slices(&self, exclues: &[usize]) -> BrainMask {
+        let mut copie = self.clone();
+        let nz = copie.voxels.dim().2;
+        for &k in exclues.iter().filter(|&&k| k < nz) {
+            copie.voxels.index_axis_mut(Axis(2), k).fill(false);
+        }
+        copie
+    }
+
     /// Voxels du masque nettoyé, axes `[x, y, z]`, même grille que le stack.
     pub fn voxels(&self) -> &Array3<bool> {
         &self.voxels
@@ -882,6 +892,13 @@ impl Stack {
             let x = (affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
             *v = (f64::from(*v) / log_champ(&x).exp()) as f32;
         }
+        copie
+    }
+
+    /// Copie du stack dont les coupes `exclues` sont retirées du masque cérébral (elles ne contribuent plus à la reconstruction ni au recalage) ; sans masque attaché, copie telle quelle.
+    pub fn without_slices(&self, exclues: &[usize]) -> Stack {
+        let mut copie = self.clone();
+        copie.mask = self.mask.as_ref().map(|m| m.without_slices(exclues));
         copie
     }
 

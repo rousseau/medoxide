@@ -130,6 +130,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : cycles coupe-volume de raffinement après le coupe-coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_cycles)]
         s2v_refine_cycles: usize,
+        /// Avec `--motion s2s` : fraction des coupes recalées de plus faible concordance écartées de la reconstruction (0 : aucune)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_exclude_fraction)]
+        s2s_exclude_fraction: f64,
         /// Avec `--s2v-refine-cycles` : résolution (mm) de la reconstruction des cycles de raffinement
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_resolution_mm)]
         s2v_refine_resolution_mm: f64,
@@ -297,8 +300,8 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, quality, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2v_cycles, ..Default::default() };
+        Command::Svr { action: SvrAction::Recon { input, mask, output, quality, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2s_exclude_fraction, s2v_cycles } } => {
+            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2s_exclude_fraction, s2v_cycles, ..Default::default() };
             svr_recon(&input, &mask, &output, poses.as_deref(), quality.as_deref(), device, &config)
         }
         Command::Fetalbet { input, output, model } => {
