@@ -379,3 +379,18 @@ Critère (moyenne ≥ 0,75, minimum ≥ 0,65) **tenu** : la concordance finale d
 | moyenne (9 replis) | | | −0,0037 | −2,9 % |
 
 Critère (2) (netteté : au moins +1 %) : **échec net** sur chacun des trois sujets (−2,2 à −3,8 %) ; critère (1) (juge : pas plus de −0,005) : −0,0037 en moyenne mais −0,0077 sur un sujet. Les trois autres sujets, qui n'auraient pu inverser la moyenne, n'ont pas été attendus. **L'exclusion des coupes les moins bien recalées est non retenue** : écarter 15 % des coupes appauvrit la reconstruction (moins de données par voxel, donc plus de bruit et de flou) plus qu'elle n'élimine d'erreurs de pose ; la concordance finale (AUC 0,78) ne sépare pas assez les coupes mal recalées des bonnes. L'option `--s2s-exclude-fraction` reste dans le code, désactivée. Une pondération douce plutôt qu'une exclusion franche reste possible, mais le signal (AUC 0,72 à 0,86) est modeste.
+
+## 23. Étape 4 du plan (garde contre le mouvement indépendant) : le cas existe-t-il dans le réel ? (2026-10-18)
+
+Diagnostic sans critère (`scripts/analyse_rugosite_mouvement.py`) : déplacement de 100 pixels de masque entre les poses de deux coupes consécutives d'un même stack (médiane / 90ᵉ centile, mm), par méthode, sur les six sujets réels.
+
+| Sujet | coupe-coupe λ = 0 | coupe-coupe λ = 0,01 | SVRTK | NeSVoR | NiftyMIC |
+|---|---|---|---|---|---|
+| agité 1 | 1,28 / 4,53 | 1,01 / 3,56 | 1,20 / 5,00 | 1,12 / 6,56 | 1,15 / 1,85 |
+| calme 1 | 0,64 / 1,36 | 0,52 / 0,99 | 0,53 / 1,10 | 0,40 / 0,69 | 0,48 / 0,95 |
+| agité 3 | 4,87 / 10,67 | 2,46 / 4,34 | 2,79 / 7,35 | 3,48 / 11,26 | 1,66 / 2,66 |
+| agité 2 | 2,43 / 8,73 | 1,71 / 4,01 | 1,24 / 5,86 | 2,98 / 8,86 | 0,96 / 2,07 |
+| calme 2 | 0,49 / 1,01 | 0,44 / 0,89 | 0,52 / 1,36 | 0,41 / 0,76 | 0,50 / 0,83 |
+| calme 3 | 0,81 / 1,67 | 0,64 / 1,15 | 0,64 / 4,76 | 0,60 / 1,24 | 0,67 / 1,25 |
+
+Lecture : (1) sur les sujets calmes, le mouvement entre coupes voisines est de 0,4 à 0,8 mm pour toutes les méthodes : lisse ; (2) sur les sujets agités, il atteint 1 à 3,5 mm (médiane), avec des queues à 5-11 mm, et le recalage sans a priori **ajoute** de la rugosité (agité 3 : 4,87 mm contre 2,46 avec a priori, 1,66 à 3,48 pour les méthodes volumiques) ; (3) ordres de grandeur du banc : un mouvement lisse ±6 mm donne des pas de 3 à 4 mm environ, un mouvement indépendant ±3 mm de 5 mm environ ; **aucun sujet réel n'atteint le niveau « indépendant »**, et le sujet réel le plus agité se situe au niveau du « lisse ±6 mm », où l'a priori gagne le plus (§ 20, § 21). **Conclusion : la garde contre le mouvement indépendant n'a pas de cas d'usage observé** (l'a priori n'a jamais nui sur les six sujets réels : concordance, accord des poses, juge, netteté) ; l'étape 4 est **abandonnée** faute de besoin, à reprendre si une acquisition à mouvement indépendant d'une coupe à l'autre apparaît.
