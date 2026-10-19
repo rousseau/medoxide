@@ -5,6 +5,7 @@
 
 pub mod attunet;
 pub mod bet;
+pub mod etiquettes;
 pub mod fusion;
 pub mod geometrie;
 pub mod masque;
