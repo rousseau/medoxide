@@ -59,7 +59,8 @@ Fetal-BET est exactement l'`AttentionUnet` de MONAI (en 2D), converti par `onnx2
 ## Critères (écrits avant le code)
 
 BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume réel de 256³) :
-- **C1, par réseau** : écart absolu maximal entre les logits Rust (f32) et les logits PyTorch/MONAI ≤ 1e-3, et au moins 99,9 % d'étiquettes identiques après argmax.
+- **C1, par réseau** : écart **relatif** maximal (max |Δ| / max |logit|) entre les logits Rust (f32) et les logits PyTorch/MONAI ≤ 1e-5, et au moins 99,9 % d'étiquettes identiques après argmax.
+  *Amendement (2026-10-19, après la mesure de l'export ONNX)* : la première rédaction fixait un écart **absolu** ≤ 1e-3. Elle est fausse pour les réseaux aux logits de grande amplitude : l'Attention U-Net (logits jusqu'à environ 300) donne 1,34e-3 d'écart absolu pour un écart relatif de 4,4e-6, identique à celui de l'U-Net (6,6e-4 absolu, 4,4e-6 relatif). Le projet avait déjà établi ce point pour Fetal-BET (seuil relatif de 1e-5). Le critère est donc relatif ; le changement a été décidé en voyant ce résultat et est signalé comme tel.
 - **C2, fusion** (quatre sorties, retournement et échange des étiquettes) : au moins 99,9 % de voxels d'étiquette identique à la référence Python/MONAI à entrée prétraitée identique.
 - **C3, chaîne complète** (prétraitement et post-traitement réécrits en Rust, sur trois de nos reconstructions) : Dice moyen par étiquette ≥ 0,98 contre la sortie du script Docker, aucune étiquette sous 0,95.
 - **C4, ressources** (informatif, à mesurer d'abord) : mémoire maximale et temps d'une inférence à 256³ sur le Mac (24 Go de RAM). Si la mémoire dépasse 20 Go, étudier l'inférence par fenêtres ou la réduction de précision avant d'aller plus loin.
