@@ -176,8 +176,8 @@ pub fn definir_affine(header: &mut nifti::NiftiHeader, matrice: [[f64; 4]; 4]) {
     let determinant = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
     let qfac = if determinant < 0.0 { -1.0 } else { 1.0 };
     if qfac < 0.0 {
-        for ligne in 0..3 {
-            r[ligne][2] = -r[ligne][2];
+        for ligne in r.iter_mut() {
+            ligne[2] = -ligne[2];
         }
     }
     let a0 = r[0][0] + r[1][1] + r[2][2] + 1.0;
@@ -205,8 +205,8 @@ pub fn definir_affine(header: &mut nifti::NiftiHeader, matrice: [[f64; 4]; 4]) {
     (header.quatern_b, header.quatern_c, header.quatern_d) = ((signe * b) as f32, (signe * c) as f32, (signe * d) as f32);
     (header.quatern_x, header.quatern_y, header.quatern_z) = (matrice[0][3] as f32, matrice[1][3] as f32, matrice[2][3] as f32);
     header.pixdim[0] = qfac as f32;
-    for colonne in 0..3 {
-        header.pixdim[colonne + 1] = taille[colonne] as f32;
+    for (colonne, t) in taille.iter().enumerate() {
+        header.pixdim[colonne + 1] = *t as f32;
     }
 }
 
