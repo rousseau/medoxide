@@ -164,3 +164,28 @@ Tests : quatre tests unitaires sans poids (permutation des étiquettes comparée
 - **5d, assemblage** et commande `medx bounti` avec les deux modes.
 - **5e, critère C3** : Dice par étiquette ≥ 0,98 (aucune étiquette sous 0,95) contre la sortie du script Docker complet, sur trois reconstructions, pour le mode `bounti` ; pour le mode `fetalbet`, Dice moyen ≥ 0,95 contre la même référence, et écart entre les deux modes rapporté sans seuil.
 Restent à trancher en cours de route : la sortie du mode `fetalbet` (Fetal-BET est une extraction 2D par coupe à 1 mm, avec sa propre normalisation, qui donne un masque à la grille de l'image), et le traitement des valeurs hors plage (négatives, non finies).
+
+## Sous-étape 5a : géométrie (résultat)
+
+Références : le prétraitement officiel rejoué dans l'image Docker (`scripts/bounti_references_mirtk.py`) sur trois de nos reconstructions (volumes de 0,8 mm, environ 148 × 133 × 132 voxels). Code : `crates/medoxide-bounti/src/geometrie.rs` ; test `the_geometry_matches_mirtk` (`cargo test -p medoxide-bounti -- --ignored`).
+
+| Étape | Dimensions | Écart d'affine | Écart d'intensité (part de la plage) |
+|---|---|---|---|
+| 1 recadrage (calme 1 / 2 / 3) | 126×112×110 / 124×110×101 / 118×110×101, identiques à MIRTK | ≤ 3,2e-6 mm | **0** |
+| 2-3 grille de référence puis recadrage | 168×149×146 / 166×147×134 / 158×147×134, identiques | ≤ 8,4e-6 mm | ≤ 9,1e-6 |
+| 4 cube de 128³ | identiques | ≤ 8,5e-6 mm | ≤ 7,6e-6 |
+| 4 cube de 256³ | identiques | ≤ 9,6e-6 mm | ≤ 7,5e-6 |
+
+**Critère atteint** (mêmes dimensions et même affine à 1e-3 mm près ; écart d'intensité ≤ 1e-3 de la plage pour les recadrages, ≤ 1e-5 pour les cubes) sur les trois volumes ; les écarts restants sont du bruit de précision flottante.
+
+**Règles établies par comparaison étape par étape avec MIRTK** (prototype Python puis Rust) :
+- *recadrage* : boîte englobante des voxels **strictement** supérieurs à 0,005 ;
+- *grille de référence* : 300 × 369 × 300 voxels de 0,6 mm, orientation LAS, **centre de grille égal au centre du volume recadré** ;
+- *interpolation* : trilinéaire en coordonnées monde ; une position à **moins d'un demi-voxel du bord** prend la valeur du voxel de bord, au-delà 0. Sans cette règle, 203 voxels sur 33 millions différaient (tous dans la marge d'un demi-voxel). **Hypothèse réfutée** : exclure les voxels de valeur 0 de l'interpolation (la « valeur de remplissage de la source » de `prepare-for-monai`) donnait 154 329 voxels différents au lieu de 203 : MIRTK interpole le zéro comme une valeur ;
+- *second recadrage* : on garde les voxels dont le **centre** est dans la boîte physique du masque (bords de voxels), soit début = ⌈borne basse⌉ et fin = ⌊borne haute⌋ sur chaque axe ; le résultat est une tranche exacte de l'image rééchantillonnée ;
+- *cube* : voxel isotrope `1,01 × plus petit voxel × plus grande dimension / n` (0,7954 mm pour n = 128 et 0,3977 mm pour 256 sur le premier volume), même orientation, centré sur le centre du volume, intensités ramenées dans [0, 1].
+Tests : cinq tests unitaires sur données synthétiques ; **seize mutants du module tous tués** (dont un cas anisotrope ajouté après qu'un mutant a survécu : tous les volumes de test étaient isotropes, le plus petit et le plus grand voxel y étaient égaux).
+
+**Lecture de l'affine.** Les fichiers de MIRTK n'ont qu'un `qform` : `medoxide-core` gagne `affine_nifti` (règle de nibabel : `sform` si son code est positif, sinon `qform`, sinon diagonale des `pixdim` centrée), validée contre nibabel sur six `qform` (identité, rotation de 90° autour de z et autour de x, inversion d'axe avec `qfac = −1`, oblique, rotation générale) ; neuf mutants tués. C'est la règle demandée par la demande n° 1 de guioxide (`docs/issues/medoxide.md`) ; `volume_info`, qui ne lit que le `sform`, n'a pas été modifiée.
+
+**Constat hors périmètre, à traiter.** Les volumes que `medoxide` écrit (par exemple `ours_s2s_defaut.nii.gz`) ont un `sform` correct mais un **`qform` sans origine**, donc incohérent avec le `sform`. Les outils qui lisent le `qform` (MIRTK l'a fait) placent alors le volume avec son coin à l'origine. À corriger dans l'écriture NIfTI (qform dérivé de l'affine, avec test) ; non fait ici.

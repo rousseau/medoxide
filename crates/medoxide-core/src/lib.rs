@@ -79,6 +79,82 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo, CoreError> {
     Ok(VolumeInfo { dim, spacing, affine })
 }
 
+/// D'où vient l'affine d'un volume NIfTI (voir [`affine_nifti`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAffine {
+    /// Le `sform` (`sform_code > 0`) : matrice stockée telle quelle.
+    Sform,
+    /// Le `qform` (`qform_code > 0`) : quaternion, tailles de voxel (`pixdim`) et sens (`qfac`).
+    Qform,
+    /// Ni l'un ni l'autre : diagonale des `pixdim`, volume centré sur l'origine (comme nibabel).
+    Pixdim,
+}
+
+/// Affine voxel → mm d'un volume NIfTI, en double précision, et sa source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AffineNifti {
+    /// Matrice 4×4, ligne par ligne : `[x, y, z, 1]ᵀ = matrice · [i, j, k, 1]ᵀ`.
+    pub matrice: [[f64; 4]; 4],
+    /// Champ de l'en-tête dont elle est tirée.
+    pub source: SourceAffine,
+}
+
+/// Affine d'un en-tête NIfTI par la règle de nibabel (`get_best_affine`) : le `sform` si `sform_code > 0`, sinon le `qform` si `qform_code > 0`, sinon la diagonale des `pixdim`.
+///
+/// Le `qform` est converti selon la spécification NIfTI-1 : `a = √(1 − b² − c² − d²)` (quaternion normalisé si cette quantité est négative), matrice de rotation `R` du quaternion `(a, b, c, d)`, colonnes multipliées par `pixdim[1..=3]`,
+/// la troisième colonne l'étant en plus par `qfac` (`pixdim[0]`, pris égal à −1 s'il est négatif, 1 sinon) ; translation `(quatern_x, quatern_y, quatern_z)` (le `qoffset` de la spécification).
+///
+/// # Erreurs
+/// `CoreError::Nifti` si les dimensions de l'en-tête sont invalides (cas sans `sform` ni `qform`, qui centre le volume).
+pub fn affine_depuis_en_tete(header: &nifti::NiftiHeader) -> Result<AffineNifti, CoreError> {
+    if header.sform_code > 0 {
+        let ligne = |l: [f32; 4]| [f64::from(l[0]), f64::from(l[1]), f64::from(l[2]), f64::from(l[3])];
+        return Ok(AffineNifti { matrice: [ligne(header.srow_x), ligne(header.srow_y), ligne(header.srow_z), [0.0, 0.0, 0.0, 1.0]], source: SourceAffine::Sform });
+    }
+    let taille = [f64::from(header.pixdim[1]), f64::from(header.pixdim[2]), f64::from(header.pixdim[3])];
+    if header.qform_code > 0 {
+        let (b, c, d) = (f64::from(header.quatern_b), f64::from(header.quatern_c), f64::from(header.quatern_d));
+        let reste = 1.0 - (b * b + c * c + d * d);
+        let (a, b, c, d) = if reste < 1e-7 {
+            let norme = (b * b + c * c + d * d).sqrt();
+            (0.0, b / norme, c / norme, d / norme)
+        } else {
+            (reste.sqrt(), b, c, d)
+        };
+        let rotation = [
+            [a * a + b * b - c * c - d * d, 2.0 * (b * c - a * d), 2.0 * (b * d + a * c)],
+            [2.0 * (b * c + a * d), a * a + c * c - b * b - d * d, 2.0 * (c * d - a * b)],
+            [2.0 * (b * d - a * c), 2.0 * (c * d + a * b), a * a + d * d - b * b - c * c],
+        ];
+        let qfac = if header.pixdim[0] < 0.0 { -1.0 } else { 1.0 };
+        let decalage = [f64::from(header.quatern_x), f64::from(header.quatern_y), f64::from(header.quatern_z)];
+        let mut matrice = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        for ligne in 0..3 {
+            for colonne in 0..3 {
+                let facteur = if colonne == 2 { qfac } else { 1.0 };
+                matrice[ligne][colonne] = rotation[ligne][colonne] * taille[colonne] * facteur;
+            }
+            matrice[ligne][3] = decalage[ligne];
+        }
+        return Ok(AffineNifti { matrice, source: SourceAffine::Qform });
+    }
+    let dim = header.dim()?;
+    let mut matrice = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    for axe in 0..3 {
+        matrice[axe][axe] = taille[axe];
+        matrice[axe][3] = -(f64::from(dim[axe]) - 1.0) / 2.0 * taille[axe];
+    }
+    Ok(AffineNifti { matrice, source: SourceAffine::Pixdim })
+}
+
+/// Affine d'un fichier NIfTI (`.nii` ou `.nii.gz`) par la règle de [`affine_depuis_en_tete`] ; seul l'en-tête est lu.
+///
+/// # Erreurs
+/// `CoreError::Nifti` si le fichier est absent, illisible ou invalide.
+pub fn affine_nifti(path: &Path) -> Result<AffineNifti, CoreError> {
+    affine_depuis_en_tete(&nifti::NiftiHeader::from_file(path)?)
+}
+
 /// Lit les voxels d'un volume NIfTI (`.nii` ou `.nii.gz`) en `f32`, axes `[x, y, z]`.
 ///
 /// Le facteur d'échelle de l'en-tête (`scl_slope`, `scl_inter`) est appliqué.
@@ -203,5 +279,51 @@ mod tests {
     fn volume_info_fails_on_missing_file() {
         let r = volume_info(Path::new("n_existe_pas.nii.gz"));
         assert!(matches!(r, Err(CoreError::Nifti(_))));
+    }
+
+    /// Règle `sform` / `qform` / `pixdim` (valeurs de référence calculées avec nibabel `Nifti1Header.set_qform` et `get_best_affine`, voir `docs/BOUNTI.md`) : quatre `qform` (identité à voxel de 0,8 mm avec translation ; rotation de 90° autour de z avec voxels anisotropes ;
+    /// inversion de l'axe x donc `qfac = −1` ; rotation oblique), le `sform` prioritaire quand les deux existent, et l'absence des deux (diagonale centrée).
+    #[test]
+    fn the_affine_rule_matches_nibabel() {
+        let en_tete = |code_q: i16, b: f32, c: f32, d: f32, decalage: [f32; 3], qfac: f32, pixdim: [f32; 3]| {
+            let mut h = nifti::NiftiHeader::default();
+            h.dim = [3, 4, 5, 6, 1, 1, 1, 1];
+            h.sform_code = 0; // `NiftiHeader::default()` initialise un sform : on veut le qform seul
+            h.qform_code = code_q;
+            (h.quatern_b, h.quatern_c, h.quatern_d) = (b, c, d);
+            (h.quatern_x, h.quatern_y, h.quatern_z) = (decalage[0], decalage[1], decalage[2]);
+            h.pixdim = [qfac, pixdim[0], pixdim[1], pixdim[2], 0.0, 0.0, 0.0, 0.0];
+            h
+        };
+        let proche = |a: [[f64; 4]; 4], b: [[f64; 4]; 4]| a.iter().flatten().zip(b.iter().flatten()).all(|(x, y)| (x - y).abs() < 1e-5);
+        let cas: [(nifti::NiftiHeader, [[f64; 4]; 4]); 6] = [
+            (en_tete(1, 0.0, 0.0, 0.0, [1.0, 2.0, 3.0], 1.0, [0.8, 0.8, 0.8]), [[0.8, 0.0, 0.0, 1.0], [0.0, 0.8, 0.0, 2.0], [0.0, 0.0, 0.8, 3.0], [0.0, 0.0, 0.0, 1.0]]),
+            (en_tete(1, 0.0, 0.0, 0.707106769, [10.0, -20.0, 30.0], 1.0, [0.5, 0.5, 2.0]), [[0.0, -0.5, 0.0, 10.0], [0.5, 0.0, 0.0, -20.0], [0.0, 0.0, 2.0, 30.0], [0.0, 0.0, 0.0, 1.0]]),
+            (en_tete(1, 0.0, 1.0, 0.0, [89.7, -112.65, -91.95], -1.0, [0.6, 0.6, 0.6]), [[-0.6, 0.0, 0.0, 89.7], [0.0, 0.6, 0.0, -112.65], [0.0, 0.0, 0.6, -91.95], [0.0, 0.0, 0.0, 1.0]]),
+            (en_tete(1, 0.0, 0.0, 0.422386974, [0.0, 0.0, 0.0], 1.0, [0.942583799, 0.959917367, 1.5]), [[0.6062496, -0.7350244, 0.0, 0.0], [0.7217518, 0.6173982, 0.0, 0.0], [0.0, 0.0, 1.5, 0.0], [0.0, 0.0, 0.0, 1.0]]),
+            // rotation de 90° autour de x (b non nul) avec voxel de 3 mm en z
+            (en_tete(1, 0.707106769, 0.0, 0.0, [5.0, 6.0, 7.0], 1.0, [1.0, 1.0, 3.0]), [[1.0, 0.0, 0.0, 5.0], [0.0, 0.0, -3.0, 6.0], [0.0, 1.0, 0.0, 7.0], [0.0, 0.0, 0.0, 1.0]]),
+            // rotation générale en 3D (b, c et d non nuls), voxels anisotropes
+            (en_tete(1, 0.239298344, 0.189307854, 0.038134575, [-3.0, 4.0, -5.0], 1.0, [0.800000012, 1.0, 2.0]), [[0.7403333, 0.0180283, 0.7570446, -3.0], [0.1305407, 0.8825641, -0.8819392, 4.0], [-0.2736161, 0.4698463, 1.6275954, -5.0], [0.0, 0.0, 0.0, 1.0]]),
+        ];
+        for (i, (h, attendu)) in cas.iter().enumerate() {
+            let a = affine_depuis_en_tete(h).unwrap();
+            assert_eq!(a.source, SourceAffine::Qform, "cas {i}");
+            assert!(proche(a.matrice, *attendu), "cas {i} : {:?} contre {attendu:?}", a.matrice);
+        }
+        // le sform est prioritaire, même quand le qform existe et diffère
+        let mut h = en_tete(1, 0.0, 0.0, 0.0, [1.0, 2.0, 3.0], 1.0, [0.8, 0.8, 0.8]);
+        h.sform_code = 1;
+        h.srow_x = [0.8, 0.0, 0.0, -38.285];
+        h.srow_y = [0.0, 0.8, 0.0, -49.232];
+        h.srow_z = [0.0, 0.0, 0.8, -64.298];
+        let a = affine_depuis_en_tete(&h).unwrap();
+        assert_eq!(a.source, SourceAffine::Sform);
+        assert!(proche(a.matrice, [[0.8, 0.0, 0.0, -38.285], [0.0, 0.8, 0.0, -49.232], [0.0, 0.0, 0.8, -64.298], [0.0, 0.0, 0.0, 1.0]]));
+        // ni sform ni qform : diagonale des pixdim, volume centré (nibabel : -(dim - 1) / 2 · pixdim), ici dim = (4, 5, 6) et pixdim 0,8
+        let h = en_tete(0, 0.0, 0.0, 0.0, [0.0, 0.0, 0.0], 1.0, [0.8, 0.8, 0.8]);
+        let a = affine_depuis_en_tete(&h).unwrap();
+        assert_eq!(a.source, SourceAffine::Pixdim);
+        assert!(proche(a.matrice, [[0.8, 0.0, 0.0, -1.2], [0.0, 0.8, 0.0, -1.6], [0.0, 0.0, 0.8, -2.0], [0.0, 0.0, 0.0, 1.0]]), "{:?}", a.matrice);
     }
 }

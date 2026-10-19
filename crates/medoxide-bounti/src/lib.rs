@@ -5,6 +5,7 @@
 
 pub mod attunet;
 pub mod fusion;
+pub mod geometrie;
 pub mod norme;
 pub mod unet;
 

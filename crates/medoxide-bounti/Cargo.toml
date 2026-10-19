@@ -8,3 +8,8 @@ edition.workspace = true
 # `flex` : backend CPU de Burn (Rust pur), pour séparer l'erreur de conversion de l'arithmétique du GPU dans les tests.
 burn = { workspace = true, features = ["flex"] }
 burn-store = { workspace = true }
+# Lecture des volumes NIfTI et de leur affine (règle `sform`, `qform`, `pixdim`).
+medoxide-core = { path = "../medoxide-core" }
+ndarray = { workspace = true }
+# Matrices 4×4 de la géométrie (affines voxel → mm).
+nalgebra = { workspace = true }

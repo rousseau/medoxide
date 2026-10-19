@@ -1499,6 +1499,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : (1) pour tester une fusion sans poids, on la compare à une formule écrite à la main avec des réseaux factices **non symétriques** (un terme dépendant de la position sur l'axe retourné) : un réseau symétrique ne verrait ni le sens du retournement ni l'ordre ; (2) le test à la main distingue un diviseur faux, une image non retournée ou une absence d'échange ; (3) avant de coder, vérifier sur quel axe l'outil de référence retourne (ici le premier axe spatial, vérifié sur un petit tenseur) ; (4) un mutant « équivalent » (ordre de deux opérations qui commutent) se reconnaît à l'argument mathématique, pas en durcissant le test ; (5) ne pas lancer une référence de 9 Go quand le swap est presque plein : différer et le dire.
 - **Où** : `crates/medoxide-bounti/src/fusion.rs`, `scripts/make_bounti_fusion_reference.py`, `docs/BOUNTI.md` (étape 4).
 
+## 2026-10-19 — Reproduire un outil de référence étape par étape, et lire l'affine d'un NIfTI
+
+- **Quoi (concept)** : un volume NIfTI porte sa géométrie dans deux champs, `sform` (matrice) et `qform` (quaternion, tailles de voxel, sens `qfac`) ; la règle de nibabel est `sform` sinon `qform` sinon diagonale des `pixdim`. Un outil qui lit seulement le `qform` place mal un fichier dont le `qform` n'a pas d'origine. Le domaine d'une image s'étend d'un demi-voxel au-delà des centres de ses voxels extrêmes : une position dans cette marge prend la valeur du voxel de bord.
+- **Quoi (méthode)** : pour reproduire un outil (MIRTK) il vaut mieux **rejouer ses commandes une à une en gardant chaque étape**, prototyper en Python, comparer chaque étape (dimensions, affine, valeurs) et n'écrire le Rust qu'une fois les règles établies. Cela a trouvé : la règle du recadrage (début = ⌈borne⌉, fin = ⌊borne⌋ sur les bords de voxels), la marge d'un demi-voxel (203 voxels différents sur 33 millions sans elle), et réfuté une hypothèse plausible (exclure les zéros de l'interpolation faisait 760 fois plus d'erreurs). Un test avec des volumes tous isotropes ne distingue pas le plus petit du plus grand voxel : un mutant a survécu jusqu'à l'ajout d'un cas anisotrope.
+- **Où** : `crates/medoxide-bounti/src/geometrie.rs`, `crates/medoxide-core/src/lib.rs` (`affine_nifti`), `scripts/bounti_references_mirtk.py`, `docs/BOUNTI.md` (sous-étape 5a).
+
 ---
 
 *(à compléter à la prochaine étape)*
