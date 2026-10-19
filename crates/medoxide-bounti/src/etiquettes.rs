@@ -2,23 +2,27 @@
 //!
 //! Une image d'étiquettes ne s'interpole pas comme une image d'intensités : la moyenne de deux étiquettes (3 et 7) n'est pas une étiquette. Règle de MIRTK, établie par comparaison (voir `docs/BOUNTI.md`, sous-étape 5d-1) :
 //! chaque étiquette présente est rééchantillonnée comme une carte binaire (1 sur ses voxels, 0 ailleurs, interpolation linéaire) ; un voxel d'arrivée prend l'étiquette dont la valeur interpolée **dépasse 0,5**
-//! (il ne peut y en avoir qu'une), et, si aucune ne la dépasse (jonction de plusieurs étiquettes), l'étiquette du **plus proche voisin** dans la grille de départ (0 hors de cette grille). Ce n'est donc pas « l'étiquette de plus grande valeur interpolée ».
-use crate::geometrie::Volume;
+//! (il ne peut y en avoir qu'une), et, si aucune ne la dépasse (jonction de plusieurs étiquettes), l'étiquette du **plus proche voisin** dans la grille de départ. Hors de la grille de départ, le voxel de bord est prolongé d'un voxel entier au-delà du dernier centre (et non d'un demi-voxel comme pour les intensités), puis 0. Ce n'est donc pas « l'étiquette de plus grande valeur interpolée ».
+use crate::geometrie::{Volume, MARGE_ETIQUETTES};
 use ndarray::Array3;
 
 /// Seuil au-dessus duquel la valeur interpolée d'une étiquette l'emporte.
 const SEUIL: f32 = 0.5;
 
-/// Étiquette du voxel de `etiquettes` le plus proche de la position `voxel` (en coordonnées de voxel de la grille de départ), 0 hors de la grille.
+/// Étiquette du voxel de `etiquettes` le plus proche de la position `voxel` (en coordonnées de voxel de la grille de départ) : celle du voxel de bord jusqu'à [`MARGE_ETIQUETTES`] voxels au-delà du dernier centre, 0 au-delà.
 fn plus_proche_voisin(etiquettes: &Array3<u8>, voxel: &nalgebra::Vector3<f64>) -> u8 {
     let (a, b, c) = etiquettes.dim();
-    let (i, j, k) = (voxel.x.round(), voxel.y.round(), voxel.z.round());
-    let dedans = i >= 0.0 && j >= 0.0 && k >= 0.0 && i < a as f64 && j < b as f64 && k < c as f64;
-    if dedans {
-        etiquettes[[i as usize, j as usize, k as usize]]
-    } else {
-        0
+    let dimensions = [a, b, c];
+    let coordonnees = [voxel.x, voxel.y, voxel.z];
+    let mut indices = [0usize; 3];
+    for axe in 0..3 {
+        let dernier = dimensions[axe] as f64 - 1.0;
+        if coordonnees[axe] < -MARGE_ETIQUETTES || coordonnees[axe] > dernier + MARGE_ETIQUETTES {
+            return 0;
+        }
+        indices[axe] = coordonnees[axe].round().clamp(0.0, dernier) as usize;
     }
+    etiquettes[indices]
 }
 
 /// Passe une image d'étiquettes définie sur la grille d'affine `affine_source` (mêmes axes que `etiquettes`) dans la grille de `cible` : étiquette de valeur interpolée supérieure à 0,5, à défaut du plus proche voisin (voir le module).
@@ -42,7 +46,9 @@ pub fn etiquettes_vers_la_grille(
             donnees: etiquettes.mapv(|e| if e == etiquette { 1.0 } else { 0.0 }),
             affine: *affine_source,
         };
-        let interpolee = carte.reechantillonner(&cible.affine, dimensions).donnees;
+        let interpolee = carte
+            .reechantillonner_avec_marge(&cible.affine, dimensions, MARGE_ETIQUETTES)
+            .donnees;
         for (&valeur, sortie) in interpolee.iter().zip(resultat.iter_mut()) {
             if valeur > SEUIL {
                 *sortie = etiquette;
@@ -114,19 +120,38 @@ mod tests {
         assert_eq!(etiquette_en(&etiquettes, [0.7, 0.0, 0.0]), 9);
     }
 
-    /// Hors de la grille de départ (au-delà d'un demi-voxel), l'étiquette est 0 ; dans le demi-voxel de bord, celle du voxel de bord.
+    /// Hors de la grille de départ : l'étiquette du voxel de bord est prolongée d'un voxel entier au-delà du dernier centre (règle de MIRTK pour les étiquettes, relevée à 0,83 voxel : 73 voxels sur 74 sur calme 2), puis 0 ; sur chacun des trois axes, des deux côtés.
+    /// Une source à bord non uniforme (étiquettes 5 au bord bas, 6 au bord haut) distingue le bord prolongé du voxel le plus proche d'un autre bord.
     #[test]
-    fn outside_the_source_grid_the_label_is_zero() {
+    fn the_border_label_extends_one_voxel_then_zero() {
         let etiquettes = Array3::from_elem((3, 3, 3), 5u8);
-        assert_eq!(etiquette_en(&etiquettes, [-0.4, 1.0, 1.0]), 5);
-        assert_eq!(etiquette_en(&etiquettes, [-0.6, 1.0, 1.0]), 0);
-        assert_eq!(etiquette_en(&etiquettes, [1.0, 2.4, 1.0]), 5);
-        assert_eq!(etiquette_en(&etiquettes, [1.0, 2.6, 1.0]), 0);
-        assert_eq!(etiquette_en(&etiquettes, [2.4, 1.0, 1.0]), 5);
-        assert_eq!(etiquette_en(&etiquettes, [2.6, 1.0, 1.0]), 0);
-        assert_eq!(etiquette_en(&etiquettes, [1.0, 1.0, 2.4]), 5);
-        assert_eq!(etiquette_en(&etiquettes, [1.0, 1.0, 2.6]), 0);
-        assert_eq!(etiquette_en(&etiquettes, [1.0, 1.0, -0.6]), 0);
+        for axe in 0..3 {
+            for (position, attendu) in [(-0.9, 5), (-1.1, 0), (2.9, 5), (3.1, 0)] {
+                let mut decalage = [1.0; 3];
+                decalage[axe] = position;
+                assert_eq!(
+                    etiquette_en(&etiquettes, decalage),
+                    attendu,
+                    "axe {axe}, position {position}"
+                );
+            }
+        }
+        let mut deux_bords = Array3::from_elem((4, 1, 1), 5u8);
+        deux_bords[[3, 0, 0]] = 6;
+        assert_eq!(etiquette_en(&deux_bords, [-0.9, 0.0, 0.0]), 5);
+        assert_eq!(etiquette_en(&deux_bords, [3.9, 0.0, 0.0]), 6);
+    }
+
+    /// La prolongation du bord s'applique aussi aux valeurs interpolées : à 0,9 voxel au-delà du dernier centre sur x, avec des étiquettes identiques sur les deux dernières couches (A (1) sur trois des quatre positions de y et z, B (2) sur la quatrième) et un décalage de (0,35 ; 0,35) sur y et z,
+    /// A pèse 0,5775 > 0,5 et l'emporte sur le plus proche voisin B ; avec une prolongation d'un demi-voxel seulement, les valeurs seraient nulles et le plus proche voisin B serait retenu.
+    #[test]
+    fn the_border_extension_applies_to_the_interpolated_values() {
+        let mut etiquettes = Array3::from_elem((2, 2, 2), 1u8);
+        for x in 0..2 {
+            etiquettes[[x, 0, 0]] = 2;
+        }
+        assert_eq!(etiquette_en(&etiquettes, [1.9, 0.35, 0.35]), 1);
+        assert_eq!(etiquette_en(&etiquettes, [-0.9, 0.35, 0.35]), 1);
     }
 
     /// Le plus proche voisin suit les axes de la source : une source anisotrope et décalée (affine non identité) donne l'étiquette du voxel qui contient la position, selon chaque axe.
@@ -231,6 +256,55 @@ mod tests {
                 differents as f64 <= 1e-3 * mien.len() as f64,
                 "{id} : {differents} voxels différents"
             );
+        }
+    }
+
+    /// Diagnostic : dernier pas du masque du cerveau (`bet_s3` → grille d'entrée) à partir de l'intermédiaire officiel ; affiche les voxels différents par rapport à la grille de départ.
+    #[test]
+    #[ignore = "diagnostic : demande les références MIRTK de data/bounti/mirtk"]
+    fn diagnostic_brain_mask_last_step() {
+        let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti/mirtk");
+        for id in ["calme1", "calme2", "calme3"] {
+            let lire = |nom: &str| Volume::lire(&racine.join(id).join(format!("{nom}.nii.gz"))).unwrap();
+            let (source, entree, mirtk) = (lire("bet_s3"), lire("entree"), lire("cerveau_officiel"));
+            for perturbation in [1e-7, 1e-5] {
+                let mut affine = source.affine;
+                for axe in 0..3 {
+                    affine[(axe, 3)] += perturbation;
+                }
+                let perturbe = etiquettes_vers_la_grille(&source.donnees.mapv(|v| u8::from(v > 0.5)), &affine, &entree);
+                let differents = perturbe
+                    .indexed_iter()
+                    .filter(|(p, &m)| m != mirtk.donnees[*p] as u8)
+                    .count();
+                println!("DIAGPERTURB {id} : affine décalée de {perturbation:e} mm : {differents} voxels différents de MIRTK");
+            }
+            let mien = etiquettes_vers_la_grille(&source.donnees.mapv(|v| u8::from(v > 0.5)), &source.affine, &entree);
+            let vers_source = source.affine.try_inverse().unwrap() * entree.affine;
+            let d = source.dimensions();
+            let (mut total, mut hors, mut proche_bord) = (0usize, 0usize, 0usize);
+            let mut exemples = Vec::new();
+            for (position, &m) in mien.indexed_iter() {
+                if m != mirtk.donnees[position] as u8 {
+                    total += 1;
+                    let v = vers_source
+                        * nalgebra::Vector4::new(position.0 as f64, position.1 as f64, position.2 as f64, 1.0);
+                    let coord = [v.x, v.y, v.z];
+                    let dehors = (0..3).any(|a| coord[a] < -0.5 || coord[a] > d[a] as f64 - 0.5);
+                    let bord = (0..3).any(|a| coord[a] < 1.0 || coord[a] > d[a] as f64 - 2.0);
+                    hors += usize::from(dehors);
+                    proche_bord += usize::from(bord);
+                    if exemples.len() < 4 {
+                        exemples.push((
+                            position,
+                            m,
+                            mirtk.donnees[position],
+                            [v.x as f32, v.y as f32, v.z as f32],
+                        ));
+                    }
+                }
+            }
+            println!("DIAGMASQUE {id} : {total} différents (hors de la grille de départ {hors}, à moins d'un voxel du bord {proche_bord}), source {d:?}, exemples {exemples:?}");
         }
     }
 }

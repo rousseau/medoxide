@@ -10,6 +10,7 @@ pub mod fusion;
 pub mod geometrie;
 pub mod masque;
 pub mod norme;
+pub mod segmentation;
 pub mod unet;
 
 #[cfg(test)]

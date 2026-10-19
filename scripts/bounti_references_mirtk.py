@@ -6,6 +6,9 @@ les tests `the_geometry_matches_mirtk` et `the_mask_cleaning_matches_mirtk` de `
 
 Troisième étape (`etiquettes`, sous-étape 5d-1) : des étiquettes de test (`data/bounti/reference/fusion_128_reel_labels.u8`, agrandies d'un facteur 2) sont posées sur la géométrie du cube de 256³ (`cube256.nii.gz`) puis ramenées dans la grille de l'entrée par `bounti_mirtk_etiquettes.sh`.
 
+Quatrième et cinquième étapes (`reseau`, `finale`, sous-étape 5d-2) : le script officiel de segmentation des tissus (`data/bounti/src/run_monai_comb_red_atunet_unet_segmentation-2022-lr.py`, fusion à 256³) est exécuté SUR LE MAC, sur le cube `cube256m` laissé par `masque`, sous `garde_memoire.py` (la machine virtuelle de Docker Desktop, 7,7 Gio par défaut, ne suffit pas :
+le processus y est tué) ; puis `bounti_mirtk_finale.sh` ramène ses étiquettes et le masque du cerveau dans la grille de l'entrée. Le script officiel complet n'est donc pas exécuté d'un seul tenant : chaque morceau est l'officiel, enchaîné ici.
+
 Usage : python scripts/bounti_references_mirtk.py calme1=chemin/volume1.nii.gz calme2=chemin/volume2.nii.gz [--image fetalsvrtk/svrtk:general_auto_arm] [--etapes preparer,masque,etiquettes]
 """
 
@@ -20,13 +23,13 @@ import numpy as np
 parser = argparse.ArgumentParser()
 parser.add_argument("volumes", nargs="+", help="id=fichier.nii.gz")
 parser.add_argument("--image", default="fetalsvrtk/svrtk:general_auto_arm")
-parser.add_argument("--etapes", default="preparer,masque,etiquettes", help="étapes à rejouer, séparées par des virgules (les suivantes lisent les fichiers laissés par les précédentes)")
+parser.add_argument("--etapes", default="preparer,masque,etiquettes,reseau,finale", help="étapes à rejouer, séparées par des virgules (les suivantes lisent les fichiers laissés par les précédentes)")
 args = parser.parse_args()
 
 racine = os.path.abspath("data/bounti/mirtk")
 os.makedirs(racine, exist_ok=True)
 etapes = args.etapes.split(",")
-for source, destination in [("bounti_mirtk_preparer.sh", "preparer.sh"), ("bounti_mirtk_masque.sh", "masque.sh"), ("bounti_mirtk_etiquettes.sh", "etiquettes.sh")]:
+for source, destination in [("bounti_mirtk_preparer.sh", "preparer.sh"), ("bounti_mirtk_masque.sh", "masque.sh"), ("bounti_mirtk_etiquettes.sh", "etiquettes.sh"), ("bounti_mirtk_finale.sh", "finale.sh")]:
     shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), source), os.path.join(racine, destination))
     os.chmod(os.path.join(racine, destination), 0o755)
 for entree in args.volumes:
@@ -47,7 +50,19 @@ for entree in args.volumes:
         image.set_sform(cube.affine, code=1)
         image.set_qform(cube.affine, code=1)
         nib.save(image, os.path.join(dossier, "etiquettes_cube256.nii.gz"))
-    for script in ("preparer.sh", "masque.sh", "etiquettes.sh"):
+    if "reseau" in etapes:
+        donnees = os.path.abspath("data/bounti")
+        sortie = os.path.join(dossier, "bounti_resultats")
+        os.makedirs(sortie, exist_ok=True)
+        modele = lambda nom: os.path.join(donnees, "models", nom) + "/"
+        subprocess.run(
+            ["python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "garde_memoire.py"), "19", "python3",
+             os.path.join(donnees, "src/run_monai_comb_red_atunet_unet_segmentation-2022-lr.py"), dossier + "/",
+             modele("monai-checkpoints-red-attunet-brain_bounti-19-lab"), modele("monai-checkpoints-unet-brain-bounti-19-lab"),
+             "info256m.json", sortie, "256", "19"],
+            check=True,
+        )
+    for script in ("preparer.sh", "masque.sh", "etiquettes.sh", "finale.sh"):
         if script.split(".")[0] in etapes:
             subprocess.run(["docker", "run", "--rm", "-v", f"{racine}:/work", "--entrypoint", "bash", args.image, f"/work/{script}", ident], check=True, stdout=subprocess.DEVNULL)
     print(f"{ident} : références écrites dans {dossier}")

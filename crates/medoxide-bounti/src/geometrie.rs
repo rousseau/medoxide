@@ -21,6 +21,12 @@ pub const DIMENSIONS_REFERENCE: [usize; 3] = [300, 369, 300];
 /// Taille d'un voxel de la grille de référence (mm).
 pub const VOXEL_REFERENCE_MM: f64 = 0.6;
 
+/// Extension du voxel de bord (en voxels, au-delà du dernier centre) pour l'interpolation d'intensités : un demi-voxel, puis 0 (validé contre MIRTK, sous-étape 5a).
+pub const MARGE_INTENSITES: f64 = 0.5;
+
+/// Extension du voxel de bord pour les cartes d'étiquettes (`transform-image -labels` de MIRTK) : un voxel entier, puis 0 (voir `docs/BOUNTI.md`, sous-étape 5d-2).
+pub const MARGE_ETIQUETTES: f64 = 1.0;
+
 /// Boîte de voxels (bornes basse et haute, incluses) d'un volume.
 pub type Boite = ([usize; 3], [usize; 3]);
 
@@ -93,15 +99,15 @@ impl Volume {
         ))
     }
 
-    /// Intensité interpolée (trilinéaire) à la position `voxel` exprimée en coordonnées de voxel de ce volume : valeur du voxel de bord à moins d'un demi-voxel du bord, 0 au-delà.
-    fn echantillonner_voxel(&self, voxel: &Vector3<f64>) -> f32 {
+    /// Intensité interpolée (trilinéaire) à la position `voxel` exprimée en coordonnées de voxel de ce volume : valeur du voxel de bord jusqu'à `marge` voxels au-delà du dernier centre de voxel (0,5 pour les intensités, 1 pour les cartes d'étiquettes), 0 au-delà.
+    fn echantillonner_voxel(&self, voxel: &Vector3<f64>, marge: f64) -> f32 {
         let d = self.dimensions();
         let mut base = [0usize; 3];
         let mut fraction = [0.0_f64; 3];
         for axe in 0..3 {
             let v = voxel[axe];
             let dernier = d[axe] as f64 - 1.0;
-            if v < -0.5 || v > dernier + 0.5 {
+            if v < -marge || v > dernier + marge {
                 return 0.0;
             }
             let v = v.clamp(0.0, dernier);
@@ -134,16 +140,26 @@ impl Volume {
     pub fn echantillonner(&self, monde: &Vector3<f64>) -> f32 {
         let inverse = self.affine.try_inverse().expect("affine inversible");
         let v = (inverse * Vector4::new(monde.x, monde.y, monde.z, 1.0)).xyz();
-        self.echantillonner_voxel(&v)
+        self.echantillonner_voxel(&v, MARGE_INTENSITES)
     }
 
     /// Rééchantillonne ce volume sur la grille d'affine `affine_cible` et de dimensions `dimensions` (interpolation trilinéaire, voir la convention du module).
     pub fn reechantillonner(&self, affine_cible: &Matrix4<f64>, dimensions: [usize; 3]) -> Volume {
+        self.reechantillonner_avec_marge(affine_cible, dimensions, MARGE_INTENSITES)
+    }
+
+    /// Comme [`Volume::reechantillonner`], avec `marge` voxels d'extension du voxel de bord au-delà du dernier centre de voxel (voir [`MARGE_INTENSITES`] et [`MARGE_ETIQUETTES`]).
+    pub fn reechantillonner_avec_marge(
+        &self,
+        affine_cible: &Matrix4<f64>,
+        dimensions: [usize; 3],
+        marge: f64,
+    ) -> Volume {
         let vers_source = self.affine.try_inverse().expect("affine inversible") * affine_cible;
         let mut donnees = Array3::<f32>::zeros((dimensions[0], dimensions[1], dimensions[2]));
         for ((i, j, k), valeur) in donnees.indexed_iter_mut() {
             let v = (vers_source * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
-            *valeur = self.echantillonner_voxel(&v);
+            *valeur = self.echantillonner_voxel(&v, marge);
         }
         Volume {
             donnees,
@@ -299,6 +315,28 @@ mod tests {
         Matrix4::new(
             x, 0.0, 0.0, origine[0], 0.0, y, 0.0, origine[1], 0.0, 0.0, z, origine[2], 0.0, 0.0, 0.0, 1.0,
         )
+    }
+
+    /// La marge d'extension du voxel de bord est un paramètre : à 0,9 voxel au-delà du dernier centre, la valeur du bord avec une marge de 1 voxel, 0 avec 0,5 ; à 1,1 voxel, 0 dans les deux cas ; sur chaque axe, des deux côtés.
+    #[test]
+    fn the_border_margin_is_a_parameter() {
+        let v = volume([3, 3, 3], diagonale(1.0, 1.0, 1.0, [0.0, 0.0, 0.0]), |_, _, _| 7.0);
+        let valeur = |position: [f64; 3], marge: f64| {
+            let cible = diagonale(1.0, 1.0, 1.0, position);
+            v.reechantillonner_avec_marge(&cible, [1, 1, 1], marge).donnees[[0, 0, 0]]
+        };
+        for axe in 0..3 {
+            for (decalage, avec_un, avec_demi) in [(-0.9, 7.0, 0.0), (-1.1, 0.0, 0.0), (2.9, 7.0, 0.0), (3.1, 0.0, 0.0)]
+            {
+                let mut position = [1.0; 3];
+                position[axe] = decalage;
+                assert_eq!(valeur(position, 1.0), avec_un, "axe {axe}, {decalage}, marge 1");
+                assert_eq!(valeur(position, 0.5), avec_demi, "axe {axe}, {decalage}, marge 0,5");
+            }
+        }
+        // `reechantillonner` garde la marge des intensités (0,5)
+        let cible = diagonale(1.0, 1.0, 1.0, [-0.9, 1.0, 1.0]);
+        assert_eq!(v.reechantillonner(&cible, [1, 1, 1]).donnees[[0, 0, 0]], 0.0);
     }
 
     /// Interpolation : exacte sur une fonction linéaire à l'intérieur (voxels anisotropes, origine quelconque, positions fractionnaires) ; à moins d'un demi-voxel du bord, valeur du voxel de bord (interpolée sur les autres axes) ; au-delà d'un demi-voxel, 0.

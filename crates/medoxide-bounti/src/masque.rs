@@ -7,7 +7,7 @@
 //! 4. **masquage** du volume (0 hors du masque) puis **recadrage** sur la boîte englobante du masque.
 //!
 //! Particularité de MIRTK reproduite ici : à chaque itération de dilatation ou d'érosion, la couche extérieure de voxels (les voxels sur une face de l'image) **garde sa valeur** ; seuls les voxels intérieurs sont mis à jour, à partir de tous leurs voisins (y compris ceux de la couche extérieure).
-use crate::geometrie::{Boite, ErreurGeometrie, Volume};
+use crate::geometrie::{Boite, ErreurGeometrie, Volume, MARGE_ETIQUETTES};
 use ndarray::Array3;
 
 /// Plus grande composante connexe (voisinage de 26 voxels) d'un masque ; à taille égale, celle dont le premier voxel (ordre `x`, `y`, `z`) vient en premier. Masque vide : masque vide.
@@ -111,21 +111,34 @@ pub fn vers_la_grille(masque: &Array3<bool>, affine_source: &nalgebra::Matrix4<f
         affine: *affine_source,
     };
     source
-        .reechantillonner(&cible.affine, cible.dimensions())
+        .reechantillonner_avec_marge(&cible.affine, cible.dimensions(), MARGE_ETIQUETTES)
         .donnees
         .mapv(|v| v > 0.5)
 }
 
-/// Masque du cerveau dans la grille de `volume` à partir des étiquettes de l'extraction (`etiquettes` : valeur 1 pour le cerveau, sur une grille d'affine `affine_etiquettes`) : plus grande composante, passage dans la grille de `volume`, dilatation de 4 puis érosion de 2.
-pub fn masque_du_cerveau(
+/// Plus grande composante connexe du cerveau, dans la grille de `volume`, à partir des étiquettes de l'extraction (`etiquettes` : valeur 1 pour le cerveau, sur une grille d'affine `affine_etiquettes`) : plus grande composante, puis passage dans la grille de `volume`.
+pub fn composante_du_cerveau(
     etiquettes: &Array3<f32>,
     affine_etiquettes: &nalgebra::Matrix4<f64>,
     volume: &Volume,
 ) -> Array3<bool> {
     let cerveau = etiquettes.mapv(|e| e == 1.0);
     let composante = plus_grande_composante(&cerveau);
-    let dans_la_grille = vers_la_grille(&composante, affine_etiquettes, volume);
-    eroder(&dilater(&dans_la_grille, 4), 2)
+    vers_la_grille(&composante, affine_etiquettes, volume)
+}
+
+/// Nettoyage de la composante du cerveau avant le masquage de l'image : dilatation de 4 puis érosion de 2.
+pub fn nettoyer(composante: &Array3<bool>) -> Array3<bool> {
+    eroder(&dilater(composante, 4), 2)
+}
+
+/// Masque du cerveau dans la grille de `volume` à partir des étiquettes de l'extraction (voir [`composante_du_cerveau`]), après le nettoyage de [`nettoyer`].
+pub fn masque_du_cerveau(
+    etiquettes: &Array3<f32>,
+    affine_etiquettes: &nalgebra::Matrix4<f64>,
+    volume: &Volume,
+) -> Array3<bool> {
+    nettoyer(&composante_du_cerveau(etiquettes, affine_etiquettes, volume))
 }
 
 impl Volume {
@@ -281,6 +294,31 @@ mod tests {
         // composante de 2 voxels : dilatation de 4 → 9 × 9 × 10, érosion de 2 → 5 × 5 × 6
         assert_eq!(m.iter().filter(|&&v| v).count(), 5 * 5 * 6);
         assert!(m[[10, 10, 10]] && m[[14, 14, 15]] && !m[[9, 12, 12]] && !m[[2, 2, 2]]);
+    }
+
+    /// Bord du masque (règle de MIRTK pour les images d'étiquettes) : le voxel de bord est prolongé d'un voxel entier au-delà du dernier centre, puis 0 ; un masque plein de 3 voxels vu depuis une grille d'un seul voxel placé à 0,9 puis à 1,1 voxel au-delà du bord, sur chaque axe et des deux côtés.
+    #[test]
+    fn the_mask_border_extends_one_voxel_when_resampled() {
+        let plein = Array3::from_elem((3, 3, 3), true);
+        let identite = Matrix4::<f64>::identity();
+        let dans_la_grille = |position: [f64; 3]| {
+            let mut affine = Matrix4::<f64>::identity();
+            for axe in 0..3 {
+                affine[(axe, 3)] = position[axe];
+            }
+            let cible = Volume {
+                donnees: Array3::zeros((1, 1, 1)),
+                affine,
+            };
+            vers_la_grille(&plein, &identite, &cible)[[0, 0, 0]]
+        };
+        for axe in 0..3 {
+            for (decalage, attendu) in [(-0.9, true), (-1.1, false), (2.9, true), (3.1, false)] {
+                let mut position = [1.0; 3];
+                position[axe] = decalage;
+                assert_eq!(dans_la_grille(position), attendu, "axe {axe}, position {decalage}");
+            }
+        }
     }
 
     /// Passage dans la grille : un cube plein de 8 voxels de 2 mm devient, dans une grille de 1 mm de même repère, le bloc de 16 voxels de côté qui le recouvre jusqu'à l'interpolation (à l'intérieur toujours vrai, à l'extérieur lointain faux) ; la valeur 0,5 exacte n'est pas dans le masque (seuil strict).
