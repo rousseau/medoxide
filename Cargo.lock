@@ -3870,6 +3870,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "medoxide-bounti"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-store",
+]
+
+[[package]]
 name = "medoxide-core"
 version = "0.1.0"
 dependencies = [

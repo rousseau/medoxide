@@ -1,0 +1,9 @@
+[package]
+name = "medoxide-bounti"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Tenseurs et couches du réseau généré ; `burn-store` lit les poids au format `burnpack`.
+burn = { workspace = true }
+burn-store = { workspace = true }

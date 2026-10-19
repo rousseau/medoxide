@@ -56,6 +56,17 @@ Le GPU est environ dix fois plus rapide que le CPU. Comptage des multiplications
 
 Fetal-BET est exactement l'`AttentionUnet` de MONAI (en 2D), converti par `onnx2burn` (burn-onnx 0.22.0-pre.4) à partir d'un export ONNX : le code Rust du modèle est généré et les poids sont écrits au format `burnpack`. Les opérations de BOUNTI sont les mêmes en 3D (`Conv3d`, `ConvTranspose3d`, BatchNorm, InstanceNorm, PReLU, sigmoïde, produit, concaténation), tous présents dans Burn. **Voie proposée** : exporter chaque réseau MONAI en ONNX (opset 17, taille d'entrée fixe), générer le code et les poids avec `onnx2burn`, valider C1. Repli si l'import échoue sur une opération 3D : écrire le réseau à la main avec `burn::nn` (plus long, plus formateur).
 
+## Étape 2 : U-Net 3D en Rust (résultat)
+
+Crate `medoxide-bounti` (modèle généré par `onnx2burn`, en-tête d'attribution, poids hors dépôt). Test `the_unet_logits_match_pytorch` (`cargo test -p medoxide-bounti -- --ignored`, demande les fichiers locaux de `data/bounti/`) : cube de 64³ de bruit uniforme, comparé aux logits PyTorch/MONAI (`scripts/make_bounti_reference.py`).
+
+| Critère C1 (amendé, relatif) | Mesure | Seuil |
+|---|---|---|
+| écart relatif maximal des logits (backend GPU wgpu) | **9,5e-6** (absolu 1,2e-3 pour |logit| max 126) | ≤ 1e-5 |
+| voxels d'étiquette identique | **100 %** | ≥ 99,9 % |
+
+**C1 atteint pour l'U-Net**, avec une **marge mince** sur l'écart relatif (9,5e-6 contre 1e-5) : les calculs sont en f32 sur GPU contre CPU pour la référence, et l'écart croît avec la profondeur du réseau et la taille du volume. À 64³ la marge suffit ; à 256³ le comportement est à vérifier (étape suivante) avant de conclure que le critère tient sur un volume réel.
+
 ## Critères (écrits avant le code)
 
 BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume réel de 256³) :
