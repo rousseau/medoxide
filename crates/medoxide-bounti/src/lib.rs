@@ -7,6 +7,7 @@ pub mod attunet;
 pub mod bet;
 pub mod fusion;
 pub mod geometrie;
+pub mod masque;
 pub mod norme;
 pub mod unet;
 

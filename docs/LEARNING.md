@@ -1510,6 +1510,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : le contrôle de fidélité de l'export ONNX contre `onnxruntime` a échoué à 128³ (1,2e-4) et réussi à 64³ (4,7e-6) pour le même réseau : la normalisation d'instance d'`onnxruntime` somme elle aussi tout le volume en f32 et perd en précision, comme celle de Burn. Quand un contrôle échoue à une taille et pas à une autre, se demander si c'est la **référence** qui se dégrade avant d'accuser le code ; la vérité à grande taille se mesure contre PyTorch (ou une référence en double précision), pas contre n'importe quel second outil.
 - **Où** : `scripts/export_bounti_onnx.py`, `crates/medoxide-bounti/src/bet.rs`, `docs/BOUNTI.md` (sous-étape 5b).
 
+## 2026-10-19 — Chercher la règle d'un outil par localisation de l'écart, et tester chaque étape depuis l'entrée de la référence
+
+- **Quoi (concept)** : dilatation et érosion morphologiques d'un masque binaire (maximum ou minimum sur un voisinage, répétés) ; le voisinage de 26 voxels est un cube 3 × 3 × 3, et n itérations donnent un cube de côté 2n + 1 (la dilatation de 4 puis l'érosion de 2 ramènent un voxel isolé à un cube de 5). Le maximum sur un cube se calcule axe par axe, en trois passes de trois voxels. MIRTK laisse la **couche extérieure de voxels inchangée** à chaque itération.
+- **Quoi (méthode)** : quand un résultat diffère d'un outil de référence, **localiser les voxels en écart avant de formuler des hypothèses** : les 11 473 voxels de trop de ma dilatation étaient tous sur une face de l'image et à une distance de 1 du masque, ce qui excluait d'emblée les hypothèses de forme du voisinage (6, 18, 26, alternances, boule euclidienne), toutes essayées pour rien ; la règle était dans la gestion du bord. Pour juger une chaîne d'étapes, **faire partir chaque étape de l'entrée de la référence**, sinon une différence d'un voxel (ici un seuil à 4e-6 près, bruit de précision simple de l'outil) s'élargit à la dilatation et masque l'exactitude des autres étapes. Un mutant peut être équivalent par un argument de lecture du code (une valeur qui ne sert qu'à des voxels ensuite remplacés) : le dire plutôt que durcir le test.
+- **Où** : `crates/medoxide-bounti/src/masque.rs`, `scripts/bounti_mirtk_masque.sh`, `docs/BOUNTI.md` (sous-étape 5c).
+
 ---
 
 *(à compléter à la prochaine étape)*

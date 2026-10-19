@@ -202,3 +202,26 @@ Attention U-Net 3D de l'étage 1 de la chaîne officielle : 1 canal d'entrée, *
 
 **C1 atteint** pour le réseau d'extraction (test `the_brain_extraction_logits_match_pytorch_on_a_real_volume`). **Remarque** : l'export à 128³ manquait le seuil contre `onnxruntime` (1,2e-4) alors que celui à 64³ le tient : la normalisation d'instance d'`onnxruntime` perd elle aussi en précision quand le volume grandit (même défaut que celui trouvé dans Burn). Le contrôle de fidélité d'un export se fait donc à 64³, et la validation à la taille réelle contre PyTorch, côté Rust. Aucun code écrit à la main n'est ajouté par cette sous-étape (le modèle est généré), donc pas de test de mutation.
 
+## Sous-étape 5c : nettoyage du masque (résultat)
+
+Références : l'extraction du cerveau officielle rejouée dans l'image Docker (le réseau officiel en Python, puis les commandes MIRTK du script officiel : `scripts/bounti_mirtk_masque.sh`) sur les trois mêmes volumes. Code : `crates/medoxide-bounti/src/masque.rs` ; test `the_mask_cleaning_matches_mirtk`.
+
+| Étape (chaque étape part de l'entrée de MIRTK) | calme 1 | calme 2 | calme 3 |
+|---|---|---|---|
+| plus grande composante connexe (étiquettes du réseau officiel, 2 097 152 voxels) | 0 voxel différent | 0 | 0 |
+| passage dans la grille du volume (3,1 à 3,7 millions de voxels) | 0 | 1 | 2 |
+| dilatation de 4 | 0 | 0 | 0 |
+| érosion de 2 | 0 | 0 | 0 |
+| **chaîne complète** (du masque du cerveau à la sortie de l'érosion) | **0** | **1** | **2** |
+| image masquée et recadrée | mêmes dimensions et affine, écart 0 | idem | idem |
+| cube de 256³ de l'image masquée (après mise à l'échelle dans [0, 1]) | 1,2e-7 | 1,2e-7 | 1,2e-7 |
+
+**Critère de la sous-étape atteint** (au moins 99,9 % de voxels identiques à MIRTK) : la chaîne diffère de 0, 1 et 2 voxels sur plus de 3 millions, soit 99,9999 % d'identiques. Les 1 et 2 voxels des volumes 2 et 3 ont une cause identifiée : à l'étape de passage dans la grille, un voxel dont la valeur interpolée est à 4e-6 du seuil de 0,5 (0,4999956 dans le cas examiné) est classé dans le masque par MIRTK, qui calcule les coordonnées en simple précision (position d'environ 68 voxels, incertitude de l'ordre de 4e-6 voxel) : du bruit de précision de MIRTK, pas une règle différente.
+
+**Règles établies par comparaison étape par étape avec MIRTK** (prototype Python puis Rust) :
+- *plus grande composante* : connexité 26 (défaut de MIRTK) ;
+- *passage dans la grille* : interpolation linéaire du masque binaire (convention d'interpolation de la géométrie) puis seuil à 0,5 ; la conversion d'étiquettes de MIRTK (`-labels`) rééchantillonne chaque étiquette par interpolation linéaire et garde celle de plus grande pseudo-probabilité, ce qui n'est pas un plus proche voisin ;
+- *dilatation et érosion* : voisinage de 26 voxels (cube 3 × 3 × 3 par itération), 4 puis 2 itérations ; **à chaque itération, la couche extérieure de voxels (les faces de l'image) garde sa valeur** : sans cette règle ma dilatation avait 11 473 voxels de trop, tous sur une face de l'image (des voisins directs du masque, donc pas un problème de forme du voisinage) ; les voisinages de 6 et de 18 voxels, leurs alternances et une dilatation euclidienne ont été essayés et écartés.
+- *masquage* : 0 hors du masque ; *recadrage* : boîte englobante du masque.
+Tests : cinq tests unitaires (connexité 26 avec un voxel relié par une diagonale pure, cubes de dilatation et d'érosion, couche figée sur les six faces, interpolation et seuil strict à 0,45, 0,5 et 0,55, paramètres 4 et 2 du masque du cerveau, masquage et recadrage) ; **dix-sept mutants du module : seize tués, un équivalent** (la valeur attribuée aux voisins hors de l'image ne sert qu'aux voxels de la couche extérieure, qui sont ensuite remplacés par leur valeur d'entrée). Trois mutants avaient d'abord survécu : mon test ne vérifiait que certaines faces et ne distinguait pas un seuil de 0,5 d'un seuil de 0,6.
+
