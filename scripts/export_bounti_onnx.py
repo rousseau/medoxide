@@ -5,7 +5,7 @@ Les architectures sont celles du script d'inférence officiel de BOUNTI, écrite
 
 Critère de l'export (critère C1 de docs/BOUNTI.md, amendé) : écart RELATIF maximal des logits PyTorch vs onnxruntime (max |Δ| / max |logit|) ≤ 1e-5 et au moins 99,9 % d'étiquettes (argmax) identiques, sur plusieurs entrées. Le critère initial était un écart absolu ≤ 1e-3 ; il est faux pour des réseaux aux logits de grande amplitude (Attention U-Net : logits jusqu'à environ 300, écart absolu 1,3e-3 pour un écart relatif de 4,4e-6, identique à celui de l'U-Net), comme déjà établi pour Fetal-BET. Contrairement à Fetal-BET (2 classes, accord exigé à 100 %), avec 20 classes un voxel dont les logits sont quasi à égalité peut basculer sans qu'il y ait d'erreur. L'écart absolu est affiché à titre indicatif.
 
-Usage   : python scripts/export_bounti_onnx.py <unet|attunet> [n]      (n : côté du cube factice, 64 par défaut)
+Usage   : python scripts/export_bounti_onnx.py <unet|attunet|bet> [n]      (n : côté du cube factice, 64 par défaut)
 Entrée  : data/bounti/models/<dossier du modèle>/best_metric_model.pth
 Sortie  : data/bounti/onnx/<réseau>_<n>.onnx
 """
@@ -41,7 +41,14 @@ def construire(reseau):
             kernel_size=3, up_kernel_size=3, dropout=0.5,
         )
         return modele, "monai-checkpoints-red-attunet-brain_bounti-19-lab"
-    raise SystemExit(f"réseau inconnu : {reseau} (unet ou attunet)")
+    if reseau == "bet":
+        # extraction du cerveau : Attention U-Net 3D à 2 sorties (fond, cerveau), canaux 32 à 512
+        modele = AttentionUnet(
+            spatial_dims=3, in_channels=1, out_channels=2, channels=(32, 64, 128, 256, 512), strides=(2, 2, 2, 2),
+            kernel_size=3, up_kernel_size=3, dropout=0.5,
+        )
+        return modele, "monai-checkpoints-attunet-brain-bet-1-lab"
+    raise SystemExit(f"réseau inconnu : {reseau} (unet, attunet ou bet)")
 
 
 reseau = sys.argv[1] if len(sys.argv) > 1 else "unet"

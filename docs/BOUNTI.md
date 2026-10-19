@@ -189,3 +189,16 @@ Tests : cinq tests unitaires sur données synthétiques ; **seize mutants du mod
 **Lecture de l'affine.** Les fichiers de MIRTK n'ont qu'un `qform` : `medoxide-core` gagne `affine_nifti` (règle de nibabel : `sform` si son code est positif, sinon `qform`, sinon diagonale des `pixdim` centrée), validée contre nibabel sur six `qform` (identité, rotation de 90° autour de z et autour de x, inversion d'axe avec `qfac = −1`, oblique, rotation générale) ; neuf mutants tués. C'est la règle demandée par la demande n° 1 de guioxide (`docs/issues/medoxide.md`) ; `volume_info`, qui ne lit que le `sform`, n'a pas été modifiée.
 
 **Constat hors périmètre, corrigé.** Les volumes que `medoxide` écrivait (par exemple `ours_s2s_defaut.nii.gz`) avaient un `sform` correct mais un **`qform` sans origine**, donc incohérent avec le `sform` : les outils qui lisent le `qform` (MIRTK l'a fait) plaçaient le volume avec son coin à l'origine. `medoxide-core::definir_affine` écrit désormais `sform` et `qform` cohérents (quaternion selon la spécification NIfTI-1, `pixdim` et `qfac` mis à jour) et `ReconstructionOutput::write_volume` l'utilise. Tests : aller-retour sur quinze affines (dont inversion d'axe, rotations d'axes variés, rotations de 150° et de 180° autour d'axes obliques qui exercent chaque branche du quaternion), le `qform` relu seul égal à la matrice écrite ; le test d'écriture du SVR relit le fichier et compare le `qform` seul à l'affine de la grille ; douze mutants de `definir_affine` et un mutant de l'écriture tués (cinq avaient d'abord survécu : toutes mes rotations de 180° étaient autour d'axes de coordonnées, où les termes croisés du quaternion valent zéro). **Les fichiers déjà écrits gardent leur ancien `qform`** : seuls les volumes produits à partir de maintenant sont cohérents.
+
+## Sous-étape 5b : réseau d'extraction du cerveau (résultat)
+
+Attention U-Net 3D de l'étage 1 de la chaîne officielle : 1 canal d'entrée, **2 sorties** (fond, cerveau), **canaux 32 à 512** (≠ réseaux de tissus), mêmes noyaux et même dropout, 23,6 M de paramètres ; entrée min-max dans [0, 1], une fenêtre de 128³, argmax. Même voie que les autres : export ONNX (`scripts/export_bounti_onnx.py bet`), `onnx2burn`, `crates/medoxide-bounti/src/bet.rs` (en-tête d'attribution, normalisation d'instance en cascade).
+
+| Mesure | Résultat | Critère C1 |
+|---|---|---|
+| Export ONNX à 64³ contre `onnxruntime` (écart relatif) | 4,7e-6, étiquettes à 100 % | ≤ 1e-5 |
+| Logits Burn contre PyTorch, volume réel à 64³ | **6,2e-7**, 100 % d'étiquettes identiques | ≤ 1e-5, ≥ 99,9 % |
+| Logits Burn contre PyTorch, volume réel à 128³ | **7,9e-7**, 100 % d'étiquettes identiques | ≤ 1e-5, ≥ 99,9 % |
+
+**C1 atteint** pour le réseau d'extraction (test `the_brain_extraction_logits_match_pytorch_on_a_real_volume`). **Remarque** : l'export à 128³ manquait le seuil contre `onnxruntime` (1,2e-4) alors que celui à 64³ le tient : la normalisation d'instance d'`onnxruntime` perd elle aussi en précision quand le volume grandit (même défaut que celui trouvé dans Burn). Le contrôle de fidélité d'un export se fait donc à 64³, et la validation à la taille réelle contre PyTorch, côté Rust. Aucun code écrit à la main n'est ajouté par cette sous-étape (le modèle est généré), donc pas de test de mutation.
+

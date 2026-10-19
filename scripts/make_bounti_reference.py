@@ -2,11 +2,11 @@
 
 Les poids (GPL v3) ne sont pas dans ce dépôt : ils viennent de `data/bounti/models/` (voir `export_bounti_onnx.py`). Les deux fichiers écrits sont des tableaux bruts `float32` petit-boutiste, en ordre C :
   - entrée  [1, 1, n, n, n], uniforme dans [0, 1] (graine fixe) ;
-  - logits  [1, 20, n, n, n].
+  - logits  [1, 20, n, n, n] (2 canaux pour le réseau `bet`).
 
 Avec un volume NIfTI en troisième argument, l'entrée est ce volume rééchantillonné (trilinéaire) dans un cube de n³ puis mis à l'échelle min-max dans [0, 1] : test NUMÉRIQUE à statistiques d'activation réalistes, qui n'imite PAS le prétraitement officiel de BOUNTI. Les fichiers portent alors le suffixe `_reel`.
 
-Usage   : python scripts/make_bounti_reference.py <unet|attunet> [n] [volume.nii.gz]      (n : 64 par défaut)
+Usage   : python scripts/make_bounti_reference.py <unet|attunet|bet> [n] [volume.nii.gz]      (n : 64 par défaut)
 Sortie  : data/bounti/reference/<réseau>_<n>[_reel]_input.f32 et <réseau>_<n>[_reel]_logits.f32
 """
 
@@ -19,7 +19,7 @@ from monai.networks.nets import AttentionUnet, UNet
 
 MODELES = "data/bounti/models"
 SORTIE = "data/bounti/reference"
-SORTIES = 20  # 19 étiquettes + fond
+SORTIES = 20  # 19 étiquettes + fond (2 sorties pour le réseau `bet` : fond, cerveau)
 
 reseau = sys.argv[1] if len(sys.argv) > 1 else "unet"
 n = int(sys.argv[2]) if len(sys.argv) > 2 else 64
@@ -37,8 +37,14 @@ elif reseau == "attunet":
         kernel_size=3, up_kernel_size=3, dropout=0.5,
     )
     dossier = "monai-checkpoints-red-attunet-brain_bounti-19-lab"
+elif reseau == "bet":
+    modele = AttentionUnet(
+        spatial_dims=3, in_channels=1, out_channels=2, channels=(32, 64, 128, 256, 512), strides=(2, 2, 2, 2),
+        kernel_size=3, up_kernel_size=3, dropout=0.5,
+    )
+    dossier = "monai-checkpoints-attunet-brain-bet-1-lab"
 else:
-    raise SystemExit(f"réseau inconnu : {reseau} (unet ou attunet)")
+    raise SystemExit(f"réseau inconnu : {reseau} (unet, attunet ou bet)")
 modele.load_state_dict(torch.load(f"{MODELES}/{dossier}/best_metric_model.pth", map_location="cpu", weights_only=True), strict=True)
 modele.eval()
 

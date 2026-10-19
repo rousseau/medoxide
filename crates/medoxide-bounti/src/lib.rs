@@ -4,6 +4,7 @@
 //! Cette étape ne contient que l'U-Net 3D à 20 sorties, validé contre PyTorch (critère C1) ; la fusion des deux réseaux, le retournement et le pré/post-traitement viendront ensuite.
 
 pub mod attunet;
+pub mod bet;
 pub mod fusion;
 pub mod geometrie;
 pub mod norme;
@@ -27,8 +28,7 @@ mod tests {
 
     /// **Critère C1** pour un réseau (cube de `n`³, `data/bounti/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
     /// et au moins 99,9 % des voxels ont la même étiquette (argmax sur les 20 canaux).
-    fn verifier_c1(nom: &str, n: usize, tag: &str, passe_avant: impl Fn(Tensor<5>) -> Tensor<5>, device: &Device) {
-        let canaux = 20usize;
+    fn verifier_c1(nom: &str, canaux: usize, n: usize, tag: &str, passe_avant: impl Fn(Tensor<5>) -> Tensor<5>, device: &Device) {
         let entree = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_input.f32")));
         let attendus = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_logits.f32")));
         assert_eq!(entree.len(), n * n * n);
@@ -68,7 +68,7 @@ mod tests {
     fn the_unet_logits_match_pytorch() {
         let device = appareil();
         let modele = crate::unet::Model::from_file(donnees().join("burn/unet/unet_64.bpk"), &device);
-        verifier_c1("unet", 64, "", |x| modele.forward(x), &device);
+        verifier_c1("unet", 20, 64, "", |x| modele.forward(x), &device);
     }
 
     #[test]
@@ -76,7 +76,7 @@ mod tests {
     fn the_attention_unet_logits_match_pytorch() {
         let device = appareil();
         let modele = crate::attunet::Model::from_file(donnees().join("burn/attunet/attunet_64.bpk"), &device);
-        verifier_c1("attunet", 64, "", |x| modele.forward(x), &device);
+        verifier_c1("attunet", 20, 64, "", |x| modele.forward(x), &device);
     }
 
     /// Même contrôle à 256³ (taille de BOUNTI) sur un volume réel rééchantillonné (`make_bounti_reference.py <réseau> 256 <volume.nii.gz>`) : les statistiques d'activation sont réalistes, l'écart se cumule sur 256³ voxels.
@@ -85,7 +85,7 @@ mod tests {
     fn the_unet_logits_match_pytorch_on_a_real_volume_at_256() {
         let device = appareil();
         let modele = crate::unet::Model::from_file(donnees().join("burn/unet/unet_64.bpk"), &device);
-        verifier_c1("unet", 256, "_reel", |x| modele.forward(x), &device);
+        verifier_c1("unet", 20, 256, "_reel", |x| modele.forward(x), &device);
     }
 
     #[test]
@@ -93,10 +93,10 @@ mod tests {
     fn the_attention_unet_logits_match_pytorch_on_a_real_volume_at_256() {
         let device = appareil();
         let modele = crate::attunet::Model::from_file(donnees().join("burn/attunet/attunet_64.bpk"), &device);
-        verifier_c1("attunet", 256, "_reel", |x| modele.forward(x), &device);
+        verifier_c1("attunet", 20, 256, "_reel", |x| modele.forward(x), &device);
     }
 
-    /// Diagnostic piloté par l'environnement : `BOUNTI_RESEAU` (`unet` ou `attunet`), `BOUNTI_N` (côté du cube), `BOUNTI_TAG` (`""` ou `_reel`). Affiche l'écart ; échoue si le critère C1 n'est pas tenu.
+    /// Diagnostic piloté par l'environnement : `BOUNTI_RESEAU` (`unet`, `attunet` ou `bet`), `BOUNTI_N` (côté du cube), `BOUNTI_TAG` (`""` ou `_reel`). Affiche l'écart ; échoue si le critère C1 n'est pas tenu.
     #[test]
     #[ignore = "diagnostic : demande des références locales et des variables d'environnement"]
     fn diagnostic_logits_against_pytorch() {
@@ -107,11 +107,15 @@ mod tests {
         match reseau.as_str() {
             "unet" => {
                 let m = crate::unet::Model::from_file(donnees().join("burn/unet/unet_64.bpk"), &device);
-                verifier_c1("unet", n, &tag, |x| m.forward(x), &device);
+                verifier_c1("unet", 20, n, &tag, |x| m.forward(x), &device);
+            }
+            "bet" => {
+                let m = crate::bet::Model::from_file(donnees().join("burn/bet/bet_64.bpk"), &device);
+                verifier_c1("bet", 2, n, &tag, |x| m.forward(x), &device);
             }
             _ => {
                 let m = crate::attunet::Model::from_file(donnees().join("burn/attunet/attunet_64.bpk"), &device);
-                verifier_c1("attunet", n, &tag, |x| m.forward(x), &device);
+                verifier_c1("attunet", 20, n, &tag, |x| m.forward(x), &device);
             }
         }
     }
@@ -232,5 +236,16 @@ mod tests {
         let accord = identiques as f64 / reference.len() as f64;
         println!("FUSION n={n} : accord des étiquettes {accord:.6} ({} voxels différents sur {}) ; écart relatif des logits fusionnés {:.2e}", reference.len() - identiques, reference.len(), ecart / amplitude);
         assert!(accord >= 0.999, "accord des étiquettes {accord}");
+    }
+
+    /// **Critère C1** pour le réseau d'extraction du cerveau (2 sorties) : sur un cube de 64³ puis de 128³ (la taille de la chaîne officielle) d'un volume réel rééchantillonné (`make_bounti_reference.py bet <n> <volume.nii.gz>`), écart relatif des logits au plus 1e-5 et au moins 99,9 % d'étiquettes identiques à PyTorch/MONAI.
+    #[test]
+    #[ignore = "demande les poids BOUNTI convertis et la référence PyTorch dans data/bounti (hors dépôt)"]
+    fn the_brain_extraction_logits_match_pytorch_on_a_real_volume() {
+        let device = appareil();
+        let modele = crate::bet::Model::from_file(donnees().join("burn/bet/bet_64.bpk"), &device);
+        for n in [64usize, 128] {
+            verifier_c1("bet", 2, n, "_reel", |x| modele.forward(x), &device);
+        }
     }
 }
