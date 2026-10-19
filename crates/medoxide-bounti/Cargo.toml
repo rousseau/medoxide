@@ -13,3 +13,5 @@ medoxide-core = { path = "../medoxide-core" }
 ndarray = { workspace = true }
 # Matrices 4×4 de la géométrie (affines voxel → mm).
 nalgebra = { workspace = true }
+# Écriture des étiquettes et du masque en NIfTI.
+nifti = { workspace = true }

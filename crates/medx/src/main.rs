@@ -45,6 +45,15 @@ enum DeviceArg {
     Cpu,
 }
 
+impl From<DeviceArg> for medoxide_bounti::segmentation::Calcul {
+    fn from(d: DeviceArg) -> Self {
+        match d {
+            DeviceArg::Wgpu => Self::Gpu,
+            DeviceArg::Cpu => Self::Cpu,
+        }
+    }
+}
+
 impl From<DeviceArg> for DeviceKind {
     fn from(d: DeviceArg) -> DeviceKind {
         match d {
@@ -161,8 +170,50 @@ enum SvrAction {
     },
 }
 
+/// Extraction du cerveau précédant la segmentation des tissus.
+#[derive(Clone, Copy, ValueEnum)]
+enum ExtractionArg {
+    /// Réseau 3D d'extraction de BOUNTI (comme la chaîne officielle). L'extraction par Fetal-BET viendra comme second choix.
+    Bounti,
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Segmentation du cerveau fœtal en 19 tissus (portage de BOUNTI) d'une reconstruction 3D T2
+    Bounti {
+        /// Reconstruction 3D (NIfTI)
+        #[arg(long)]
+        input: PathBuf,
+        /// Étiquettes de sortie (NIfTI) ; la table `.tsv` est écrite à côté. Hors BIDS
+        #[arg(long, conflicts_with = "bids", required_unless_present = "bids")]
+        output: Option<PathBuf>,
+        /// Masque du cerveau (NIfTI), en plus des étiquettes. Hors BIDS
+        #[arg(long, conflicts_with = "bids")]
+        brain_mask: Option<PathBuf>,
+        /// Racine d'un jeu de données BIDS : écrit dans `<sortie>/derivatives/medx-bounti/sub-X/ses-Y/anat/`
+        /// (`_desc-bounti_dseg.nii.gz`, `_dseg.tsv`, `_desc-bounti_mask.nii.gz`)
+        #[arg(long, requires = "participant")]
+        bids: Option<PathBuf>,
+        /// Identifiant du participant, sans préfixe `sub-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        participant: Option<String>,
+        /// Identifiant de la session, sans préfixe `ses-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        session: Option<String>,
+        /// Dossier racine de sortie à la place de la racine BIDS (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<PathBuf>,
+        /// Extraction du cerveau
+        #[arg(long, value_enum, default_value_t = ExtractionArg::Bounti)]
+        extraction: ExtractionArg,
+        /// Dossier des poids convertis. Priorité : cette option, puis la variable d'environnement
+        /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti). Licence GPL v3 : non distribués
+        #[arg(long)]
+        weights: Option<PathBuf>,
+        /// GPU (wgpu) ou CPU (beaucoup plus lent)
+        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
+        device: DeviceArg,
+    },
     /// Extraction du masque cérébral en IRM fœtale (portage de Fetal-BET)
     Fetalbet {
         /// Volume NIfTI d'entrée
@@ -341,10 +392,91 @@ fn format_boite(b: &medoxide_svr::BoundingBox) -> String {
     )
 }
 
+/// Segmente une reconstruction en 19 tissus et écrit les résultats : les chemins de sortie et les poids sont vérifiés avant tout calcul.
+fn bounti(
+    entree: &std::path::Path,
+    fichiers: Result<medoxide_bounti::sortie::Fichiers, medoxide_bounti::sortie::ErreurSortie>,
+    poids: Option<&std::path::Path>,
+    calcul: medoxide_bounti::segmentation::Calcul,
+) -> ExitCode {
+    use medoxide_bounti::{geometrie::Volume, poids::dossier_des_poids, segmentation, sortie};
+    let fichiers = match fichiers {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("medx bounti : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dossier = match dossier_des_poids(poids) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("medx bounti : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let volume = match Volume::lire(entree) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("medx bounti : {} : {e}", entree.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let appareil = calcul.appareil();
+    let reseaux = segmentation::Reseaux::charger(&dossier, &appareil);
+    let resultat = match segmentation::segmenter(&volume, &reseaux, &appareil) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("medx bounti : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = sortie::ecrire(&fichiers, &resultat, &volume.affine) {
+        eprintln!("medx bounti : {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "Étiquettes écrites dans {:?}, table dans {:?}",
+        fichiers.etiquettes, fichiers.table
+    );
+    if let Some(masque) = &fichiers.masque {
+        println!("Masque du cerveau écrit dans {masque:?}");
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Bounti {
+            input,
+            output,
+            brain_mask,
+            bids,
+            participant,
+            session,
+            output_dir,
+            extraction: ExtractionArg::Bounti,
+            weights,
+            device,
+        } => {
+            use medoxide_bounti::sortie;
+            let fichiers = match (&bids, &output) {
+                (Some(racine), _) => sortie::fichiers_bids(
+                    output_dir.as_deref().unwrap_or(racine),
+                    participant.as_deref().unwrap_or_default(),
+                    session.as_deref(),
+                ),
+                (None, Some(sortie_etiquettes)) => {
+                    Ok(sortie::fichiers_libres(sortie_etiquettes, brain_mask.as_deref()))
+                }
+                // clap l'interdit (`required_unless_present`) ; cas traité sans paniquer
+                (None, None) => Err(sortie::ErreurSortie::Identifiant(
+                    "--output ou --bids requis".to_string(),
+                )),
+            };
+            bounti(&input, fichiers, weights.as_deref(), device.into())
+        }
         Command::Svr {
             action:
                 SvrAction::Info {
@@ -442,7 +574,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     use super::Cli;
 
@@ -450,5 +582,94 @@ mod tests {
     #[test]
     fn the_command_line_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    /// Arguments de `medx bounti` : hors BIDS `--output` est requis ; en BIDS `--participant` est requis ; `--output` et `--brain-mask` sont exclusifs de `--bids` ; `--participant`, `--session` et `--output-dir` demandent `--bids`.
+    #[test]
+    fn the_bounti_arguments_are_exclusive_or_required_as_documented() {
+        let essai = |args: &[&str]| Cli::try_parse_from(std::iter::once("medx").chain(args.iter().copied())).is_ok();
+        assert!(essai(&["bounti", "--input", "a", "--output", "b"]));
+        assert!(essai(&[
+            "bounti",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--brain-mask",
+            "m",
+            "--weights",
+            "w",
+            "--device",
+            "cpu"
+        ]));
+        assert!(essai(&["bounti", "--input", "a", "--bids", "r", "--participant", "01"]));
+        assert!(essai(&[
+            "bounti",
+            "--input",
+            "a",
+            "--bids",
+            "r",
+            "--participant",
+            "01",
+            "--session",
+            "1",
+            "--output-dir",
+            "o"
+        ]));
+        assert!(!essai(&["bounti", "--input", "a"]), "ni --output ni --bids");
+        assert!(!essai(&["bounti", "--output", "b"]), "sans --input");
+        assert!(
+            !essai(&["bounti", "--input", "a", "--bids", "r"]),
+            "--bids sans --participant"
+        );
+        assert!(
+            !essai(&[
+                "bounti",
+                "--input",
+                "a",
+                "--bids",
+                "r",
+                "--participant",
+                "01",
+                "--output",
+                "b"
+            ]),
+            "--output avec --bids"
+        );
+        assert!(
+            !essai(&[
+                "bounti",
+                "--input",
+                "a",
+                "--bids",
+                "r",
+                "--participant",
+                "01",
+                "--brain-mask",
+                "m"
+            ]),
+            "--brain-mask avec --bids"
+        );
+        assert!(
+            !essai(&["bounti", "--input", "a", "--output", "b", "--participant", "01"]),
+            "--participant sans --bids"
+        );
+        assert!(
+            !essai(&["bounti", "--input", "a", "--output", "b", "--session", "1"]),
+            "--session sans --bids"
+        );
+        assert!(
+            !essai(&["bounti", "--input", "a", "--output", "b", "--output-dir", "o"]),
+            "--output-dir sans --bids"
+        );
+        assert!(!essai(&[
+            "bounti",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--extraction",
+            "autre"
+        ]));
     }
 }

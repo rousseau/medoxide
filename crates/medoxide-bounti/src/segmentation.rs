@@ -19,6 +19,25 @@ const COTE_EXTRACTION: usize = 128;
 /// Côté du cube de la segmentation des tissus.
 const COTE_TISSUS: usize = 256;
 
+/// Machine de calcul des réseaux.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Calcul {
+    /// GPU (wgpu : Metal sur Mac, Vulkan sous Linux).
+    Gpu,
+    /// CPU de la machine (backend `flex` de Burn), beaucoup plus lent.
+    Cpu,
+}
+
+impl Calcul {
+    /// Appareil Burn correspondant.
+    pub fn appareil(self) -> Device {
+        match self {
+            Calcul::Gpu => Device::default(),
+            Calcul::Cpu => Device::flex(),
+        }
+    }
+}
+
 /// Les trois réseaux de la chaîne, chargés une fois pour plusieurs volumes.
 pub struct Reseaux {
     extraction: bet::Model,

@@ -6,6 +6,7 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 | Sous-commande | Méthode |
 |---|---|
 | `medx fetalbet` | Masque cérébral en IRM fœtale (portage de [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction)) |
+| `medx bounti` | Segmentation du cerveau fœtal en 19 tissus à partir d'une reconstruction 3D T2 (portage de [BOUNTI](https://github.com/SVRTK/auto-proc-svrtk), sans Docker ; les poids, sous licence GPL v3, ne sont pas distribués : voir ci-dessous) |
 | `medx svr recon` | Reconstruction coupe-vers-volume : volume 3D à partir de stacks 2D d'IRM fœtale, avec estimation du mouvement de chaque coupe (coupe-coupe ou coupe-volume) ; en développement |
 | `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère |
 
@@ -35,6 +36,18 @@ masque cérébral chacun, par exemple obtenus par `medx fetalbet`) :
 Calculs sur le CPU par défaut ; voir [la page SVR](https://rousseau.github.io/medoxide/svr.html) pour les
 options, les durées et les limites.
 
+Segmentation des tissus d'une reconstruction (19 tissus et le fond, extraction du cerveau comprise) :
+
+```bash
+bash scripts/bounti_poids.sh      # une fois : produit les poids (voir « Référence et licence »)
+./target/release/medx bounti --input volume.nii.gz --output segmentation.nii.gz
+# ou, dans l'arborescence BIDS dérivée lue par guioxide :
+./target/release/medx bounti --input volume.nii.gz --bids /chemin/jeu --participant 01 --session 1
+```
+
+La sortie est une image d'étiquettes sur la grille de la reconstruction, avec sa table (`.tsv` : `index name abbreviation color`) et,
+en BIDS, le masque du cerveau (`_desc-bounti_mask`). Voir `docs/BOUNTI.md` pour la validation contre la chaîne officielle.
+
 ## Documentation
 
 Documentation (installation, utilisation, algorithmes et références, validation) :
@@ -52,6 +65,7 @@ mdbook serve book --open
 crates/
   medoxide-core/       briques communes (lecture de volumes NIfTI), sans dépendance vers un module
   medoxide-fetalbet/   bibliothèque : portage de Fetal-BET
+  medoxide-bounti/     bibliothèque : portage de BOUNTI (segmentation en 19 tissus)
   medoxide-svr/        bibliothèque : reconstruction coupe-vers-volume (en développement)
   medx/                binaire CLI : une sous-commande par module
 book/                  documentation (mdBook)
@@ -85,3 +99,23 @@ Modifications : export ONNX, puis conversion en code Rust pour Burn et poids
 `burnpack`. Comme les auteurs, nous précisons que cet outil est destiné à la
 recherche et non à un usage médical ou diagnostique, et qu'il est fourni sans
 garantie.
+
+`medx bounti` est un portage de **BOUNTI** (Uus et al., King's College London), avec
+l'extraction du cerveau 3D de la chaîne officielle. Le dépôt contient le code des réseaux (généré
+à partir de l'architecture MONAI) et la chaîne de traitement, **pas les poids** : ce sont ceux des
+auteurs, que nous considérons sous la licence GPL v3 de leur logiciel (hypothèse, à confirmer auprès
+d'eux). Ils sont donc produits localement par `scripts/bounti_poids.sh` à partir de l'image Docker des
+auteurs, jamais versionnés ni redistribués avec medoxide. Si vous l'utilisez, merci de citer :
+
+```bibtex
+@article{uus2023bounti,
+  title={BOUNTI: Brain vOlumetry and aUtomated parcellatioN for 3D feTal MRI},
+  author={Uus, Alena U. and Kyriakopoulou, Vanessa and Makropoulos, Antonios and others},
+  journal={bioRxiv},
+  year={2023},
+  doi={10.1101/2023.04.18.537347}
+}
+```
+
+Même précision que pour Fetal-BET : outil destiné à la recherche, non à un usage médical ou diagnostique,
+fourni sans garantie.

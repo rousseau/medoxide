@@ -3878,6 +3878,7 @@ dependencies = [
  "medoxide-core",
  "nalgebra",
  "ndarray 0.17.2",
+ "nifti",
 ]
 
 [[package]]
@@ -3918,6 +3919,7 @@ name = "medx"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "medoxide-bounti",
  "medoxide-fetalbet",
  "medoxide-svr",
 ]
