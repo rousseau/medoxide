@@ -14,6 +14,8 @@ use burn::nn::Initializer;
 use burn::tensor::{Device, Tensor};
 
 /// Réglages d'une [`InstanceNorm`] (mêmes champs que `burn::nn::InstanceNormConfig`).
+// l'avertissement vient du code que la macro `Config` de Burn génère pour cette structure
+#[allow(clippy::redundant_field_names)]
 #[derive(Debug, Config)]
 pub struct InstanceNormConfig {
     /// Nombre de canaux attendus en entrée.

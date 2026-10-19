@@ -1493,6 +1493,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (suite, deuxième cause)** : après la cascade, un écart de 7 fois celui de PyTorch subsistait contre la référence f64, identique sur GPU et sur CPU : deux noyaux de calcul différents ne donnent pas la même erreur par hasard, donc la cause était dans le code commun. C'était la dépendance au **rapport moyenne / écart type** : sommer des valeurs proches de la moyenne perd de la précision relative à l'écart type (2,4e-4 à un rapport de 1000). La moyenne corrigée en deux passes (recentrer sur une première estimation, puis moyenne résiduelle) la supprime. Enseignement : **une même erreur sur deux backends désigne le code partagé** ; mon test de précision initial n'avait qu'un rapport de 3 et ne pouvait pas le voir.
 - **Où** : `crates/medoxide-bounti/src/norme.rs` et ses tests, `scripts/analyse_precision_bounti.py`, `scripts/garde_memoire.py`, `docs/BOUNTI.md` (étape 3).
 
+## 2026-10-19 — Augmentation à l'inférence par retournement, et tester une fusion avec des réseaux factices non symétriques
+
+- **Quoi (concept)** : segmenter l'image et son image miroir, retourner la sortie obtenue sur le miroir, **échanger les étiquettes gauche et droite** (une structure gauche devient droite dans le miroir), puis moyenner les logits des quatre sorties (deux réseaux, normale et miroir) avant l'argmax. Le retournement et l'échange des canaux commutent ; l'ordre des deux n'a donc pas d'importance.
+- **Quoi (méthode)** : (1) pour tester une fusion sans poids, on la compare à une formule écrite à la main avec des réseaux factices **non symétriques** (un terme dépendant de la position sur l'axe retourné) : un réseau symétrique ne verrait ni le sens du retournement ni l'ordre ; (2) le test à la main distingue un diviseur faux, une image non retournée ou une absence d'échange ; (3) avant de coder, vérifier sur quel axe l'outil de référence retourne (ici le premier axe spatial, vérifié sur un petit tenseur) ; (4) un mutant « équivalent » (ordre de deux opérations qui commutent) se reconnaît à l'argument mathématique, pas en durcissant le test ; (5) ne pas lancer une référence de 9 Go quand le swap est presque plein : différer et le dire.
+- **Où** : `crates/medoxide-bounti/src/fusion.rs`, `scripts/make_bounti_fusion_reference.py`, `docs/BOUNTI.md` (étape 4).
+
 ---
 
 *(à compléter à la prochaine étape)*
