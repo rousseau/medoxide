@@ -12,13 +12,13 @@
 //! (Apache-2.0) avec les réglages du script d'inférence officiel : 1 canal d'entrée, 20 sorties, canaux 32 à 512, 1 unité résiduelle, PReLU, normalisation d'instance.
 //!
 //! **Modifications** : les poids PyTorch d'origine ont été exportés en ONNX (opset 17) puis convertis en code Rust pour Burn et en poids au format `burnpack`.
-//! Ce fichier est le résultat de cette conversion ; les calculs sont équivalents à l'original (écart relatif des logits sous 1e-5, voir les tests).
+//! Ce fichier est le résultat de cette conversion, avec un seul changement à la main : l'import de `InstanceNorm`, remplacé par `crate::norme::InstanceNorm` (réductions en cascade, précis à 256³ ; voir `norme.rs`). Les calculs sont équivalents à l'original (voir les tests).
 //!
 //! Les auteurs destinent l'outil à la recherche, pas à un usage médical ou diagnostique ; il est fourni sans garantie.
 //!
 //! # Régénérer ce fichier
 //!
-//! `onnx2burn data/bounti/onnx/unet_64.onnx <dossier>`, puis recopier `unet_64.rs` ici **en conservant cet en-tête** (il n'est pas généré).
+//! `onnx2burn data/bounti/onnx/unet_64.onnx <dossier>`, puis recopier `unet_64.rs` ici **en conservant cet en-tête** (il n'est pas généré) et en remplaçant les deux imports `burn::nn::InstanceNorm` et `burn::nn::InstanceNormConfig` par `crate::norme::InstanceNorm` et `crate::norme::InstanceNormConfig`.
 #![allow(clippy::all)]
 // `from_bytes` et `Default` (chemin de poids du générateur) sont générés mais pas utilisés ici.
 #![allow(dead_code)]
@@ -26,8 +26,8 @@
 // Generated from ONNX "data/bounti/onnx/unet_64.onnx" by burn-onnx
 extern crate alloc;
 use burn::prelude::*;
-use burn::nn::InstanceNorm;
-use burn::nn::InstanceNormConfig;
+use crate::norme::InstanceNorm;
+use crate::norme::InstanceNormConfig;
 use burn::nn::PRelu;
 use burn::nn::PReluConfig;
 use burn::nn::PaddingConfig3d;

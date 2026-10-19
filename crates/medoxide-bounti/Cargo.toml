@@ -5,5 +5,6 @@ edition.workspace = true
 
 [dependencies]
 # Tenseurs et couches du réseau généré ; `burn-store` lit les poids au format `burnpack`.
-burn = { workspace = true }
+# `flex` : backend CPU de Burn (Rust pur), pour séparer l'erreur de conversion de l'arithmétique du GPU dans les tests.
+burn = { workspace = true, features = ["flex"] }
 burn-store = { workspace = true }

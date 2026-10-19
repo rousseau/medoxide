@@ -67,6 +67,36 @@ Crate `medoxide-bounti` (modèle généré par `onnx2burn`, en-tête d'attributi
 
 **C1 atteint pour l'U-Net**, avec une **marge mince** sur l'écart relatif (9,5e-6 contre 1e-5) : les calculs sont en f32 sur GPU contre CPU pour la référence, et l'écart croît avec la profondeur du réseau et la taille du volume. À 64³ la marge suffit ; à 256³ le comportement est à vérifier (étape suivante) avant de conclure que le critère tient sur un volume réel.
 
+## Étape 3 : Attention U-Net, taille réelle (256³) et précision de la normalisation d'instance
+
+**Attention U-Net** (même voie, `attunet.rs`) : à 64³ sur du bruit uniforme, C1 est d'abord **manqué** (écart relatif 1,17e-5 pour un seuil de 1e-5, avec l'implémentation de `burn::nn::InstanceNorm`). Je n'ai pas relâché le critère avant d'avoir compris l'écart.
+
+**Contrôle à 256³ sur un volume réel** (une de nos reconstructions rééchantillonnée dans un cube de 64³, 128³ ou 256³, puis mise à l'échelle min-max : test numérique, pas le prétraitement officiel). Écart relatif des logits Burn (GPU) à PyTorch f32, avec la normalisation d'instance de Burn :
+
+| Réseau | 64³ | 128³ | 256³ |
+|---|---|---|---|
+| U-Net | 5,8e-4 | 3,2e-3 | **3,5e-2** (accord des étiquettes 99,28 %) |
+| Attention U-Net | 7,4e-6 | 1,9e-4 | **5,6e-3** (99,86 %) |
+
+L'erreur **grandit avec la taille du volume** (de 5 à 30 fois par doublement du côté) et est encore pire sur le CPU de Burn (U-Net 2,1e-1 à 256³, 96,3 % d'accord) : ce n'est donc ni du bruit d'arrondi ni une propriété du GPU. Une convolution somme toujours le même nombre de termes ; seule une opération qui somme sur tout le volume peut croître ainsi. Le suspect (la normalisation d'instance, bien plus présente dans l'U-Net que dans l'Attention U-Net) est testé isolément contre un calcul en f64 sur `[1, 4, n, n, n]` de moyenne 3 et d'écart type 1 :
+
+| Normalisation d'instance | 64³ | 128³ | 256³ |
+|---|---|---|---|
+| `burn::nn::InstanceNorm` (GPU) | 2,8e-5 | 4,7e-4 | 1,0e-2 |
+| `burn::nn::InstanceNorm` (CPU) | 1,7e-4 | 3,3e-3 | 1,6e-1 |
+| **`InstanceNorm` en cascade** (GPU) | 1,0e-6 | 1,4e-6 | 2,0e-6 |
+
+Cause : la moyenne et la variance sont une réduction sur 16,7 millions de termes en f32. Remède (`norme.rs`) : calculer la moyenne et la variance **une dimension spatiale après l'autre** (trois réductions de 256 termes), avec la même structure et les mêmes champs que `burn::nn::InstanceNorm` (le code généré s'y branche en changeant deux imports). Tests : précision à 64³, 128³ et 256³ (≤ 1e-5), équivalence avec Burn sur une petite entrée, canal constant, six mutants tués.
+
+**C1 après correction** (écart relatif à PyTorch f32, GPU) :
+
+| Réseau | bruit 64³ | volume réel 64³ | 128³ | 256³ |
+|---|---|---|---|---|
+| U-Net | 2,5e-6 ✓ | 2,0e-6 ✓ | 5,1e-6 ✓ | **2,6e-5 ✗** (accord 99,9998 %) |
+| Attention U-Net | 6,4e-6 ✓ | 2,0e-6 ✓ | 2,4e-6 ✓ | **1,9e-6 ✓** (accord 100 %) |
+
+**C1 est atteint pour l'Attention U-Net à toutes les tailles testées et pour l'U-Net jusqu'à 128³ ; il reste manqué pour l'U-Net à 256³ (2,6e-5 contre 1e-5)**, avec un accord des étiquettes de 99,9998 %. Le critère n'est pas relâché. Question ouverte : l'écart restant vient-il de Burn ou de la référence PyTorch f32 elle-même ? Le calcul de référence en float64 à 256³ n'a pas pu être fait : il a **fait planter le Mac par manque de mémoire** (la référence en f32 à 256³ occupait déjà 6,6 Go pour l'U-Net et 13 Go pour l'Attention U-Net, et la double précision demande environ le double ; je l'avais lancé sans borner la mémoire). À refaire à une taille intermédiaire (192³) en surveillant la mémoire, ou par morceaux.
+
 ## Critères (écrits avant le code)
 
 BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume réel de 256³) :

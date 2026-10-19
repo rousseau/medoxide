@@ -1486,6 +1486,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : (1) un critère de fidélité sur des logits se pose en écart **relatif** (max |Δ| / max |logit|), pas absolu : deux réseaux au même bruit d'arrondi donnent des écarts absolus proportionnels à l'amplitude de leurs logits ; j'avais écrit le critère en absolu, il a échoué pour un réseau aux logits plus grands, et je l'ai amendé en le signalant ; (2) avec 20 classes, quelques voxels aux logits quasi égaux peuvent changer d'étiquette sans erreur : l'accord se mesure à 99,9 %, pas à 100 % ; (3) un test qui lit des fichiers locaux (poids GPL hors dépôt) est marqué `#[ignore]` et s'exécute explicitement ; (4) le chargement strict des poids (`strict=True`) détecte une clé manquante, que le script officiel (`strict=False`) aurait laissée passer.
 - **Où** : `crates/medoxide-bounti/` (modèle généré et test), `scripts/export_bounti_onnx.py`, `scripts/make_bounti_reference.py`, `docs/BOUNTI.md`.
 
+## 2026-10-19 — Une réduction sur tout un volume perd sa précision avec la taille ; borner la mémoire avant un calcul en double précision
+
+- **Quoi (concept)** : la moyenne et la variance d'une normalisation d'instance somment tous les voxels d'un canal. En f32, une réduction en un seul passage sur 16,7 millions de termes accumule l'erreur d'arrondi : mesurée contre f64, l'erreur de la sortie normalisée passe de 3e-5 à 64³ à 1e-2 à 256³ (GPU) et à 1,6e-1 (CPU). Sommer une dimension après l'autre (trois réductions de 256 termes) ramène l'erreur à 2e-6 à toutes les tailles. Une convolution, qui somme toujours le même nombre de termes, n'a pas ce défaut.
+- **Quoi (méthode)** : (1) un test numérique à une seule petite taille (64³, bruit uniforme) ne voit pas un défaut qui dépend de la taille : mesurer à plusieurs tailles et sur une entrée réaliste ; (2) pour localiser une erreur, la tester **isolément** (une couche contre un calcul en f64) plutôt que le réseau entier ; (3) comparer à PyTorch f32 mélange l'erreur de PyTorch et celle de Burn : une référence en f64 sépare les deux ; (4) **borner la mémoire avant de lancer un calcul en double précision à grande taille** : celui de la référence f64 à 256³ a fait planter la machine (la version f32 utilisait déjà 6,6 à 13 Go sur 24).
+- **Où** : `crates/medoxide-bounti/src/norme.rs` et ses tests, `scripts/analyse_precision_bounti.py`, `docs/BOUNTI.md` (étape 3).
+
 ---
 
 *(à compléter à la prochaine étape)*
