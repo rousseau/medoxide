@@ -1,18 +1,18 @@
-//! Chaîne complète de BOUNTI, avec deux choix d'extraction du cerveau ([`Extraction`] : le réseau 3D de BOUNTI, ou Fetal-BET) : de la reconstruction 3D aux étiquettes de tissus sur la grille de cette reconstruction.
+//! Chaîne complète de BOUNTI en mode `bounti` (extraction du cerveau par le réseau 3D de BOUNTI) : de la reconstruction 3D aux étiquettes de tissus sur la grille de cette reconstruction.
 //!
 //! Les étapes sont celles de la chaîne officielle (voir `docs/BOUNTI.md`), chacune validée séparément contre MIRTK et PyTorch :
 //! 1. [`Volume::preparer`] : recadrage, grille de référence à 0,6 mm ;
-//! 2. extraction du cerveau (mode `bounti` : cube de 128³ et réseau 3D ; mode `fetalbet` : Fetal-BET sur le volume d'entrée), plus grande composante, retour dans la grille préparée, dilatation de 4 et érosion de 2 ;
+//! 2. cube de 128³, réseau d'extraction, plus grande composante, retour dans la grille préparée, dilatation de 4 et érosion de 2 ;
 //! 3. image masquée et recadrée, cube de 256³, fusion des quatre sorties (U-Net et Attention U-Net, image normale et retournée) ;
 //! 4. retour des étiquettes dans la grille de l'image d'entrée ([`etiquettes_vers_la_grille`]).
 use crate::etiquettes::etiquettes_vers_la_grille;
 use crate::fusion::{etiquettes, logits_fusionnes};
 use crate::geometrie::{ErreurGeometrie, Volume};
-use crate::masque::{composante_du_cerveau, nettoyer, plus_grande_composante, vers_la_grille};
+use crate::masque::{composante_du_cerveau, nettoyer};
 use crate::{attunet, bet, unet};
 use burn::tensor::{Device, Tensor, TensorData};
 use ndarray::Array3;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Côté du cube de l'extraction du cerveau.
 const COTE_EXTRACTION: usize = 128;
@@ -38,45 +38,24 @@ impl Calcul {
     }
 }
 
-/// Les deux réseaux de segmentation des tissus, chargés une fois pour plusieurs volumes.
+/// Les trois réseaux de la chaîne, chargés une fois pour plusieurs volumes.
 pub struct Reseaux {
+    extraction: bet::Model,
     unet: unet::Model,
     attunet: attunet::Model,
 }
 
 impl Reseaux {
-    /// Charge les poids convertis depuis `dossier`, qui contient `unet/unet_64.bpk` et `attunet/attunet_64.bpk` (voir `docs/BOUNTI.md`).
+    /// Charge les poids convertis depuis `dossier`, qui contient `bet/bet_64.bpk`, `unet/unet_64.bpk` et `attunet/attunet_64.bpk` (voir `docs/BOUNTI.md`).
     ///
     /// # Panique
     /// Si un fichier de poids est absent ou illisible.
     pub fn charger(dossier: &Path, device: &Device) -> Reseaux {
         Reseaux {
+            extraction: bet::Model::from_file(dossier.join("bet/bet_64.bpk"), device),
             unet: unet::Model::from_file(dossier.join("unet/unet_64.bpk"), device),
             attunet: attunet::Model::from_file(dossier.join("attunet/attunet_64.bpk"), device),
         }
-    }
-}
-
-/// Extraction du cerveau, première moitié de la chaîne : elle donne le masque qui délimite le cerveau avant la segmentation des tissus.
-pub enum Extraction {
-    /// Réseau 3D d'extraction de BOUNTI (chaîne officielle), appliqué à un cube de 128³ de l'image préparée (dans un `Box` : le réseau est grand, l'autre variante ne porte qu'un chemin).
-    Bounti(Box<bet::Model>),
-    /// Fetal-BET (`medoxide-fetalbet`), réseau 2D appliqué au volume d'entrée sur sa propre grille ; contient le fichier de poids de Fetal-BET.
-    Fetalbet(PathBuf),
-}
-
-impl Extraction {
-    /// Extraction par le réseau de BOUNTI : charge `bet/bet_64.bpk` depuis `dossier`.
-    ///
-    /// # Panique
-    /// Si le fichier de poids est absent ou illisible.
-    pub fn bounti(dossier: &Path, device: &Device) -> Extraction {
-        Extraction::Bounti(Box::new(bet::Model::from_file(dossier.join("bet/bet_64.bpk"), device)))
-    }
-
-    /// Extraction par Fetal-BET avec le fichier de poids `poids` (format `.bpk` de `medoxide-fetalbet`).
-    pub fn fetalbet(poids: PathBuf) -> Extraction {
-        Extraction::Fetalbet(poids)
     }
 }
 
@@ -95,51 +74,20 @@ fn vers_tenseur(cube: &Volume, device: &Device) -> Tensor<5> {
     Tensor::<5>::from_data(TensorData::new(valeurs, [1, 1, a, b, c]), device)
 }
 
-/// Plus grande composante du cerveau trouvée par l'extraction, dans la grille de l'image préparée (`.0`) et dans celle de l'image d'entrée (`.1`).
-fn composante_du_cerveau_extrait(
-    entree: &Volume,
-    preparee: &Volume,
-    extraction: &Extraction,
-    device: &Device,
-) -> (Array3<bool>, Array3<bool>) {
-    match extraction {
-        Extraction::Bounti(reseau) => {
-            let cube = preparee.cube(COTE_EXTRACTION);
-            let n = COTE_EXTRACTION;
-            let voxels: Vec<f32> = etiquettes(reseau.forward(vers_tenseur(&cube, device)))
-                .into_iter()
-                .map(f32::from)
-                .collect();
-            let voxels = Array3::from_shape_vec((n, n, n), voxels).expect("cube complet");
-            let composante = composante_du_cerveau(&voxels, &cube.affine, preparee);
-            let sur_l_entree =
-                etiquettes_vers_la_grille(&composante.mapv(u8::from), &preparee.affine, entree).mapv(|v| v == 1);
-            (composante, sur_l_entree)
-        }
-        Extraction::Fetalbet(poids) => {
-            let pas = |axe: usize| entree.affine.fixed_view::<3, 1>(0, axe).norm() as f32;
-            let brut = medoxide_fetalbet::mask_from_volume(&entree.donnees, [pas(0), pas(1)], poids);
-            let sur_l_entree = plus_grande_composante(&brut.mapv(|v| v == 1));
-            let composante = vers_la_grille(&sur_l_entree, &entree.affine, preparee);
-            (composante, sur_l_entree)
-        }
-    }
-}
-
-/// Segmente `entree` (reconstruction 3D T2 d'un cerveau fœtal) en 19 tissus, avec l'extraction du cerveau choisie.
+/// Segmente `entree` (reconstruction 3D T2 d'un cerveau fœtal) en 19 tissus, extraction du cerveau comprise.
 ///
 /// # Erreurs
-/// [`ErreurGeometrie::Vide`] si aucun voxel de `entree` ne dépasse le seuil de recadrage, ou si l'extraction ne trouve aucun cerveau.
-pub fn segmenter(
-    entree: &Volume,
-    reseaux: &Reseaux,
-    extraction: &Extraction,
-    device: &Device,
-) -> Result<Segmentation, ErreurGeometrie> {
+/// [`ErreurGeometrie::Vide`] si aucun voxel de `entree` ne dépasse le seuil de recadrage.
+pub fn segmenter(entree: &Volume, reseaux: &Reseaux, device: &Device) -> Result<Segmentation, ErreurGeometrie> {
     let preparee = entree.preparer()?;
 
-    // extraction du cerveau, puis nettoyage du masque
-    let (composante, cerveau) = composante_du_cerveau_extrait(entree, &preparee, extraction, device);
+    // extraction du cerveau
+    let cube_extraction = preparee.cube(COTE_EXTRACTION);
+    let sortie = reseaux.extraction.forward(vers_tenseur(&cube_extraction, device));
+    let n = COTE_EXTRACTION;
+    let voxels_cerveau: Vec<f32> = etiquettes(sortie).into_iter().map(f32::from).collect();
+    let voxels_cerveau = Array3::from_shape_vec((n, n, n), voxels_cerveau).expect("cube complet");
+    let composante = composante_du_cerveau(&voxels_cerveau, &cube_extraction.affine, &preparee);
     let masque = nettoyer(&composante);
 
     // segmentation des tissus sur l'image masquée
@@ -154,6 +102,8 @@ pub fn segmenter(
 
     // retour dans la grille de l'image d'entrée
     let etiquettes_finales = etiquettes_vers_la_grille(&sur_le_cube, &cube_tissus.affine, entree);
+    let composante_u8 = composante.mapv(u8::from);
+    let cerveau = etiquettes_vers_la_grille(&composante_u8, &preparee.affine, entree).mapv(|v| v == 1);
     Ok(Segmentation {
         etiquettes: etiquettes_finales,
         cerveau,
@@ -200,14 +150,13 @@ mod tests {
             _ => Device::default(),
         };
         let reseaux = Reseaux::charger(&racine.join("burn"), &device);
-        let extraction = Extraction::bounti(&racine.join("burn"), &device);
         for id in ["calme1", "calme2", "calme3"] {
             let entree = Volume::lire(&racine.join("mirtk").join(id).join("entree.nii.gz")).unwrap();
             let dossier = racine.join("mirtk").join(id);
             let officiel_tissus = Volume::lire(&dossier.join("etiquettes_officiel.nii.gz")).unwrap();
             let officiel_cerveau = Volume::lire(&dossier.join("cerveau_officiel.nii.gz")).unwrap();
             let debut = std::time::Instant::now();
-            let resultat = segmenter(&entree, &reseaux, &extraction, &device).unwrap();
+            let resultat = segmenter(&entree, &reseaux, &device).unwrap();
             let duree = debut.elapsed().as_secs_f64();
             let tissus_officiels = officiel_tissus.donnees.mapv(|v| v as u8);
             assert_eq!(resultat.etiquettes.dim(), tissus_officiels.dim(), "{id} : dimensions");
@@ -261,10 +210,7 @@ mod tests {
     fn the_brain_extraction_labels_match_the_official_ones() {
         let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti");
         let device = Device::default();
-        let extraction = Extraction::bounti(&racine.join("burn"), &device);
-        let Extraction::Bounti(reseau) = &extraction else {
-            unreachable!()
-        };
+        let reseaux = Reseaux::charger(&racine.join("burn"), &device);
         for id in ["calme1", "calme2", "calme3"] {
             let dossier = racine.join("mirtk").join(id);
             let cube = Volume::lire(&dossier.join("cube128.nii.gz")).unwrap();
@@ -277,7 +223,7 @@ mod tests {
                 donnees: cube.donnees.mapv(|v| (v - min) / (max - min)),
                 affine: cube.affine,
             };
-            let logits = reseau.forward(vers_tenseur(&normalise, &device));
+            let logits = reseaux.extraction.forward(vers_tenseur(&normalise, &device));
             let valeurs = logits.clone().into_data().convert::<f32>().to_vec::<f32>().unwrap();
             let voxels = 128 * 128 * 128;
             let mut differents = 0usize;
@@ -289,96 +235,6 @@ mod tests {
                 }
             }
             println!("BET {id} : {differents} voxels d'étiquette différente sur {voxels} (marge de logits maximale des voxels différents {marge_max:.2e})");
-        }
-    }
-
-    /// **Critère du mode `fetalbet`** (`docs/BOUNTI.md`, sous-étape 5d-4), sur trois volumes, contre la même référence officielle que le mode `bounti` : Dice moyen sur les 19 étiquettes d'au moins 0,95 pour chaque volume ; Dice par étiquette et Dice du masque du cerveau rapportés sans seuil.
-    /// Demande les poids de Fetal-BET (`models/attunet.bpk` à la racine du dépôt). À lancer sous le garde-fou mémoire : `python scripts/garde_memoire.py 18 cargo test --release -p medoxide-bounti the_fetalbet_mode -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "demande les poids, les volumes et les références officielles dans data/bounti, et les poids de Fetal-BET"]
-    fn the_fetalbet_mode_meets_the_dice_criterion_against_the_official_chain() {
-        let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti");
-        let poids_fetalbet = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/attunet.bpk");
-        let device = Device::default();
-        let reseaux = Reseaux::charger(&racine.join("burn"), &device);
-        let extraction = Extraction::fetalbet(poids_fetalbet);
-        let mut moyennes = Vec::new();
-        for id in ["calme1", "calme2", "calme3"] {
-            let dossier = racine.join("mirtk").join(id);
-            let entree = Volume::lire(&dossier.join("entree.nii.gz")).unwrap();
-            let officiel = Volume::lire(&dossier.join("etiquettes_officiel.nii.gz"))
-                .unwrap()
-                .donnees
-                .mapv(|v| v as u8);
-            let cerveau_officiel = Volume::lire(&dossier.join("cerveau_officiel.nii.gz"))
-                .unwrap()
-                .donnees
-                .mapv(|v| u8::from(v > 0.5));
-            let resultat = segmenter(&entree, &reseaux, &extraction, &device).unwrap();
-            let (mut somme, mut compte, mut pire) = (0.0, 0usize, (f64::INFINITY, 0u8));
-            let mut lignes = Vec::new();
-            for e in 1..=19u8 {
-                if let Some(d) = dice(&resultat.etiquettes, &officiel, e) {
-                    somme += d;
-                    compte += 1;
-                    if d < pire.0 {
-                        pire = (d, e);
-                    }
-                    lignes.push(format!("{e}:{d:.3}"));
-                }
-            }
-            let moyen = somme / compte as f64;
-            let dice_masque = dice(&resultat.cerveau.mapv(u8::from), &cerveau_officiel, 1).unwrap();
-            println!("FETALBET {id} : Dice moyen {moyen:.4} sur {compte} étiquettes, pire {:.4} (étiquette {}), Dice du masque du cerveau contre l'officiel {dice_masque:.4}", pire.0, pire.1);
-            println!("FETALBET {id} par étiquette : {}", lignes.join(" "));
-            moyennes.push((id, moyen));
-        }
-        // le critère n'est jugé qu'après avoir affiché les trois volumes
-        for (id, moyen) in moyennes {
-            assert!(moyen >= 0.95, "{id} : Dice moyen {moyen}");
-        }
-    }
-
-    /// Diagnostic : Fetal-BET sur le volume `BOUNTI_VOLUME` (défaut `calme1`) en prenant chacun des trois axes comme axe des coupes ; affiche le Dice de chaque masque contre le masque du cerveau officiel et la part de ce masque couverte.
-    #[test]
-    #[ignore = "diagnostic : demande les références de data/bounti et les poids de Fetal-BET"]
-    fn diagnostic_fetalbet_slice_axis() {
-        let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti");
-        let poids = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/attunet.bpk");
-        let id = std::env::var("BOUNTI_VOLUME").unwrap_or_else(|_| "calme1".into());
-        let dossier = racine.join("mirtk").join(&id);
-        let entree = Volume::lire(&dossier.join("entree.nii.gz")).unwrap();
-        let officiel = Volume::lire(&dossier.join("cerveau_officiel.nii.gz"))
-            .unwrap()
-            .donnees
-            .mapv(|v| v > 0.5);
-        for (nom, ordre) in [
-            ("z (axes x,y,z)", [0usize, 1, 2]),
-            ("y (axes x,z,y)", [0, 2, 1]),
-            ("x (axes y,z,x)", [1, 2, 0]),
-        ] {
-            let permute = entree
-                .donnees
-                .clone()
-                .permuted_axes(ordre)
-                .as_standard_layout()
-                .to_owned();
-            let masque = medoxide_fetalbet::mask_from_volume(&permute, [0.8, 0.8], &poids);
-            let mut inverse = [0usize; 3];
-            for (position, &axe) in ordre.iter().enumerate() {
-                inverse[axe] = position;
-            }
-            let masque = masque
-                .permuted_axes(inverse)
-                .as_standard_layout()
-                .to_owned()
-                .mapv(|v| v == 1);
-            let commun = masque.iter().zip(officiel.iter()).filter(|(&a, &b)| a && b).count() as f64;
-            let (a, b) = (
-                masque.iter().filter(|&&v| v).count() as f64,
-                officiel.iter().filter(|&&v| v).count() as f64,
-            );
-            println!("AXE {id} coupes selon {nom} : Dice {:.4}, masque {a} voxels, couverture du masque officiel {:.3}, part dans l'officiel {:.3}", 2.0 * commun / (a + b), commun / b, commun / a);
         }
     }
 }

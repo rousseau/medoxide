@@ -5,17 +5,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Fichiers de poids attendus dans le dossier, relativement à lui : le réseau d'extraction du cerveau d'abord, puis les deux réseaux de tissus.
+/// Fichiers de poids attendus dans le dossier, relativement à lui.
 pub const FICHIERS: [&str; 3] = ["bet/bet_64.bpk", "unet/unet_64.bpk", "attunet/attunet_64.bpk"];
-
-/// Fichiers exigés : les trois avec l'extraction du cerveau de BOUNTI (`avec_extraction`), les deux réseaux de tissus seulement si le masque vient de Fetal-BET.
-pub fn requis(avec_extraction: bool) -> &'static [&'static str] {
-    if avec_extraction {
-        &FICHIERS
-    } else {
-        &FICHIERS[1..]
-    }
-}
 
 /// Nom de la variable d'environnement qui donne le dossier des poids.
 pub const VARIABLE: &str = "MEDOXIDE_BOUNTI_WEIGHTS";
@@ -54,7 +45,7 @@ impl std::fmt::Display for ErreurPoids {
 
 impl std::error::Error for ErreurPoids {}
 
-/// Dossier des poids (avec `avec_extraction` : le fichier du réseau d'extraction du cerveau est aussi exigé, voir [`requis`]) : `option` (ligne de commande), sinon `variable` (valeur de `MEDOXIDE_BOUNTI_WEIGHTS`), sinon le cache (`xdg_cache`, sinon `home/.cache`), puis vérification que les trois fichiers y sont.
+/// Dossier des poids : `option` (ligne de commande), sinon `variable` (valeur de `MEDOXIDE_BOUNTI_WEIGHTS`), sinon le cache (`xdg_cache`, sinon `home/.cache`), puis vérification que les trois fichiers y sont.
 /// Les valeurs d'environnement sont passées en paramètres pour que la fonction soit testable sans toucher à l'environnement du processus ; [`dossier_des_poids`] les lit.
 ///
 /// # Erreurs
@@ -64,7 +55,6 @@ pub fn choisir_dossier(
     variable: Option<OsString>,
     xdg_cache: Option<OsString>,
     home: Option<OsString>,
-    avec_extraction: bool,
 ) -> Result<PathBuf, ErreurPoids> {
     let non_vide = |v: Option<OsString>| v.filter(|v| !v.is_empty());
     let dossier = if let Some(o) = option {
@@ -78,7 +68,7 @@ pub fn choisir_dossier(
     } else {
         return Err(ErreurPoids::AucunDossier);
     };
-    let manquants: Vec<&'static str> = requis(avec_extraction)
+    let manquants: Vec<&'static str> = FICHIERS
         .iter()
         .copied()
         .filter(|f| !dossier.join(f).is_file())
@@ -97,13 +87,12 @@ pub fn choisir_dossier(
 ///
 /// # Erreurs
 /// Voir [`choisir_dossier`].
-pub fn dossier_des_poids(option: Option<&Path>, avec_extraction: bool) -> Result<PathBuf, ErreurPoids> {
+pub fn dossier_des_poids(option: Option<&Path>) -> Result<PathBuf, ErreurPoids> {
     choisir_dossier(
         option,
         std::env::var_os(VARIABLE),
         std::env::var_os("XDG_CACHE_HOME"),
         std::env::var_os("HOME"),
-        avec_extraction,
     )
 }
 
@@ -141,25 +130,25 @@ mod tests {
             }
         }
         let os = |p: &PathBuf| Some(p.clone().into_os_string());
-        assert_eq!(choisir_dossier(Some(&a), os(&b), os(&c), os(&d), true).unwrap(), a);
-        assert_eq!(choisir_dossier(None, os(&b), os(&c), os(&d), true).unwrap(), b);
+        assert_eq!(choisir_dossier(Some(&a), os(&b), os(&c), os(&d)).unwrap(), a);
+        assert_eq!(choisir_dossier(None, os(&b), os(&c), os(&d)).unwrap(), b);
         assert_eq!(
-            choisir_dossier(None, None, os(&c), os(&d), true).unwrap(),
+            choisir_dossier(None, None, os(&c), os(&d)).unwrap(),
             c.join("medoxide/bounti")
         );
         assert_eq!(
-            choisir_dossier(None, None, None, os(&d), true).unwrap(),
+            choisir_dossier(None, None, None, os(&d)).unwrap(),
             d.join(".cache/medoxide/bounti")
         );
         // une valeur vide est ignorée
         assert_eq!(
-            choisir_dossier(None, Some("".into()), Some("".into()), os(&d), true).unwrap(),
+            choisir_dossier(None, Some("".into()), Some("".into()), os(&d)).unwrap(),
             d.join(".cache/medoxide/bounti")
         );
         // un dossier prioritaire incomplet n'est pas contourné
         let incomplet = dossier_avec("incomplet", &FICHIERS[..2]);
         assert!(matches!(
-            choisir_dossier(Some(&incomplet), os(&b), None, None, true),
+            choisir_dossier(Some(&incomplet), os(&b), None, None),
             Err(ErreurPoids::Manquants { .. })
         ));
     }
@@ -167,12 +156,9 @@ mod tests {
     /// Sans option, sans variable et sans dossier de cache : `AucunDossier`. Avec un dossier incomplet : la liste exacte des fichiers manquants, et un message qui dit où chercher la procédure.
     #[test]
     fn missing_weights_are_reported_with_the_exact_files() {
-        assert_eq!(
-            choisir_dossier(None, None, None, None, true),
-            Err(ErreurPoids::AucunDossier)
-        );
+        assert_eq!(choisir_dossier(None, None, None, None), Err(ErreurPoids::AucunDossier));
         let incomplet = dossier_avec("manque", &["bet/bet_64.bpk"]);
-        let erreur = choisir_dossier(Some(&incomplet), None, None, None, true).unwrap_err();
+        let erreur = choisir_dossier(Some(&incomplet), None, None, None).unwrap_err();
         assert_eq!(
             erreur,
             ErreurPoids::Manquants {
@@ -183,32 +169,5 @@ mod tests {
         let message = erreur.to_string();
         assert!(message.contains("unet/unet_64.bpk") && message.contains("bounti_poids.sh") && message.contains("GPL"));
         assert!(!message.contains("bet/bet_64.bpk"));
-    }
-
-    /// Sans l'extraction de BOUNTI (masque de Fetal-BET), seuls les deux réseaux de tissus sont exigés : un dossier sans `bet/bet_64.bpk` est accepté, et les fichiers manquants listés sont ceux des tissus ; avec l'extraction, le même dossier est refusé en nommant `bet/bet_64.bpk`.
-    #[test]
-    fn the_extraction_weights_are_required_only_with_the_bounti_extraction() {
-        assert_eq!(requis(true), &FICHIERS[..]);
-        assert_eq!(requis(false), &["unet/unet_64.bpk", "attunet/attunet_64.bpk"]);
-        let sans_bet = dossier_avec("sans_bet", &FICHIERS[1..]);
-        assert_eq!(
-            choisir_dossier(Some(&sans_bet), None, None, None, false).unwrap(),
-            sans_bet
-        );
-        assert_eq!(
-            choisir_dossier(Some(&sans_bet), None, None, None, true),
-            Err(ErreurPoids::Manquants {
-                dossier: sans_bet.clone(),
-                fichiers: vec!["bet/bet_64.bpk"]
-            })
-        );
-        let sans_unet = dossier_avec("sans_unet", &["bet/bet_64.bpk", "attunet/attunet_64.bpk"]);
-        assert_eq!(
-            choisir_dossier(Some(&sans_unet), None, None, None, false),
-            Err(ErreurPoids::Manquants {
-                dossier: sans_unet.clone(),
-                fichiers: vec!["unet/unet_64.bpk"]
-            })
-        );
     }
 }

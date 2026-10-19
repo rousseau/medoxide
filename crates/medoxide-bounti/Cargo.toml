@@ -10,8 +10,6 @@ burn = { workspace = true, features = ["flex"] }
 burn-store = { workspace = true }
 # Lecture des volumes NIfTI et de leur affine (règle `sform`, `qform`, `pixdim`).
 medoxide-core = { path = "../medoxide-core" }
-# Mode `fetalbet` : masque du cerveau par Fetal-BET.
-medoxide-fetalbet = { path = "../medoxide-fetalbet" }
 ndarray = { workspace = true }
 # Matrices 4×4 de la géométrie (affines voxel → mm).
 nalgebra = { workspace = true }

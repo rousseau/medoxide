@@ -170,15 +170,6 @@ enum SvrAction {
     },
 }
 
-/// Extraction du cerveau précédant la segmentation des tissus.
-#[derive(Clone, Copy, ValueEnum)]
-enum ExtractionArg {
-    /// Réseau 3D d'extraction de BOUNTI (comme la chaîne officielle)
-    Bounti,
-    /// EXPÉRIMENTAL, critère de validation non atteint (voir docs/BOUNTI.md) : Fetal-BET (réseau 2D, appliqué au volume d'entrée) ; seuls les deux réseaux de tissus de BOUNTI sont alors nécessaires
-    Fetalbet,
-}
-
 #[derive(Subcommand)]
 enum Command {
     /// Segmentation du cerveau fœtal en 19 tissus (portage de BOUNTI) d'une reconstruction 3D T2
@@ -205,13 +196,6 @@ enum Command {
         /// Dossier racine de sortie à la place de la racine BIDS (avec --bids)
         #[arg(long, conflicts_with = "output")]
         output_dir: Option<PathBuf>,
-        /// Extraction du cerveau
-        #[arg(long, value_enum, default_value_t = ExtractionArg::Bounti)]
-        extraction: ExtractionArg,
-        /// Poids de Fetal-BET (fichier .bpk), avec --extraction fetalbet. Priorité : cette option, puis MEDOXIDE_MODEL,
-        /// puis le cache (~/.cache/medoxide/attunet.bpk), où ils sont téléchargés depuis Hugging Face au premier lancement
-        #[arg(long, env = "MEDOXIDE_MODEL")]
-        model: Option<PathBuf>,
         /// Dossier des poids convertis. Priorité : cette option, puis la variable d'environnement
         /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti). Licence GPL v3 : non distribués
         #[arg(long)]
@@ -403,8 +387,6 @@ fn bounti(
     entree: &std::path::Path,
     fichiers: Result<medoxide_bounti::sortie::Fichiers, medoxide_bounti::sortie::ErreurSortie>,
     poids: Option<&std::path::Path>,
-    extraction: ExtractionArg,
-    modele_fetalbet: Option<&std::path::Path>,
     calcul: medoxide_bounti::segmentation::Calcul,
 ) -> ExitCode {
     use medoxide_bounti::{geometrie::Volume, poids::dossier_des_poids, segmentation, sortie};
@@ -415,7 +397,7 @@ fn bounti(
             return ExitCode::FAILURE;
         }
     };
-    let dossier = match dossier_des_poids(poids, matches!(extraction, ExtractionArg::Bounti)) {
+    let dossier = match dossier_des_poids(poids) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("medx bounti : {e}");
@@ -431,25 +413,7 @@ fn bounti(
     };
     let appareil = calcul.appareil();
     let reseaux = segmentation::Reseaux::charger(&dossier, &appareil);
-    let extraction = match extraction {
-        ExtractionArg::Bounti => segmentation::Extraction::bounti(&dossier, &appareil),
-        ExtractionArg::Fetalbet => {
-            // poids de Fetal-BET : l'option, sinon le cache (téléchargés au premier lancement, comme `medx fetalbet`)
-            let poids = match modele_fetalbet {
-                Some(chemin) if chemin.exists() => Ok(chemin.to_path_buf()),
-                Some(chemin) => Err(format!("poids de Fetal-BET introuvables : {}", chemin.display())),
-                None => medoxide_fetalbet::default_model_path().map_err(|e| e.to_string()),
-            };
-            match poids {
-                Ok(p) => segmentation::Extraction::fetalbet(p),
-                Err(e) => {
-                    eprintln!("medx bounti : {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-    };
-    let resultat = match segmentation::segmenter(&volume, &reseaux, &extraction, &appareil) {
+    let resultat = match segmentation::segmenter(&volume, &reseaux, &appareil) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("medx bounti : {e}");
@@ -482,8 +446,6 @@ fn main() -> ExitCode {
             participant,
             session,
             output_dir,
-            extraction,
-            model,
             weights,
             device,
         } => {
@@ -502,14 +464,7 @@ fn main() -> ExitCode {
                     "--output ou --bids requis".to_string(),
                 )),
             };
-            bounti(
-                &input,
-                fichiers,
-                weights.as_deref(),
-                extraction,
-                model.as_deref(),
-                device.into(),
-            )
+            bounti(&input, fichiers, weights.as_deref(), device.into())
         }
         Command::Svr {
             action:
@@ -696,14 +651,5 @@ mod tests {
             !essai(&["bounti", "--input", "a", "--output", "b", "--output-dir", "o"]),
             "--output-dir sans --bids"
         );
-        assert!(!essai(&[
-            "bounti",
-            "--input",
-            "a",
-            "--output",
-            "b",
-            "--extraction",
-            "autre"
-        ]));
     }
 }
