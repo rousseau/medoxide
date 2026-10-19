@@ -2874,6 +2874,17 @@ mod tests {
         assert_eq!(relu.dim(), grid.dims);
         assert!((relu.affine() - grid.affine).abs().max() < 1e-4, "affine relue : {:?}", relu.affine());
         assert!(relu.spacing().iter().all(|s| (s - 2.0).abs() < 1e-6), "espacement {:?}", relu.spacing());
+        // sform et qform cohérents : le qform relu seul donne la même affine que la grille (régression : un qform sans origine faisait placer le volume à l'origine par MIRTK)
+        let mut en_tete = nifti::NiftiHeader::from_file(&chemin).unwrap();
+        assert!(en_tete.sform_code > 0 && en_tete.qform_code > 0, "codes sform {} qform {}", en_tete.sform_code, en_tete.qform_code);
+        en_tete.sform_code = 0;
+        let par_qform = medoxide_core::affine_depuis_en_tete(&en_tete).unwrap();
+        assert_eq!(par_qform.source, medoxide_core::SourceAffine::Qform);
+        for l in 0..4 {
+            for c in 0..4 {
+                assert!((par_qform.matrice[l][c] - grid.affine[(l, c)]).abs() < 1e-4, "qform relu seul : ({l},{c}) {} contre {}", par_qform.matrice[l][c], grid.affine[(l, c)]);
+            }
+        }
         let valeurs = medoxide_core::read_volume(&chemin).unwrap();
         assert!(valeurs.iter().zip(volume.iter()).all(|(a, b)| *a == *b as f32), "valeurs différentes");
         // (b) poses

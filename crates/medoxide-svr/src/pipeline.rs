@@ -191,18 +191,14 @@ pub struct ReconstructionOutput {
 }
 
 impl ReconstructionOutput {
-    /// Écrit le volume au format NIfTI (`float32`), dans le repère monde de la grille (sform) ; le fichier est compressé si `path` finit par `.gz`.
+    /// Écrit le volume au format NIfTI (`float32`), dans le repère monde de la grille (`sform` et `qform` cohérents, voir [`medoxide_core::definir_affine`]) ; le fichier est compressé si `path` finit par `.gz`.
     ///
     /// # Erreurs
     /// [`SvrError::Write`] si le fichier ne peut pas être écrit (dossier absent, droits).
     pub fn write_volume(&self, path: &Path) -> Result<(), SvrError> {
         let mut header = NiftiHeader::default();
-        header.sform_code = 1;
-        header.srow_x = std::array::from_fn(|c| self.grid.affine[(0, c)] as f32);
-        header.srow_y = std::array::from_fn(|c| self.grid.affine[(1, c)] as f32);
-        header.srow_z = std::array::from_fn(|c| self.grid.affine[(2, c)] as f32);
-        let r = self.grid.resolution_mm as f32;
-        header.pixdim = [1.0, r, r, r, 1.0, 1.0, 1.0, 1.0];
+        // `sform` ET `qform` cohérents : certains outils (MIRTK) lisent le `qform`, d'autres (nibabel, FSL) le `sform`
+        medoxide_core::definir_affine(&mut header, std::array::from_fn(|l| std::array::from_fn(|c| self.grid.affine[(l, c)])));
         WriterOptions::new(path)
             .reference_header(&header)
             .write_nifti(&self.volume.mapv(|v| v as f32))
