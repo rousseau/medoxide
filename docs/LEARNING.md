@@ -1505,6 +1505,11 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : pour reproduire un outil (MIRTK) il vaut mieux **rejouer ses commandes une à une en gardant chaque étape**, prototyper en Python, comparer chaque étape (dimensions, affine, valeurs) et n'écrire le Rust qu'une fois les règles établies. Cela a trouvé : la règle du recadrage (début = ⌈borne⌉, fin = ⌊borne⌋ sur les bords de voxels), la marge d'un demi-voxel (203 voxels différents sur 33 millions sans elle), et réfuté une hypothèse plausible (exclure les zéros de l'interpolation faisait 760 fois plus d'erreurs). Un test avec des volumes tous isotropes ne distingue pas le plus petit du plus grand voxel : un mutant a survécu jusqu'à l'ajout d'un cas anisotrope.
 - **Où** : `crates/medoxide-bounti/src/geometrie.rs`, `crates/medoxide-core/src/lib.rs` (`affine_nifti`), `scripts/bounti_references_mirtk.py`, `docs/BOUNTI.md` (sous-étape 5a).
 
+## 2026-10-19 — L'outil de référence peut lui-même perdre en précision à grande taille
+
+- **Quoi (méthode)** : le contrôle de fidélité de l'export ONNX contre `onnxruntime` a échoué à 128³ (1,2e-4) et réussi à 64³ (4,7e-6) pour le même réseau : la normalisation d'instance d'`onnxruntime` somme elle aussi tout le volume en f32 et perd en précision, comme celle de Burn. Quand un contrôle échoue à une taille et pas à une autre, se demander si c'est la **référence** qui se dégrade avant d'accuser le code ; la vérité à grande taille se mesure contre PyTorch (ou une référence en double précision), pas contre n'importe quel second outil.
+- **Où** : `scripts/export_bounti_onnx.py`, `crates/medoxide-bounti/src/bet.rs`, `docs/BOUNTI.md` (sous-étape 5b).
+
 ---
 
 *(à compléter à la prochaine étape)*
