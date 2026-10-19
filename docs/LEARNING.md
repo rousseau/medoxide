@@ -1480,6 +1480,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : (1) j'ai tabulé un résultat avant la fin d'un des calculs (le quatrième repli d'un sujet) sans vérifier le fichier marqueur de fin : le tableau commité avait des chiffres faux pour ce sujet, corrigé dans un erratum le jour même ; règle : tabuler seulement quand le marqueur de fin existe et que le nombre de lignes est celui attendu ; (2) pour juger une option de reconstruction, réutiliser les volumes de la base (mêmes poses) fait gagner la moitié du calcul ; (3) un mutant d'indexation (`<` remplacé par `<=`) n'est détecté que si le test essaie exactement la valeur limite.
 - **Où** : `crates/medoxide-svr/src/pipeline.rs` (`slices_to_exclude`, `without_excluded_slices`), `crates/medoxide-svr/src/lib.rs` (`without_slices`), `docs/RECHERCHE_MULTISTART.md` (§ 22).
 
+## 2026-10-19 — Convertir un réseau PyTorch en Rust par ONNX, et vérifier avec un critère relatif
+
+- **Quoi (concept)** : ONNX décrit un réseau comme un graphe d'opérateurs standard avec ses poids, indépendamment de PyTorch ; `onnx2burn` le lit et génère le code Rust des couches Burn (`Conv3d`, `ConvTranspose3d`, `InstanceNorm`, `PRelu`…) et un fichier de poids `burnpack`. On ne réentraîne rien : le modèle est celui des auteurs. Le code généré est indépendant de la taille spatiale, donc un export à 64³ sert aussi à 256³.
+- **Quoi (méthode)** : (1) un critère de fidélité sur des logits se pose en écart **relatif** (max |Δ| / max |logit|), pas absolu : deux réseaux au même bruit d'arrondi donnent des écarts absolus proportionnels à l'amplitude de leurs logits ; j'avais écrit le critère en absolu, il a échoué pour un réseau aux logits plus grands, et je l'ai amendé en le signalant ; (2) avec 20 classes, quelques voxels aux logits quasi égaux peuvent changer d'étiquette sans erreur : l'accord se mesure à 99,9 %, pas à 100 % ; (3) un test qui lit des fichiers locaux (poids GPL hors dépôt) est marqué `#[ignore]` et s'exécute explicitement ; (4) le chargement strict des poids (`strict=True`) détecte une clé manquante, que le script officiel (`strict=False`) aurait laissée passer.
+- **Où** : `crates/medoxide-bounti/` (modèle généré et test), `scripts/export_bounti_onnx.py`, `scripts/make_bounti_reference.py`, `docs/BOUNTI.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*
