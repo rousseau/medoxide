@@ -129,3 +129,20 @@ Hypothèse confirmée (le niveau de 1,2e-5 à un rapport de 100 est celui observ
 Contre la vérité en f64 à 160³ : PyTorch f32 1,73e-6, **Burn GPU 1,74e-6** : Burn est désormais aussi précis que PyTorch. **C1 est atteint pour les deux réseaux, à toutes les tailles testées, sans amender le critère de seuil (1e-5) ni la définition (écart relatif à PyTorch f32)** ; seule l'amendement initial (absolu vers relatif, voir C1) reste en vigueur.
 
 **Incident.** La première tentative de référence f64, à 256³ et sans borne de mémoire, a fait planter le Mac. Le calcul se fait désormais à 160³ sous `scripts/garde_memoire.py` (arrêt au-delà d'une limite). La mémoire d'un passage avant f64 est d'environ 6,8 Go à 160³ pour l'U-Net et croît comme n³ : environ 12 Go à 192³ et plus de 28 Go à 256³.
+
+## Étape 4 : fusion des quatre sorties (C2)
+
+**Critère C2, précisé avant le code** : la fusion Rust (U-Net et Attention U-Net, image normale et image retournée sur l'axe x, retour, échange des étiquettes gauche/droite, moyenne des logits, argmax) donne, à entrée identique, **au moins 99,9 % de voxels d'étiquette identique** à la fusion de référence PyTorch/MONAI (`scripts/make_bounti_fusion_reference.py`), mesurée à 128³ et à 160³ sur un volume réel rééchantillonné (la logique de fusion ne dépend pas de la taille ; 256³ coûterait plus de 13 Go de mémoire pour la seule référence). Indicatif : écart relatif des logits fusionnés, attendu de l'ordre de 1e-6 à 1e-5.
+Faits relevés dans le script officiel et vérifiés ici : le retournement est celui de `Flip(1)` de MONAI, qui retourne bien le **premier axe spatial** (X) d'un tenseur `[1, 1, X, Y, Z]` (vérifié sur un petit tenseur) ; l'échange des étiquettes est la permutation des canaux 1↔2, 3↔4, 5↔6, 7↔8, 11↔12, 14↔15, 16↔17 (les canaux 0, 9, 10, 13, 18, 19 sont inchangés) ; la fusion est la moyenne des **logits** (non normalisés) des quatre sorties.
+
+**Résultat de l'étape 4 (fusion, `crates/medoxide-bounti/src/fusion.rs`).**
+
+| Mesure | Résultat | Critère |
+|---|---|---|
+| Fusion Rust contre la fusion PyTorch/MONAI, 128³, volume réel | **0 voxel différent sur 2 097 152** (accord de 100 %) | ≥ 99,9 % |
+| Écart relatif des logits fusionnés (indicatif) | 1,6e-6 | — |
+| Fusion Rust à 160³ | **non mesurée** (voir ci-dessous) | ≥ 99,9 % |
+
+**C2 est atteint à 128³ ; la mesure à 160³, demandée par le critère, reste à faire.** La référence PyTorch à 160³ demande environ 9 Go (4,5 Go à 128³, environ 1,95 fois plus à 160³) ; elle a été différée parce que la machine était sous forte pression mémoire au moment prévu (swap à 10,7 Go sur 11,3 Go, 8,6 Go compressés, compilations et un test d'une autre session en cours). À lancer sous `scripts/garde_memoire.py 11` quand la mémoire le permet : `python scripts/make_bounti_fusion_reference.py 160`, puis `BOUNTI_N=160 cargo test -p medoxide-bounti the_fusion_matches -- --ignored`.
+Tests : quatre tests unitaires sans poids (permutation des étiquettes comparée à la liste des paires, échange et retournement exacts sur un tenseur à valeurs distinctes, formule de fusion à la main avec deux réseaux factices non symétriques, étiquettes) ; **sept mutants sur huit tués** (axe retourné, permutation, diviseur, retour du retournement, image réellement retournée, échange, argmax) ; le huitième est équivalent par construction (retourner puis échanger, ou échanger puis retourner, donne le même résultat).
+

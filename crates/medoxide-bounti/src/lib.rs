@@ -4,6 +4,7 @@
 //! Cette étape ne contient que l'U-Net 3D à 20 sorties, validé contre PyTorch (critère C1) ; la fusion des deux réseaux, le retournement et le pré/post-traitement viendront ensuite.
 
 pub mod attunet;
+pub mod fusion;
 pub mod norme;
 pub mod unet;
 
@@ -203,5 +204,32 @@ mod tests {
             let ecart_type = (plan.iter().map(|v| (v - moyenne).powi(2)).sum::<f32>() / taille as f32).sqrt();
             assert!(moyenne.abs() <= 1e-5 && (ecart_type - 1.0).abs() <= 1e-3, "moyenne {moyenne:.2e}, écart type {ecart_type}");
         }
+    }
+
+    /// **Critère C2** (fusion des quatre sorties) : sur un cube de `BOUNTI_N`³ (128 par défaut) d'un volume réel rééchantillonné (`data/bounti/reference/unet_<n>_reel_input.f32`), la fusion Rust des deux réseaux de BOUNTI (image normale et retournée, échange gauche/droite, moyenne des logits) donne au moins 99,9 % de voxels d'étiquette identique
+    /// à la fusion de référence PyTorch/MONAI (`scripts/make_bounti_fusion_reference.py`). Indicatif : écart relatif des logits fusionnés.
+    #[test]
+    #[ignore = "demande les poids BOUNTI convertis et la fusion de référence PyTorch dans data/bounti (hors dépôt)"]
+    fn the_fusion_matches_the_pytorch_reference() {
+        let n: usize = std::env::var("BOUNTI_N").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+        let device = appareil();
+        let unet = crate::unet::Model::from_file(donnees().join("burn/unet/unet_64.bpk"), &device);
+        let attunet = crate::attunet::Model::from_file(donnees().join("burn/attunet/attunet_64.bpk"), &device);
+        let entree = lire_f32(&donnees().join(format!("reference/unet_{n}_reel_input.f32")));
+        let image = Tensor::<5>::from_data(TensorData::new(entree, [1, 1, n, n, n]), &device);
+        let logits = crate::fusion::logits_fusionnes(image, &[&|x: Tensor<5>| unet.forward(x), &|x: Tensor<5>| attunet.forward(x)], &device);
+
+        let attendus = lire_f32(&donnees().join(format!("reference/fusion_{n}_reel_logits.f32")));
+        let obtenus = logits.clone().into_data().try_to_vec::<f32>().unwrap();
+        let amplitude = attendus.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        let ecart = obtenus.iter().zip(&attendus).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+
+        let etiquettes = crate::fusion::etiquettes(logits);
+        let reference = std::fs::read(donnees().join(format!("reference/fusion_{n}_reel_labels.u8"))).expect("étiquettes de référence illisibles");
+        assert_eq!(etiquettes.len(), reference.len());
+        let identiques = etiquettes.iter().zip(&reference).filter(|(a, b)| a == b).count();
+        let accord = identiques as f64 / reference.len() as f64;
+        println!("FUSION n={n} : accord des étiquettes {accord:.6} ({} voxels différents sur {}) ; écart relatif des logits fusionnés {:.2e}", reference.len() - identiques, reference.len(), ecart / amplitude);
+        assert!(accord >= 0.999, "accord des étiquettes {accord}");
     }
 }
