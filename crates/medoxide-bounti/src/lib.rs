@@ -11,6 +11,7 @@ pub mod geometrie;
 pub mod masque;
 pub mod norme;
 pub mod segmentation;
+pub mod table;
 pub mod unet;
 
 #[cfg(test)]
