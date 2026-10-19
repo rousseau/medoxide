@@ -5,7 +5,7 @@ Pourquoi : deux implémentations f32 correctes d'une même convolution 3D diffè
 
 Deux temps, dans deux processus pour que la mémoire du calcul soit rendue avant la comparaison : (1) le passage avant en float64, écrit dans `_f64.f64` s'il n'existe pas ; (2) la comparaison, par canal, depuis le disque.
 
-MÉMOIRE : le passage avant en float64 occupe environ 5,7 Go à 160³ pour l'U-Net (à peu près le double de l'estimation naïve) et croît comme n³ : environ 10 Go à 192³, plus de 20 Go à 256³ (ce qui a fait planter une machine de 24 Go). Toujours le lancer sous `scripts/garde_memoire.py`.
+MÉMOIRE : le passage avant en float64 occupe environ 6,8 Go à 160³ pour l'U-Net (le double de l'estimation naïve) et croît comme n³ : environ 12 Go à 192³, plus de 28 Go à 256³ (ce qui a fait planter une machine de 24 Go). Toujours le lancer sous `scripts/garde_memoire.py`.
 
 Usage : python scripts/garde_memoire.py 7 python scripts/analyse_precision_bounti.py <unet|attunet> [n] [tag]      (tag : `_reel` pour les références sur volume réel)
 """
