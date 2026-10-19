@@ -463,7 +463,6 @@ pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>)
     }
     let info = volume_info(input_path)?;
     let volume = read_volume(input_path)?;
-    let (nx, ny, _) = volume.dim();
     let spacing = [info.spacing[0], info.spacing[1]];
 
     // Les poids par défaut ne sont téléchargés qu'une fois l'entrée validée.
@@ -472,15 +471,25 @@ pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>)
         None => default_model_path()?,
     };
 
-    let mut prep = resample_in_plane(&volume, spacing);
+    let masque = mask_from_volume(&volume, spacing, &model_path);
+    write_mask(output_path, &masque, input_path)
+}
+
+/// Masque cérébral (0 fond, 1 cerveau) d'un volume déjà en mémoire, sur la grille de ce volume : les étapes 2 à 4 de [`segment`] (rééchantillonnage à 1 mm dans le plan, normalisation par coupe, inférence par tuiles, retour sur la grille d'origine puis argmax),
+/// sans lecture ni écriture de fichier. `spacing` : taille de voxel (mm) sur les deux premiers axes ; les coupes sont prises selon le troisième axe.
+///
+/// # Panique
+/// Si le fichier de poids `model_path` est absent ou invalide (code du modèle généré).
+pub fn mask_from_volume(volume: &Array3<f32>, spacing: [f32; 2], model_path: &Path) -> Array3<u8> {
+    let (nx, ny, _) = volume.dim();
+    let mut prep = resample_in_plane(volume, spacing);
     normalize_slices(&mut prep);
 
     let device = Device::default();
-    let modele = model::Model::from_file(&model_path, &device);
+    let modele = model::Model::from_file(model_path, &device);
     let logits = infer_logits(&modele, &device, &prep);
 
-    let masque = logits_to_mask(&logits, spacing, (nx, ny));
-    write_mask(output_path, &masque, input_path)
+    logits_to_mask(&logits, spacing, (nx, ny))
 }
 
 #[cfg(test)]

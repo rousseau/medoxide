@@ -3876,6 +3876,7 @@ dependencies = [
  "burn",
  "burn-store",
  "medoxide-core",
+ "medoxide-fetalbet",
  "nalgebra",
  "ndarray 0.17.2",
  "nifti",
