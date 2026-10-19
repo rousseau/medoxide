@@ -8,14 +8,14 @@
 //! Remède, la moyenne corrigée en deux passes : une première moyenne `m0` recentre les données (la soustraction de valeurs voisines est exacte), puis la moyenne résiduelle, minuscule, se calcule sans cette perte.
 //!
 //! Même structure, mêmes noms de champs et même configuration que `burn::nn::InstanceNorm` : le code généré par `onnx2burn` et ses poids (`gamma`, `beta`) s'y branchent sans autre changement que l'import.
+// avertissement de clippy sur le code que la macro `Config` de Burn génère pour `InstanceNormConfig` (bloc `impl` séparé de la structure)
+#![allow(clippy::redundant_field_names)]
 use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::Initializer;
 use burn::tensor::{Device, Tensor};
 
 /// Réglages d'une [`InstanceNorm`] (mêmes champs que `burn::nn::InstanceNormConfig`).
-// l'avertissement vient du code que la macro `Config` de Burn génère pour cette structure
-#[allow(clippy::redundant_field_names)]
 #[derive(Debug, Config)]
 pub struct InstanceNormConfig {
     /// Nombre de canaux attendus en entrée.
