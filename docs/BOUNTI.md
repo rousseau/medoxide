@@ -37,6 +37,25 @@ Vérifié ici (MONAI 1.4.0, torch 2.7.1) : les deux architectures ci-dessus **ch
 
 D'après le dépôt et l'article : parcellation en **43 étiquettes** (lobes), fœtal et néonatal (21 à 44 semaines d'âge gestationnel ou postmenstruel), **Attention U-Net 3D**, entrée à **0,5 mm isotrope**, protocole dHCP (TE de 250 ms), correction N4 optionnelle. L'image Docker est limitée à l'architecture AMD et annonce plus de 16 Go de mémoire GPU. Les poids ne sont **pas** dans l'image BOUNTI (le dossier `monai-2026` de celle-ci contient deux modèles pour l'IRM à 0,55 T) : ils sont à extraire de l'image `perinatal_brain_mri_analysis_amd`. Architecture exacte, hiérarchie des étiquettes et prétraitement : à relever dans cette image avant de définir les critères.
 
+## Étape 1 : sonde de performance (résultats)
+
+`crates/medoxide-svr/examples/sonde_conv3d.rs` : une convolution 3D 3×3×3 de 32 vers 32 canaux sur un cube de côté `n` (Mac à 24 Go de RAM, Burn 0.22.0-pre.4).
+
+| Backend | n | Temps | Débit | Mémoire maximale |
+|---|---|---|---|---|
+| GPU (wgpu / Metal) | 64 | 0,09 s | 78 G mult.-add./s | 0,38 Go |
+| GPU | 128 | 0,27 s | 217 G/s | 0,65 Go |
+| GPU | 192 | 0,99 s | 198 G/s | 2,3 Go |
+| GPU | **256** | **1,96 s** | **237 G/s** | **4,4 Go** |
+| CPU (`flex`) | 64 | 0,33 s | 22 G/s | 0,11 Go |
+| CPU (`flex`) | 128 | 2,58 s | 22 G/s | 0,82 Go |
+
+Le GPU est environ dix fois plus rapide que le CPU. Comptage des multiplications-additions des deux réseaux BOUNTI à 256³ (crochets MONAI sur une petite entrée, mise à l'échelle) : **789 G pour l'Attention U-Net, 479 G pour l'U-Net**, soit environ 3 s et 2 s de convolutions par passe avant au débit mesuré, donc **une dizaine de secondes pour les quatre passes** de BOUNTI (hors normalisations et activations, dont le coût est à mesurer). La plus grande carte de caractéristiques fait 1,3 Go (les logits à 20 canaux). **Décision : GO sur le backend GPU (wgpu) ; le CPU serait de l'ordre de dix fois plus lent.** Les critères C4 (ressources) sont satisfaits à l'échelle de la sonde ; la mesure sur le réseau complet reste à faire.
+
+## Voie de conversion : ONNX plutôt que couche par couche
+
+Fetal-BET est exactement l'`AttentionUnet` de MONAI (en 2D), converti par `onnx2burn` (burn-onnx 0.22.0-pre.4) à partir d'un export ONNX : le code Rust du modèle est généré et les poids sont écrits au format `burnpack`. Les opérations de BOUNTI sont les mêmes en 3D (`Conv3d`, `ConvTranspose3d`, BatchNorm, InstanceNorm, PReLU, sigmoïde, produit, concaténation), tous présents dans Burn. **Voie proposée** : exporter chaque réseau MONAI en ONNX (opset 17, taille d'entrée fixe), générer le code et les poids avec `onnx2burn`, valider C1. Repli si l'import échoue sur une opération 3D : écrire le réseau à la main avec `burn::nn` (plus long, plus formateur).
+
 ## Critères (écrits avant le code)
 
 BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume réel de 256³) :
@@ -48,10 +67,10 @@ BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume rée
 
 ## Plan, par petites étapes (une chose nouvelle à la fois)
 
-0. **Faisabilité** (fait en partie) : poids et scripts extraits, architectures identifiées, chargement strict vérifié. Reste : référence de sortie sur nos volumes, mesure de la mémoire et du temps PyTorch à 256³.
-1. **Sonde de performance en Burn** : une convolution 3D 32→32 canaux sur 256³ (temps, mémoire), pour décider du backend avant d'écrire le réseau. Concepts nouveaux : `Conv3d`, rééchantillonnage 3D.
-2. **Briques de base** : convolution 3D, convolution transposée 3D, BatchNorm en évaluation, InstanceNorm, PReLU, un test par brique contre PyTorch.
-3. **U-Net MONAI** (le plus simple, sans attention) puis **Attention U-Net**, chacun validé par C1. Format des poids : conversion Python → safetensors, lu par `burn-store`.
+0. **Faisabilité** (fait en partie) : poids et scripts extraits, architectures identifiées, chargement strict vérifié. Reste : référence de sortie sur nos volumes.
+1. **Sonde de performance en Burn** (fait, voir ci-dessus) : GO sur le GPU.
+2. **Export ONNX et génération** (voie de conversion ci-dessus) : installer `onnx2burn`, exporter l'U-Net MONAI en ONNX, générer le code et les poids `burnpack`, valider C1 sur un cube de 64³ ; repli couche par couche si une opération 3D n'est pas prise en charge.
+3. **Attention U-Net** par la même voie, validé par C1.
 4. **Fusion et augmentation** (C2).
 5. **Pré et post-traitement** en Rust (C3), puis commande `medx`.
 6. **Multi-BOUNTI**.
