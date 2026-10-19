@@ -95,31 +95,37 @@ Cause : la moyenne et la variance sont une réduction sur 16,7 millions de terme
 | U-Net | 2,5e-6 ✓ | 2,0e-6 ✓ | 5,1e-6 ✓ | **2,6e-5 ✗** (accord 99,9998 %) |
 | Attention U-Net | 6,4e-6 ✓ | 2,0e-6 ✓ | 2,4e-6 ✓ | **1,9e-6 ✓** (accord 100 %) |
 
-**C1 est atteint pour l'Attention U-Net à toutes les tailles testées et pour l'U-Net jusqu'à 128³ ; il reste manqué pour l'U-Net à 256³ (2,6e-5 contre 1e-5)**, avec un accord des étiquettes de 99,9998 %. Le critère n'est pas relâché. Question ouverte : l'écart restant vient-il de Burn ou de la référence PyTorch f32 elle-même ? Le calcul de référence en float64 à 256³ n'a pas pu être fait : il a **fait planter le Mac par manque de mémoire** (la référence en f32 à 256³ occupait déjà 6,6 Go pour l'U-Net et 13 Go pour l'Attention U-Net, et la double précision demande environ le double ; je l'avais lancé sans borner la mémoire). À refaire à une taille intermédiaire (192³) en surveillant la mémoire, ou par morceaux.
+**Avec la seule cascade, C1 est atteint pour l'Attention U-Net à toutes les tailles et pour l'U-Net jusqu'à 128³, mais manqué pour l'U-Net à 256³ (2,6e-5)** : la suite (section suivante) en trouve et en corrige la cause.
 
-## Critères (écrits avant le code)
+## Référence float64 pour l'U-Net (192³), règle d'interprétation écrite avant la mesure
 
-BOUNTI, sur un volume de test fixé (cube de 64³ aléatoire puis un volume réel de 256³) :
-- **C1, par réseau** : écart **relatif** maximal (max |Δ| / max |logit|) entre les logits Rust (f32) et les logits PyTorch/MONAI ≤ 1e-5, et au moins 99,9 % d'étiquettes identiques après argmax.
-  *Amendement (2026-10-19, après la mesure de l'export ONNX)* : la première rédaction fixait un écart **absolu** ≤ 1e-3. Elle est fausse pour les réseaux aux logits de grande amplitude : l'Attention U-Net (logits jusqu'à environ 300) donne 1,34e-3 d'écart absolu pour un écart relatif de 4,4e-6, identique à celui de l'U-Net (6,6e-4 absolu, 4,4e-6 relatif). Le projet avait déjà établi ce point pour Fetal-BET (seuil relatif de 1e-5). Le critère est donc relatif ; le changement a été décidé en voyant ce résultat et est signalé comme tel.
-- **C2, fusion** (quatre sorties, retournement et échange des étiquettes) : au moins 99,9 % de voxels d'étiquette identique à la référence Python/MONAI à entrée prétraitée identique.
-- **C3, chaîne complète** (prétraitement et post-traitement réécrits en Rust, sur trois de nos reconstructions) : Dice moyen par étiquette ≥ 0,98 contre la sortie du script Docker, aucune étiquette sous 0,95.
-- **C4, ressources** (informatif, à mesurer d'abord) : mémoire maximale et temps d'une inférence à 256³ sur le Mac (24 Go de RAM). Si la mémoire dépasse 20 Go, étudier l'inférence par fenêtres ou la réduction de précision avant d'aller plus loin.
-- Multi-BOUNTI : critères équivalents, écrits quand son architecture et ses poids auront été relevés.
+Question : l'écart de 2,6e-5 de l'U-Net à 256³ contre PyTorch f32 vient-il de Burn ou de PyTorch f32 ? Mesure : à 160³ d'abord (environ 3,5 Go en double précision), puis à 192³ (environ 6 Go) seulement si la mémoire disponible le permet (la double précision à 256³ fait planter le Mac de 24 Go ; environ 9 Go étaient disponibles au moment du choix, Firefox et VS Code ouverts), volume réel, écart relatif de PyTorch f32 et de Burn GPU à une référence PyTorch float64 (`scripts/analyse_precision_bounti.py unet 160 _reel`), sous garde-fou de mémoire (arrêt au-delà de 10 Go).
+**Règle** : (a) si l'écart de Burn à f64 est ≤ 2 fois celui de PyTorch f32 à f64, Burn est aussi précis que PyTorch et l'écart à PyTorch f32 est du bruit de la référence : C1 devra alors se définir contre la référence f64 (amendement explicite, avec ce résultat comme motif) ; (b) s'il est supérieur à 2 fois, Burn garde une imprécision propre, à chercher couche par couche (PReLU, convolution transposée, somme résiduelle, convolutions de grande profondeur de canaux) avant d'amender quoi que ce soit.
 
-## Plan, par petites étapes (une chose nouvelle à la fois)
+**Résultat (U-Net, volume réel à 160³, référence float64 de PyTorch/MONAI ; pic de mémoire du calcul f64 : 6,8 Go, à peine sous la limite de 7 Go fixée, l'estimation naïve de 3,5 Go était fausse d'un facteur 2).** Écart relatif à la vérité en f64 :
 
-0. **Faisabilité** (fait en partie) : poids et scripts extraits, architectures identifiées, chargement strict vérifié. Reste : référence de sortie sur nos volumes.
-1. **Sonde de performance en Burn** (fait, voir ci-dessus) : GO sur le GPU.
-2. **Export ONNX et génération** (voie de conversion ci-dessus) : installer `onnx2burn`, exporter l'U-Net MONAI en ONNX, générer le code et les poids `burnpack`, valider C1 sur un cube de 64³ ; repli couche par couche si une opération 3D n'est pas prise en charge.
-3. **Attention U-Net** par la même voie, validé par C1.
-4. **Fusion et augmentation** (C2).
-5. **Pré et post-traitement** en Rust (C3), puis commande `medx`.
-6. **Multi-BOUNTI**.
+| Implémentation | écart relatif | accord des étiquettes |
+|---|---|---|
+| PyTorch f32 | 1,73e-6 | 100 % |
+| Burn GPU f32, cascade seule | 1,20e-5 | 99,9999 % |
+| Burn CPU (flex) f32, cascade seule | 1,15e-5 | 99,9999 % |
 
-## Risques
+L'écart de Burn est **7 fois celui de PyTorch** : cas (b) de la règle, Burn garde une imprécision propre, que ni le GPU ni le CPU ne distinguent (les deux backends donnent la même erreur : la cause est dans du code partagé, donc dans `norme.rs` elle-même). Hypothèse testée directement : la précision de la normalisation dépend du **rapport moyenne / écart type** des canaux, car sommer des valeurs proches de la moyenne perd de la précision relative à l'écart type. Écart de la sortie normalisée à f64 sur `[1, 2, 128, 128, 128]` (GPU) :
 
-- Performance et mémoire des convolutions 3D à 256³ (puis 0,5 mm pour Multi-BOUNTI) sur le Mac.
-- Prétraitement MIRTK à reproduire fidèlement (le modèle y est sensible, comme Fetal-BET).
-- Licence GPL v3 des poids à confirmer avec les auteurs.
-- Poids de Multi-BOUNTI dans une image AMD seulement : extraction sans exécution possible, référence de sortie à produire sur une machine x86.
+| rapport moyenne / écart type | 1 | 10 | 100 | 1000 |
+|---|---|---|---|---|
+| cascade seule | 1,0e-6 | 3,0e-6 | **1,2e-5** | 2,4e-4 |
+| **cascade + moyenne corrigée en deux passes** | 1,0e-6 | 9,3e-7 | 1,0e-6 | 7,5e-7 |
+
+Hypothèse confirmée (le niveau de 1,2e-5 à un rapport de 100 est celui observé sur le réseau). Remède : recentrer d'abord sur une première moyenne (soustraction de valeurs voisines, exacte), puis calculer la moyenne résiduelle, minuscule. Tests ajoutés (précision à chaque rapport) et six mutants de `norme.rs` tués.
+
+**C1 final, écart relatif à PyTorch f32 (GPU), volume réel :**
+
+| Réseau | 64³ | 128³ | 160³ | 256³ | accord des étiquettes |
+|---|---|---|---|---|---|
+| U-Net | 2,2e-6 | 2,1e-6 | 2,2e-6 | **2,7e-6** | 100 % |
+| Attention U-Net | 2,1e-6 | 2,4e-6 | — | **1,8e-6** | 100 % |
+
+Contre la vérité en f64 à 160³ : PyTorch f32 1,73e-6, **Burn GPU 1,74e-6** : Burn est désormais aussi précis que PyTorch. **C1 est atteint pour les deux réseaux, à toutes les tailles testées, sans amender le critère de seuil (1e-5) ni la définition (écart relatif à PyTorch f32)** ; seule l'amendement initial (absolu vers relatif, voir C1) reste en vigueur.
+
+**Incident.** La première tentative de référence f64, à 256³ et sans borne de mémoire, a fait planter le Mac. Le calcul se fait désormais à 160³ sous `scripts/garde_memoire.py` (arrêt au-delà d'une limite). La mémoire d'un passage avant f64 est d'environ 6,8 Go à 160³ pour l'U-Net et croît comme n³ : environ 12 Go à 192³ et plus de 28 Go à 256³.

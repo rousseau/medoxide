@@ -4,6 +4,9 @@
 //! sature la précision à grande taille. Mesuré contre un calcul en `f64` sur des tenseurs de moyenne 3 et d'écart type 1 : écart maximal de la sortie normalisée 2,8e-5 à 64³, 4,7e-4 à 128³ et 1,0e-2 à 256³ sur GPU (1,7e-4, 3,3e-3 et 1,6e-1 sur CPU), alors que les valeurs normalisées sont de l'ordre de 1.
 //! Ici la moyenne et la variance sont calculées une dimension spatiale après l'autre (trois réductions de 256 termes à 256³ au lieu d'une de 16,7 millions) : la moyenne des moyennes est exacte quand les blocs ont la même taille.
 //!
+//! Deuxième source d'erreur, indépendante de la taille : quand la moyenne d'un canal est grande devant son écart type, sommer des valeurs de l'ordre de la moyenne perd de la précision relative à l'écart type (mesuré, sortie normalisée contre f64 sur 128³ : 1e-6 pour un rapport moyenne / écart type de 1, 1,2e-5 pour 100, 2,4e-4 pour 1000). Les cartes de caractéristiques du réseau ont de tels rapports.
+//! Remède, la moyenne corrigée en deux passes : une première moyenne `m0` recentre les données (la soustraction de valeurs voisines est exacte), puis la moyenne résiduelle, minuscule, se calcule sans cette perte.
+//!
 //! Même structure, mêmes noms de champs et même configuration que `burn::nn::InstanceNorm` : le code généré par `onnx2burn` et ses poids (`gamma`, `beta`) s'y branchent sans autre changement que l'import.
 use burn::config::Config;
 use burn::module::{Module, Param};
@@ -58,8 +61,10 @@ fn moyenne_en_cascade<const D: usize>(x: Tensor<D>) -> Tensor<D> {
 impl InstanceNorm {
     /// Passe avant sur une entrée `[exemples, canaux, dimensions spatiales…]`.
     pub fn forward<const D: usize>(&self, entree: Tensor<D>) -> Tensor<D> {
-        let moyenne = moyenne_en_cascade(entree.clone());
-        let centree = entree.sub(moyenne);
+        let approchee = moyenne_en_cascade(entree.clone());
+        let decalee = entree.sub(approchee);
+        let residuelle = moyenne_en_cascade(decalee.clone());
+        let centree = decalee.sub(residuelle);
         let variance = moyenne_en_cascade(centree.clone().square());
         let normalisee = centree.div(variance.add_scalar(self.epsilon).sqrt());
         match (&self.gamma, &self.beta) {

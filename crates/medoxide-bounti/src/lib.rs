@@ -143,6 +143,34 @@ mod tests {
         }
     }
 
+    /// Précision de la normalisation selon le rapport moyenne / écart type (10, 100, 1000), sur `[1, 2, 128, 128, 128]`, contre un calcul en f64 : écart maximal de la sortie normalisée ≤ 1e-5 pour chaque rapport
+    /// (avant la correction à deux passes : 3,0e-6, 1,2e-5 et 2,4e-4 sur GPU).
+    #[test]
+    fn the_cascaded_instance_norm_is_accurate_for_large_means() {
+        use crate::norme::InstanceNormConfig;
+        use burn::tensor::Distribution;
+        let device = appareil();
+        let (n, canaux) = (128usize, 2usize);
+        for rapport in [10.0_f64, 100.0, 1000.0] {
+            let x = Tensor::<5>::random([1, canaux, n, n, n], Distribution::Normal(rapport, 1.0), &device);
+            let entree = x.clone().into_data().try_to_vec::<f32>().unwrap();
+            let obtenu = InstanceNormConfig::new(canaux).with_affine(false).init(&device).forward(x).into_data().try_to_vec::<f32>().unwrap();
+            let voxels = n * n * n;
+            let mut pire = 0.0_f64;
+            for c in 0..canaux {
+                let plan = &entree[c * voxels..(c + 1) * voxels];
+                let moyenne = plan.iter().map(|&v| f64::from(v)).sum::<f64>() / voxels as f64;
+                let variance = plan.iter().map(|&v| (f64::from(v) - moyenne).powi(2)).sum::<f64>() / voxels as f64;
+                let echelle = (variance + 1e-5).sqrt();
+                for (i, &v) in plan.iter().enumerate() {
+                    pire = pire.max((f64::from(obtenu[c * voxels + i]) - (f64::from(v) - moyenne) / echelle).abs());
+                }
+            }
+            println!("RAPPORT {rapport:6.0} : écart maximal à f64 {pire:.2e}");
+            assert!(pire <= 1e-5, "rapport {rapport} : écart {pire:.2e} > 1e-5");
+        }
+    }
+
     /// Même sens que `burn::nn::InstanceNorm` sur une petite entrée (où les deux sont précis) : sortie égale à 1e-5 près, avec `gamma` et `beta` non triviaux ; et propriétés exactes : après normalisation sans paramètres affines, chaque canal a une moyenne de 0 (1e-5 près) et une variance de 1 − ε/(variance + ε) (écart type 1 à 1e-4 près pour une variance d'entrée de 25).
     #[test]
     fn the_cascaded_instance_norm_matches_burns_on_small_inputs() {
