@@ -23,13 +23,24 @@ mod tests {
 
     /// Lit un tableau brut `float32` petit-boutiste.
     fn lire_f32(chemin: &Path) -> Vec<f32> {
-        let octets = std::fs::read(chemin).unwrap_or_else(|e| panic!("{} illisible : {e} (voir docs/BOUNTI.md)", chemin.display()));
-        octets.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+        let octets = std::fs::read(chemin)
+            .unwrap_or_else(|e| panic!("{} illisible : {e} (voir docs/BOUNTI.md)", chemin.display()));
+        octets
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
     }
 
     /// **Critère C1** pour un réseau (cube de `n`³, `data/bounti/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
     /// et au moins 99,9 % des voxels ont la même étiquette (argmax sur les 20 canaux).
-    fn verifier_c1(nom: &str, canaux: usize, n: usize, tag: &str, passe_avant: impl Fn(Tensor<5>) -> Tensor<5>, device: &Device) {
+    fn verifier_c1(
+        nom: &str,
+        canaux: usize,
+        n: usize,
+        tag: &str,
+        passe_avant: impl Fn(Tensor<5>) -> Tensor<5>,
+        device: &Device,
+    ) {
         let entree = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_input.f32")));
         let attendus = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_logits.f32")));
         assert_eq!(entree.len(), n * n * n);
@@ -43,16 +54,33 @@ mod tests {
         if std::env::var("MEDOXIDE_DUMP").is_ok() {
             let suffixe = std::env::var("MEDOXIDE_DEVICE").unwrap_or_else(|_| "gpu".into());
             let octets: Vec<u8> = obtenus.iter().flat_map(|v| v.to_le_bytes()).collect();
-            std::fs::write(donnees().join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")), octets).unwrap();
+            std::fs::write(
+                donnees().join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")),
+                octets,
+            )
+            .unwrap();
         }
         let amplitude = attendus.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-        let ecart = obtenus.iter().zip(&attendus).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+        let ecart = obtenus
+            .iter()
+            .zip(&attendus)
+            .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
         let voxels = n * n * n;
-        let etiquette = |logits: &[f32], v: usize| (0..canaux).max_by(|&c, &d| logits[c * voxels + v].partial_cmp(&logits[d * voxels + v]).unwrap()).unwrap();
-        let identiques = (0..voxels).filter(|&v| etiquette(&obtenus, v) == etiquette(&attendus, v)).count();
+        let etiquette = |logits: &[f32], v: usize| {
+            (0..canaux)
+                .max_by(|&c, &d| logits[c * voxels + v].partial_cmp(&logits[d * voxels + v]).unwrap())
+                .unwrap()
+        };
+        let identiques = (0..voxels)
+            .filter(|&v| etiquette(&obtenus, v) == etiquette(&attendus, v))
+            .count();
         let accord = identiques as f64 / voxels as f64;
         println!("{nom} n={n}{tag} : écart relatif {:.2e} (absolu {ecart:.2e}, |logit| max {amplitude:.1}) ; accord des étiquettes {accord:.6}", ecart / amplitude);
-        assert!(ecart / amplitude <= 1e-5, "écart relatif {:.2e} > 1e-5", ecart / amplitude);
+        assert!(
+            ecart / amplitude <= 1e-5,
+            "écart relatif {:.2e} > 1e-5",
+            ecart / amplitude
+        );
         assert!(accord >= 0.999, "accord des étiquettes {accord}");
     }
 
@@ -102,7 +130,10 @@ mod tests {
     #[ignore = "diagnostic : demande des références locales et des variables d'environnement"]
     fn diagnostic_logits_against_pytorch() {
         let reseau = std::env::var("BOUNTI_RESEAU").unwrap_or_else(|_| "unet".into());
-        let n: usize = std::env::var("BOUNTI_N").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+        let n: usize = std::env::var("BOUNTI_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
         let tag = std::env::var("BOUNTI_TAG").unwrap_or_default();
         let device = appareil();
         match reseau.as_str() {
@@ -161,7 +192,13 @@ mod tests {
         for rapport in [10.0_f64, 100.0, 1000.0] {
             let x = Tensor::<5>::random([1, canaux, n, n, n], Distribution::Normal(rapport, 1.0), &device);
             let entree = x.clone().into_data().try_to_vec::<f32>().unwrap();
-            let obtenu = InstanceNormConfig::new(canaux).with_affine(false).init(&device).forward(x).into_data().try_to_vec::<f32>().unwrap();
+            let obtenu = InstanceNormConfig::new(canaux)
+                .with_affine(false)
+                .init(&device)
+                .forward(x)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
             let voxels = n * n * n;
             let mut pire = 0.0_f64;
             for c in 0..canaux {
@@ -199,8 +236,17 @@ mod tests {
         assert!(ecart <= 1e-5, "écart à la normalisation de Burn {ecart:.2e}");
         // canal constant (variance nulle) : le terme ε évite la division par zéro, la sortie est 0 et non indéfinie
         let constant = Tensor::<5>::full([1, 2, 4, 4, 4], 7.0, &device);
-        let sortie = InstanceNormConfig::new(2).with_affine(false).init(&device).forward(constant).into_data().try_to_vec::<f32>().unwrap();
-        assert!(sortie.iter().all(|v| v.is_finite() && v.abs() <= 1e-3), "canal constant : sortie non nulle ou indéfinie");
+        let sortie = InstanceNormConfig::new(2)
+            .with_affine(false)
+            .init(&device)
+            .forward(constant)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(
+            sortie.iter().all(|v| v.is_finite() && v.abs() <= 1e-3),
+            "canal constant : sortie non nulle ou indéfinie"
+        );
         // sans paramètres affines : moyenne 0 et écart type 1 par exemple et par canal
         let brute = InstanceNormConfig::new(3).with_affine(false).init(&device).forward(x);
         let donnees = brute.into_data().try_to_vec::<f32>().unwrap();
@@ -208,7 +254,10 @@ mod tests {
         for plan in donnees.chunks(taille) {
             let moyenne = plan.iter().sum::<f32>() / taille as f32;
             let ecart_type = (plan.iter().map(|v| (v - moyenne).powi(2)).sum::<f32>() / taille as f32).sqrt();
-            assert!(moyenne.abs() <= 1e-5 && (ecart_type - 1.0).abs() <= 1e-3, "moyenne {moyenne:.2e}, écart type {ecart_type}");
+            assert!(
+                moyenne.abs() <= 1e-5 && (ecart_type - 1.0).abs() <= 1e-3,
+                "moyenne {moyenne:.2e}, écart type {ecart_type}"
+            );
         }
     }
 
@@ -217,21 +266,32 @@ mod tests {
     #[test]
     #[ignore = "demande les poids BOUNTI convertis et la fusion de référence PyTorch dans data/bounti (hors dépôt)"]
     fn the_fusion_matches_the_pytorch_reference() {
-        let n: usize = std::env::var("BOUNTI_N").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+        let n: usize = std::env::var("BOUNTI_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128);
         let device = appareil();
         let unet = crate::unet::Model::from_file(donnees().join("burn/unet/unet_64.bpk"), &device);
         let attunet = crate::attunet::Model::from_file(donnees().join("burn/attunet/attunet_64.bpk"), &device);
         let entree = lire_f32(&donnees().join(format!("reference/unet_{n}_reel_input.f32")));
         let image = Tensor::<5>::from_data(TensorData::new(entree, [1, 1, n, n, n]), &device);
-        let logits = crate::fusion::logits_fusionnes(image, &[&|x: Tensor<5>| unet.forward(x), &|x: Tensor<5>| attunet.forward(x)], &device);
+        let logits = crate::fusion::logits_fusionnes(
+            image,
+            &[&|x: Tensor<5>| unet.forward(x), &|x: Tensor<5>| attunet.forward(x)],
+            &device,
+        );
 
         let attendus = lire_f32(&donnees().join(format!("reference/fusion_{n}_reel_logits.f32")));
         let obtenus = logits.clone().into_data().try_to_vec::<f32>().unwrap();
         let amplitude = attendus.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-        let ecart = obtenus.iter().zip(&attendus).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+        let ecart = obtenus
+            .iter()
+            .zip(&attendus)
+            .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
 
         let etiquettes = crate::fusion::etiquettes(logits);
-        let reference = std::fs::read(donnees().join(format!("reference/fusion_{n}_reel_labels.u8"))).expect("étiquettes de référence illisibles");
+        let reference = std::fs::read(donnees().join(format!("reference/fusion_{n}_reel_labels.u8")))
+            .expect("étiquettes de référence illisibles");
         assert_eq!(etiquettes.len(), reference.len());
         let identiques = etiquettes.iter().zip(&reference).filter(|(a, b)| a == b).count();
         let accord = identiques as f64 / reference.len() as f64;

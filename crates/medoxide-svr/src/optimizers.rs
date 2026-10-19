@@ -49,16 +49,33 @@ fn restreint(p: &ReconstructionProblem, x0: &Array3<f64>) -> Array3<f64> {
 
 /// **Gradient conjugué**, avec le même comptage de passes que les autres : une passe pour le second membre, une pour l'évaluation du départ,
 /// puis une par itération. `objective[k]` correspond à l'itéré après `k` itérations, soit `k + 2` passes.
-pub fn conjugate_gradient(p: &ReconstructionProblem, x0: &Array3<f64>, max_passes: usize, checkpoints: &[usize]) -> Trace {
+pub fn conjugate_gradient(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    max_passes: usize,
+    checkpoints: &[usize],
+) -> Trace {
     let mut snapshots = Vec::new();
     let max_iterations = max_passes.saturating_sub(2);
-    let r = p.conjugate_gradient_observed(x0, max_iterations, 0.0, |k, x| instantane(&mut snapshots, checkpoints, k + 2, x));
-    Trace { x: r.x, passes: r.iterations + 2, objective: r.objective_history, snapshots }
+    let r = p.conjugate_gradient_observed(x0, max_iterations, 0.0, |k, x| {
+        instantane(&mut snapshots, checkpoints, k + 2, x)
+    });
+    Trace {
+        x: r.x,
+        passes: r.iterations + 2,
+        objective: r.objective_history,
+        snapshots,
+    }
 }
 
 /// **Plus forte pente à pas exact** : `x ← x − α g` avec `α = g·g / g·Hg`, qui minimise `f` le long de `−g` (l'objectif est quadratique).
 /// Le gradient suivant se déduit sans nouvelle passe : `g ← g − α H g`. Une passe de départ, puis une (le produit `H g`) par itération.
-pub fn steepest_descent(p: &ReconstructionProblem, x0: &Array3<f64>, max_passes: usize, checkpoints: &[usize]) -> Trace {
+pub fn steepest_descent(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    max_passes: usize,
+    checkpoints: &[usize],
+) -> Trace {
     let mut x = restreint(p, x0);
     let e = p.evaluate(&x);
     let (mut f, mut g) = (e.value(), e.gradient);
@@ -77,12 +94,22 @@ pub fn steepest_descent(p: &ReconstructionProblem, x0: &Array3<f64>, max_passes:
         objective.push(f);
         instantane(&mut snapshots, checkpoints, passes, &x);
     }
-    Trace { x, objective, snapshots, passes }
+    Trace {
+        x,
+        objective,
+        snapshots,
+        passes,
+    }
 }
 
 /// **Barzilai-Borwein** : `x ← x − α g` avec `α = s·s / s·y` (`s` : dernier pas, `y` : dernière variation du gradient). Une passe par
 /// itération, non monotone. Le premier pas vaut `1 / (support max + 6α/h²)`, une borne sûre de la courbure.
-pub fn barzilai_borwein(p: &ReconstructionProblem, x0: &Array3<f64>, max_passes: usize, checkpoints: &[usize]) -> Trace {
+pub fn barzilai_borwein(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    max_passes: usize,
+    checkpoints: &[usize],
+) -> Trace {
     let mut x = restreint(p, x0);
     let e = p.evaluate(&x);
     let mut objective = vec![e.value()];
@@ -106,12 +133,23 @@ pub fn barzilai_borwein(p: &ReconstructionProblem, x0: &Array3<f64>, max_passes:
         let sy = dot(&s, &y);
         pas = if sy > 0.0 { dot(&s, &s) / sy } else { pas0 };
     }
-    Trace { x, objective, snapshots, passes }
+    Trace {
+        x,
+        objective,
+        snapshots,
+        passes,
+    }
 }
 
 /// **Jacobi préconditionné**, schéma de SVRTK et de NeSVoR : `x ← x − ω D ∘ g` avec `D = 1 / (support + 6α/h²)` : chaque voxel est corrigé par
 /// la moyenne, pondérée, des résidus qui le touchent. Une passe par itération.
-pub fn jacobi(p: &ReconstructionProblem, x0: &Array3<f64>, omega: f64, max_passes: usize, checkpoints: &[usize]) -> Trace {
+pub fn jacobi(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    omega: f64,
+    max_passes: usize,
+    checkpoints: &[usize],
+) -> Trace {
     let mut x = restreint(p, x0);
     let courbure_reg = 6.0 * p.alpha() / p.resolution_mm().powi(2);
     let d = p.support().mapv(|s| 1.0 / (f64::from(s) + courbure_reg));
@@ -130,7 +168,12 @@ pub fn jacobi(p: &ReconstructionProblem, x0: &Array3<f64>, omega: f64, max_passe
             *v -= omega * dd * g;
         }
     }
-    Trace { x, objective, snapshots, passes }
+    Trace {
+        x,
+        objective,
+        snapshots,
+        passes,
+    }
 }
 
 // ------------------------------------------------------------------ optimiseurs de Burn (f32)
@@ -155,9 +198,18 @@ fn vers_tableau(t: Tensor<3>, dims: (usize, usize, usize)) -> Array3<f64> {
 /// **Adam de Burn** (`burn-optim`), `f32` sur `device`, gradient analytique fourni par `p`. `device` doit avoir l'autodiff activé
 /// (`Device::….autodiff()`) : l'optimiseur de Burn l'exige pour ses paramètres, même quand le gradient vient de l'extérieur. Chaque coordonnée avance d'environ `lr` par itération, quelle
 /// que soit l'échelle de son gradient. Une passe par itération.
-pub fn adam(p: &ReconstructionProblem, x0: &Array3<f64>, lr: f64, max_passes: usize, checkpoints: &[usize], device: &Device) -> Trace {
+pub fn adam(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    lr: f64,
+    max_passes: usize,
+    checkpoints: &[usize],
+    device: &Device,
+) -> Trace {
     let dims = x0.dim();
-    let mut module = VolumeModule { x: Param::from_tensor(vers_tenseur(&restreint(p, x0), device)) };
+    let mut module = VolumeModule {
+        x: Param::from_tensor(vers_tenseur(&restreint(p, x0), device)),
+    };
     let mut optimiseur = AdamConfig::new().init();
     let (mut objective, mut snapshots) = (Vec::new(), Vec::new());
     let mut passes = 0;
@@ -175,22 +227,43 @@ pub fn adam(p: &ReconstructionProblem, x0: &Array3<f64>, lr: f64, max_passes: us
         module = optimiseur.step(lr, module, grads);
         x = vers_tableau(module.x.val(), dims);
     }
-    Trace { x, objective, snapshots, passes }
+    Trace {
+        x,
+        objective,
+        snapshots,
+        passes,
+    }
 }
 
 /// **L-BFGS de Burn** (`burn-optim`), `f32` sur `device` (autodiff activé, voir [`adam`]), gradient analytique fourni par `p` : approximation de l'inverse du hessien par les `history`
 /// derniers couples (pas, variation du gradient), avec ou sans recherche linéaire de Wolfe forte. Chaque appel de la fermeture est une passe.
 /// `echelle` divise la valeur et le gradient fournis à Burn (1 : aucun changement).
-pub fn lbfgs(p: &ReconstructionProblem, x0: &Array3<f64>, lr: f64, history: usize, wolfe: bool, echelle: f64, max_passes: usize, checkpoints: &[usize], device: &Device) -> Trace {
+pub fn lbfgs(
+    p: &ReconstructionProblem,
+    x0: &Array3<f64>,
+    lr: f64,
+    history: usize,
+    wolfe: bool,
+    echelle: f64,
+    max_passes: usize,
+    checkpoints: &[usize],
+    device: &Device,
+) -> Trace {
     let dims = x0.dim();
-    let module = VolumeModule { x: Param::from_tensor(vers_tenseur(&restreint(p, x0), device)) };
+    let module = VolumeModule {
+        x: Param::from_tensor(vers_tenseur(&restreint(p, x0), device)),
+    };
     let config = LBFGSConfig::new()
         .with_max_iter(max_passes)
         .with_max_eval(Some(max_passes))
         .with_history_size(history)
         .with_tolerance_grad(0.0)
         .with_tolerance_change(0.0)
-        .with_line_search_fn(if wolfe { LineSearchFn::StrongWolfe } else { LineSearchFn::None });
+        .with_line_search_fn(if wolfe {
+            LineSearchFn::StrongWolfe
+        } else {
+            LineSearchFn::None
+        });
     let mut optimiseur = config.init();
     let (mut objective, mut snapshots) = (Vec::new(), Vec::new());
     let mut passes = 0;
@@ -210,5 +283,10 @@ pub fn lbfgs(p: &ReconstructionProblem, x0: &Array3<f64>, lr: f64, history: usiz
     });
     let x = vers_tableau(module.x.val(), dims);
     let _ = dernier;
-    Trace { x, objective, snapshots, passes }
+    Trace {
+        x,
+        objective,
+        snapshots,
+        passes,
+    }
 }

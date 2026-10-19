@@ -106,12 +106,22 @@ pub fn eroder(masque: &Array3<bool>, iterations: usize) -> Array3<bool> {
 
 /// Passe un masque binaire défini sur la grille de `source` (`affine_source`, mêmes axes que `masque`) dans la grille de `cible` : interpolation linéaire du masque (convention d'interpolation de [`Volume`]), voxel dans le masque si la valeur dépasse 0,5.
 pub fn vers_la_grille(masque: &Array3<bool>, affine_source: &nalgebra::Matrix4<f64>, cible: &Volume) -> Array3<bool> {
-    let source = Volume { donnees: masque.mapv(|m| if m { 1.0 } else { 0.0 }), affine: *affine_source };
-    source.reechantillonner(&cible.affine, cible.dimensions()).donnees.mapv(|v| v > 0.5)
+    let source = Volume {
+        donnees: masque.mapv(|m| if m { 1.0 } else { 0.0 }),
+        affine: *affine_source,
+    };
+    source
+        .reechantillonner(&cible.affine, cible.dimensions())
+        .donnees
+        .mapv(|v| v > 0.5)
 }
 
 /// Masque du cerveau dans la grille de `volume` à partir des étiquettes de l'extraction (`etiquettes` : valeur 1 pour le cerveau, sur une grille d'affine `affine_etiquettes`) : plus grande composante, passage dans la grille de `volume`, dilatation de 4 puis érosion de 2.
-pub fn masque_du_cerveau(etiquettes: &Array3<f32>, affine_etiquettes: &nalgebra::Matrix4<f64>, volume: &Volume) -> Array3<bool> {
+pub fn masque_du_cerveau(
+    etiquettes: &Array3<f32>,
+    affine_etiquettes: &nalgebra::Matrix4<f64>,
+    volume: &Volume,
+) -> Array3<bool> {
     let cerveau = etiquettes.mapv(|e| e == 1.0);
     let composante = plus_grande_composante(&cerveau);
     let dans_la_grille = vers_la_grille(&composante, affine_etiquettes, volume);
@@ -127,7 +137,10 @@ impl Volume {
                 *valeur = 0.0;
             }
         }
-        Volume { donnees, affine: self.affine }
+        Volume {
+            donnees,
+            affine: self.affine,
+        }
     }
 
     /// Boîte englobante (bornes incluses) des voxels vrais d'un masque, ou `None` s'il est vide.
@@ -137,7 +150,10 @@ impl Volume {
             if dedans {
                 boite = Some(match boite {
                     None => ([i, j, k], [i, j, k]),
-                    Some((lo, hi)) => ([lo[0].min(i), lo[1].min(j), lo[2].min(k)], [hi[0].max(i), hi[1].max(j), hi[2].max(k)]),
+                    Some((lo, hi)) => (
+                        [lo[0].min(i), lo[1].min(j), lo[2].min(k)],
+                        [hi[0].max(i), hi[1].max(j), hi[2].max(k)],
+                    ),
                 });
             }
         }
@@ -198,7 +214,11 @@ mod tests {
         for n in 1..=4usize {
             let d = dilater(&m, n);
             let cote = 2 * n + 1;
-            assert_eq!(d.iter().filter(|&&v| v).count(), cote * cote * cote, "cube après {n} itérations");
+            assert_eq!(
+                d.iter().filter(|&&v| v).count(),
+                cote * cote * cote,
+                "cube après {n} itérations"
+            );
             assert!(d[[7 + n, 7 + n, 7 + n]] && d[[7 - n, 7 - n, 7 - n]] && !d[[7 + n + 1, 7, 7]]);
             let retour = eroder(&d, n);
             assert_eq!(retour, m, "l'érosion du cube de {n} itérations ramène le voxel");
@@ -209,8 +229,14 @@ mod tests {
         let d = dilater(&face, 1);
         assert!(d[[0, 3, 3]], "le voxel de face garde sa valeur");
         assert!(!d[[0, 3, 4]] && !d[[0, 2, 2]], "la couche extérieure n'est pas dilatée");
-        assert!(d[[1, 3, 3]] && d[[1, 2, 2]] && d[[1, 4, 4]], "l'intérieur voisin est dilaté");
-        assert!(!d[[1, 5, 5]] && !d[[1, 1, 1]] && !d[[2, 3, 3]], "loin du masque, rien n'est dilaté (la valeur neutre hors image ne doit pas contaminer l'intérieur)");
+        assert!(
+            d[[1, 3, 3]] && d[[1, 2, 2]] && d[[1, 4, 4]],
+            "l'intérieur voisin est dilaté"
+        );
+        assert!(
+            !d[[1, 5, 5]] && !d[[1, 1, 1]] && !d[[2, 3, 3]],
+            "loin du masque, rien n'est dilaté (la valeur neutre hors image ne doit pas contaminer l'intérieur)"
+        );
         // les six faces : un voxel de face du masque garde sa valeur à la dilatation et son voisin de face ne devient pas vrai ; à l'érosion un voxel de face vrai aux voisins faux reste vrai
         for axe in 0..3 {
             for cote in [0usize, 5] {
@@ -223,7 +249,10 @@ mod tests {
                 let mut m = vide(6);
                 m[place(0)] = true;
                 let d = dilater(&m, 1);
-                assert!(d[place(0)] && !d[place(1)], "face (axe {axe}, côté {cote}) : dilatation");
+                assert!(
+                    d[place(0)] && !d[place(1)],
+                    "face (axe {axe}, côté {cote}) : dilatation"
+                );
                 assert!(eroder(&m, 1)[place(0)], "face (axe {axe}, côté {cote}) : érosion");
             }
         }
@@ -240,7 +269,10 @@ mod tests {
     #[test]
     fn the_brain_mask_dilates_by_four_and_erodes_by_two() {
         let affine = Matrix4::<f64>::identity();
-        let volume = Volume { donnees: Array3::<f32>::zeros((24, 24, 24)), affine };
+        let volume = Volume {
+            donnees: Array3::<f32>::zeros((24, 24, 24)),
+            affine,
+        };
         let mut etiquettes = Array3::<f32>::zeros((24, 24, 24));
         etiquettes[[12, 12, 12]] = 1.0;
         etiquettes[[12, 12, 13]] = 1.0; // composante de deux voxels
@@ -254,7 +286,9 @@ mod tests {
     /// Passage dans la grille : un cube plein de 8 voxels de 2 mm devient, dans une grille de 1 mm de même repère, le bloc de 16 voxels de côté qui le recouvre jusqu'à l'interpolation (à l'intérieur toujours vrai, à l'extérieur lointain faux) ; la valeur 0,5 exacte n'est pas dans le masque (seuil strict).
     #[test]
     fn the_mask_is_resampled_by_linear_interpolation_and_a_strict_threshold() {
-        let affine_grossier = Matrix4::new(2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+        let affine_grossier = Matrix4::new(
+            2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        );
         let mut grossier = Array3::from_elem((10, 10, 10), false);
         for x in 3..7 {
             for y in 3..7 {
@@ -263,16 +297,29 @@ mod tests {
                 }
             }
         }
-        let fin = Volume { donnees: Array3::<f32>::zeros((20, 20, 20)), affine: Matrix4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0) };
+        let fin = Volume {
+            donnees: Array3::<f32>::zeros((20, 20, 20)),
+            affine: Matrix4::new(
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ),
+        };
         let m = vers_la_grille(&grossier, &affine_grossier, &fin);
         assert!(m[[10, 10, 10]] && m[[8, 8, 8]], "intérieur");
         assert!(!m[[0, 0, 0]] && !m[[19, 19, 19]] && !m[[2, 10, 10]], "extérieur");
         // sur l'axe x à y = z = 10 : positions fines x -> voxel grossier x/2 ; le masque grossier est vrai pour 3 ≤ i ≤ 6 : valeur interpolée > 0,5 pour x/2 dans ]2,5 ; 6,5[
-        assert!(!m[[5, 10, 10]], "x = 5 → i = 2,5 : valeur 0,5 exactement, hors masque (seuil strict)");
+        assert!(
+            !m[[5, 10, 10]],
+            "x = 5 → i = 2,5 : valeur 0,5 exactement, hors masque (seuil strict)"
+        );
         assert!(m[[6, 10, 10]] && m[[12, 10, 10]], "x = 6 (i = 3) et x = 12 (i = 6)");
         assert!(!m[[13, 10, 10]], "x = 13 (i = 6,5) : valeur 0,5, hors masque");
         // valeurs interpolées de 0,45 et de 0,55 (grille fine de 0,1 mm le long de x, à y = z = 10 mm) : le seuil est 0,5, ni 0,4 ni 0,6
-        let ligne = Volume { donnees: Array3::<f32>::zeros((100, 3, 3)), affine: Matrix4::new(0.1, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 9.0, 0.0, 0.0, 1.0, 9.0, 0.0, 0.0, 0.0, 1.0) };
+        let ligne = Volume {
+            donnees: Array3::<f32>::zeros((100, 3, 3)),
+            affine: Matrix4::new(
+                0.1, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 9.0, 0.0, 0.0, 1.0, 9.0, 0.0, 0.0, 0.0, 1.0,
+            ),
+        };
         let l = vers_la_grille(&grossier, &affine_grossier, &ligne);
         assert!(!l[[49, 1, 1]], "x = 4,9 (i = 2,45) : valeur 0,45, hors masque");
         assert!(l[[51, 1, 1]], "x = 5,1 (i = 2,55) : valeur 0,55, dans le masque");
@@ -281,8 +328,13 @@ mod tests {
     /// Masquage et recadrage : hors du masque, 0 ; dans le masque, valeur d'origine ; le recadrage prend la boîte englobante du masque et décale l'origine de l'affine ; masque vide → erreur.
     #[test]
     fn masking_zeroes_the_outside_and_cropping_follows_the_mask() {
-        let affine = Matrix4::new(0.5, 0.0, 0.0, 10.0, 0.0, 0.5, 0.0, 20.0, 0.0, 0.0, 0.5, 30.0, 0.0, 0.0, 0.0, 1.0);
-        let v = Volume { donnees: Array3::from_shape_fn((8, 9, 10), |(i, j, k)| 1.0 + (i + 10 * j + 100 * k) as f32), affine };
+        let affine = Matrix4::new(
+            0.5, 0.0, 0.0, 10.0, 0.0, 0.5, 0.0, 20.0, 0.0, 0.0, 0.5, 30.0, 0.0, 0.0, 0.0, 1.0,
+        );
+        let v = Volume {
+            donnees: Array3::from_shape_fn((8, 9, 10), |(i, j, k)| 1.0 + (i + 10 * j + 100 * k) as f32),
+            affine,
+        };
         let mut m = Array3::from_elem((8, 9, 10), false);
         for (i, j, k) in [(2, 3, 4), (5, 4, 7), (3, 6, 5)] {
             m[[i, j, k]] = true;
@@ -291,7 +343,11 @@ mod tests {
         assert_eq!(r.dimensions(), [4, 4, 4], "boîte (2..=5, 3..=6, 4..=7)");
         assert_eq!(r.donnees[[0, 0, 0]], v.donnees[[2, 3, 4]]);
         assert_eq!(r.donnees[[3, 1, 3]], v.donnees[[5, 4, 7]]);
-        assert_eq!(r.donnees.iter().filter(|&&x| x != 0.0).count(), 3, "seuls les voxels du masque survivent");
+        assert_eq!(
+            r.donnees.iter().filter(|&&x| x != 0.0).count(),
+            3,
+            "seuls les voxels du masque survivent"
+        );
         let attendu = v.monde(&nalgebra::Vector3::new(2.0, 3.0, 4.0));
         assert!((r.monde(&nalgebra::Vector3::zeros()) - attendu).norm() < 1e-12);
         assert!(v.masquer_et_recadrer(&Array3::from_elem((8, 9, 10), false)).is_err());
@@ -305,12 +361,26 @@ mod tests {
     fn the_mask_cleaning_matches_mirtk() {
         let racine = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti/mirtk");
         for id in ["calme1", "calme2", "calme3"] {
-            let lire = |nom: &str| Volume::lire(&racine.join(id).join(format!("{nom}.nii.gz"))).unwrap_or_else(|e| panic!("{id}/{nom} : {e}"));
+            let lire = |nom: &str| {
+                Volume::lire(&racine.join(id).join(format!("{nom}.nii.gz")))
+                    .unwrap_or_else(|e| panic!("{id}/{nom} : {e}"))
+            };
             let masque_de = |v: &Volume| v.donnees.mapv(|x| x > 0.0);
             let comparer = |nom: &str, mien: &Array3<bool>, mirtk: &Volume, tolerance: f64| {
-                let different = mien.iter().zip(mirtk.donnees.iter()).filter(|(&a, &b)| a != (b > 0.0)).count();
-                println!("MASQUE {id} {nom} : {different} voxels différents sur {} ({} dans le masque)", mien.len(), mien.iter().filter(|&&v| v).count());
-                assert!(different as f64 <= tolerance * mien.len() as f64, "{id} {nom} : {different} voxels différents");
+                let different = mien
+                    .iter()
+                    .zip(mirtk.donnees.iter())
+                    .filter(|(&a, &b)| a != (b > 0.0))
+                    .count();
+                println!(
+                    "MASQUE {id} {nom} : {different} voxels différents sur {} ({} dans le masque)",
+                    mien.len(),
+                    mien.iter().filter(|&&v| v).count()
+                );
+                assert!(
+                    different as f64 <= tolerance * mien.len() as f64,
+                    "{id} {nom} : {different} voxels différents"
+                );
             };
             let s3 = lire("s3_recadre");
             let etiquettes = lire("bet_etiquettes_cube");
@@ -318,8 +388,18 @@ mod tests {
             let bet_s3 = lire("bet_s3");
             let dilate_mirtk = lire("bet_dilate");
             let erode_mirtk = lire("bet_erode");
-            comparer("composante", &plus_grande_composante(&etiquettes.donnees.mapv(|e| e == 1.0)), &composante_mirtk, 0.0);
-            comparer("grille", &vers_la_grille(&masque_de(&composante_mirtk), &composante_mirtk.affine, &s3), &bet_s3, 1e-5);
+            comparer(
+                "composante",
+                &plus_grande_composante(&etiquettes.donnees.mapv(|e| e == 1.0)),
+                &composante_mirtk,
+                0.0,
+            );
+            comparer(
+                "grille",
+                &vers_la_grille(&masque_de(&composante_mirtk), &composante_mirtk.affine, &s3),
+                &bet_s3,
+                1e-5,
+            );
             comparer("dilatation", &dilater(&masque_de(&bet_s3), 4), &dilate_mirtk, 0.0);
             comparer("érosion", &eroder(&masque_de(&dilate_mirtk), 2), &erode_mirtk, 0.0);
             // chaîne complète : critère de la sous-étape
@@ -328,17 +408,41 @@ mod tests {
             // masquage, recadrage, cube : à partir du masque de MIRTK
             let recadre = s3.masquer_et_recadrer(&masque_de(&erode_mirtk)).unwrap();
             let mirtk = lire("masque_recadre");
-            assert_eq!(recadre.dimensions(), mirtk.dimensions(), "{id} masque_recadre : dimensions");
-            assert!((recadre.affine - mirtk.affine).abs().max() < 1e-3, "{id} masque_recadre : affine");
-            let ecart = recadre.donnees.iter().zip(mirtk.donnees.iter()).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
-            println!("MASQUE {id} masque_recadre : dimensions {:?}, écart d'intensité {ecart:.2e}", recadre.dimensions());
+            assert_eq!(
+                recadre.dimensions(),
+                mirtk.dimensions(),
+                "{id} masque_recadre : dimensions"
+            );
+            assert!(
+                (recadre.affine - mirtk.affine).abs().max() < 1e-3,
+                "{id} masque_recadre : affine"
+            );
+            let ecart = recadre
+                .donnees
+                .iter()
+                .zip(mirtk.donnees.iter())
+                .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+            println!(
+                "MASQUE {id} masque_recadre : dimensions {:?}, écart d'intensité {ecart:.2e}",
+                recadre.dimensions()
+            );
             assert!(ecart < 1e-3, "{id} masque_recadre : écart {ecart}");
             let cube = mirtk.cube(256);
             let mirtk_cube = lire("cube256_masque");
-            let (min, max) = mirtk_cube.donnees.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x)));
+            let (min, max) = mirtk_cube
+                .donnees
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x)));
             assert_eq!(cube.dimensions(), mirtk_cube.dimensions());
-            assert!((cube.affine - mirtk_cube.affine).abs().max() < 1e-3, "{id} cube256_masque : affine");
-            let ecart = cube.donnees.iter().zip(mirtk_cube.donnees.iter()).fold(0.0_f32, |m, (a, b)| m.max((a - (b - min) / (max - min)).abs()));
+            assert!(
+                (cube.affine - mirtk_cube.affine).abs().max() < 1e-3,
+                "{id} cube256_masque : affine"
+            );
+            let ecart = cube
+                .donnees
+                .iter()
+                .zip(mirtk_cube.donnees.iter())
+                .fold(0.0_f32, |m, (a, b)| m.max((a - (b - min) / (max - min)).abs()));
             println!("MASQUE {id} cube256_masque : écart d'intensité {ecart:.2e}");
             assert!(ecart < 1e-5, "{id} cube256_masque : écart {ecart}");
         }

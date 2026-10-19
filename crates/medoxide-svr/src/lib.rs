@@ -102,13 +102,25 @@ impl std::fmt::Display for SvrError {
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
             SvrError::Write { path, message } => write!(f, "{} : écriture impossible : {message}", path.display()),
             SvrError::NotEnoughStacks => write!(f, "au moins deux stacks sont nécessaires pour estimer le mouvement"),
-            SvrError::PoseMismatch => write!(f, "le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes)"),
+            SvrError::PoseMismatch => write!(
+                f,
+                "le jeu de poses n'a pas la forme des stacks (nombre de stacks ou de coupes)"
+            ),
             SvrError::InvalidRegularization => write!(f, "poids de régularisation invalide : α >= 0 et fini requis"),
             SvrError::InvalidBlur => write!(f, "écart type de flou invalide : σ >= 0 et fini requis"),
-            SvrError::InvalidScales => write!(f, "facteurs d'intensité par coupe invalides : un facteur fini et > 0 par coupe requis"),
-            SvrError::NoIntersections => write!(f, "aucune paire de coupes de stacks différents ne se croise assez : champ de biais non estimable"),
+            SvrError::InvalidScales => write!(
+                f,
+                "facteurs d'intensité par coupe invalides : un facteur fini et > 0 par coupe requis"
+            ),
+            SvrError::NoIntersections => write!(
+                f,
+                "aucune paire de coupes de stacks différents ne se croise assez : champ de biais non estimable"
+            ),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
-            SvrError::InvalidGrid => write!(f, "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"),
+            SvrError::InvalidGrid => write!(
+                f,
+                "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"
+            ),
             SvrError::InconsistentSpacing { path, pixdim, columns } => write!(
                 f,
                 "{} : pixdim {pixdim:?} incohérent avec les normes de l'affine {columns:?}",
@@ -142,14 +154,23 @@ impl BrainMask {
     /// [`SvrError::Read`] (illisible, non 3D) ; [`SvrError::MaskGridMismatch`] (dimensions ou affine
     /// différentes de celles du stack, ou `sform` absent) ; [`SvrError::EmptyMask`].
     pub fn read(path: &Path, stack: &Stack) -> Result<BrainMask, SvrError> {
-        let lecture = |source| SvrError::Read { path: path.to_path_buf(), source };
+        let lecture = |source| SvrError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
         let info = volume_info(path).map_err(lecture)?;
-        let incompatible = |detail: String| SvrError::MaskGridMismatch { path: path.to_path_buf(), detail };
+        let incompatible = |detail: String| SvrError::MaskGridMismatch {
+            path: path.to_path_buf(),
+            detail,
+        };
 
         let dim: Vec<usize> = info.dim.iter().map(|&d| usize::from(d)).collect();
         let (nx, ny, nz) = stack.dim();
         if dim != [nx, ny, nz] {
-            return Err(incompatible(format!("dimensions {dim:?} au lieu de {:?}", [nx, ny, nz])));
+            return Err(incompatible(format!(
+                "dimensions {dim:?} au lieu de {:?}",
+                [nx, ny, nz]
+            )));
         }
         let lignes = info.affine.ok_or_else(|| incompatible("pas de sform".to_string()))?;
         let ecart = (0..4)
@@ -157,7 +178,9 @@ impl BrainMask {
             .map(|(r, c)| (f64::from(lignes[r][c]) - stack.affine()[(r, c)]).abs())
             .fold(0.0_f64, f64::max);
         if ecart > MASK_AFFINE_TOLERANCE_MM {
-            return Err(incompatible(format!("affine différente de celle du stack (écart {ecart:.2e})")));
+            return Err(incompatible(format!(
+                "affine différente de celle du stack (écart {ecart:.2e})"
+            )));
         }
 
         let brut = read_volume(path).map_err(lecture)?.mapv(|v| v != 0.0);
@@ -169,8 +192,14 @@ impl BrainMask {
         let somme = voxels
             .indexed_iter()
             .filter(|(_, &v)| v)
-            .fold(Vector3::zeros(), |s, ((i, j, k), _)| s + Vector3::new(i as f64, j as f64, k as f64));
-        Ok(BrainMask { voxels, discarded: total - gardes, barycenter: somme / gardes as f64 })
+            .fold(Vector3::zeros(), |s, ((i, j, k), _)| {
+                s + Vector3::new(i as f64, j as f64, k as f64)
+            });
+        Ok(BrainMask {
+            voxels,
+            discarded: total - gardes,
+            barycenter: somme / gardes as f64,
+        })
     }
 
     /// Copie du masque dont les coupes `exclues` (plans `z = k`) sont vidées : aucun de leurs pixels n'est plus dans le masque. Les coupes hors de la grille sont ignorées ; le barycentre et le compte des voxels écartés sont conservés.
@@ -267,10 +296,16 @@ impl Volume {
             return Err(SvrError::InvalidBlur);
         }
         if sigma_voxels == 0.0 {
-            return Ok(Volume { data: self.data.clone(), affine: self.affine, inverse: self.inverse });
+            return Ok(Volume {
+                data: self.data.clone(),
+                affine: self.affine,
+                inverse: self.inverse,
+            });
         }
         let rayon = (3.0 * sigma_voxels).ceil() as isize;
-        let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma_voxels).powi(2)).exp()).collect();
+        let noyau: Vec<f64> = (-rayon..=rayon)
+            .map(|i| (-0.5 * (i as f64 / sigma_voxels).powi(2)).exp())
+            .collect();
         let somme: f64 = noyau.iter().sum();
         let noyau: Vec<f64> = noyau.iter().map(|w| w / somme).collect();
         let mut courant = self.data.mapv(f64::from);
@@ -279,11 +314,19 @@ impl Volume {
                 let n = ligne.len() as isize;
                 let source: Vec<f64> = ligne.iter().copied().collect();
                 for (i, valeur) in ligne.iter_mut().enumerate() {
-                    *valeur = noyau.iter().enumerate().map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize]).sum();
+                    *valeur = noyau
+                        .iter()
+                        .enumerate()
+                        .map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize])
+                        .sum();
                 }
             }
         }
-        Ok(Volume { data: courant.mapv(|v| v as f32), affine: self.affine, inverse: self.inverse })
+        Ok(Volume {
+            data: courant.mapv(|v| v as f32),
+            affine: self.affine,
+            inverse: self.inverse,
+        })
     }
 
     /// Indices de voxel **continus** `(i, j, k)` d'un point du monde (les centres de voxel sont aux entiers).
@@ -341,7 +384,13 @@ impl Volume {
     ///
     /// Les décalages de la PSF sont convertis une fois en indices de voxel (partie linéaire de l'inverse). Avec `masque`, seuls les pixels
     /// du masque sont parcourus (le coût est proportionnel à leur nombre).
-    fn for_each_pixel(&self, coupe: &Slice, psf: &Psf, masque: Option<ArrayView2<bool>>, mut f: impl FnMut(usize, usize, &[([usize; 3], f64)], f64)) {
+    fn for_each_pixel(
+        &self,
+        coupe: &Slice,
+        psf: &Psf,
+        masque: Option<ArrayView2<bool>>,
+        mut f: impl FnMut(usize, usize, &[([usize; 3], f64)], f64),
+    ) {
         let (nx, ny) = coupe.dim();
         let lineaire = self.inverse.fixed_view::<3, 3>(0, 0).into_owned();
         let decalages: Vec<Vector3<f64>> = psf.samples().iter().map(|e| lineaire * e.offset).collect();
@@ -405,7 +454,11 @@ impl Volume {
     /// Si `y` n'a pas la forme de la coupe ou si `accumulateur` n'a pas la forme de la grille (erreur de programmation).
     pub fn back_project(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, accumulateur: &mut Array3<f64>) {
         assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
-        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        assert_eq!(
+            accumulateur.dim(),
+            self.data.dim(),
+            "l'accumulateur doit avoir la forme de la grille"
+        );
         self.for_each_pixel(coupe, psf, None, |i, j, coefs, w| {
             if w > 0.0 {
                 let part = f64::from(y[[i, j]]) / w;
@@ -421,10 +474,21 @@ impl Volume {
     ///
     /// # Panics
     /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si `accumulateur` n'a pas la forme de la grille.
-    pub fn back_project_masked(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, masque: ArrayView2<bool>, accumulateur: &mut Array3<f64>) {
+    pub fn back_project_masked(
+        &self,
+        coupe: &Slice,
+        psf: &Psf,
+        y: ArrayView2<f32>,
+        masque: ArrayView2<bool>,
+        accumulateur: &mut Array3<f64>,
+    ) {
         assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
         assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
-        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        assert_eq!(
+            accumulateur.dim(),
+            self.data.dim(),
+            "l'accumulateur doit avoir la forme de la grille"
+        );
         self.for_each_pixel(coupe, psf, Some(masque), |i, j, coefs, w| {
             if w > 0.0 {
                 let part = f64::from(y[[i, j]]) / w;
@@ -442,9 +506,20 @@ impl Volume {
     ///
     /// # Panics
     /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si `accumulateur` n'a pas la forme de la grille.
-    pub fn normal_pass_masked(&self, coupe: &Slice, psf: &Psf, y: Option<ArrayView2<f32>>, masque: ArrayView2<bool>, accumulateur: &mut Array3<f64>) -> f64 {
+    pub fn normal_pass_masked(
+        &self,
+        coupe: &Slice,
+        psf: &Psf,
+        y: Option<ArrayView2<f32>>,
+        masque: ArrayView2<bool>,
+        accumulateur: &mut Array3<f64>,
+    ) -> f64 {
         assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
-        assert_eq!(accumulateur.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        assert_eq!(
+            accumulateur.dim(),
+            self.data.dim(),
+            "l'accumulateur doit avoir la forme de la grille"
+        );
         if let Some(y) = &y {
             assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
         }
@@ -473,11 +548,27 @@ impl Volume {
     ///
     /// # Panics
     /// Si `y` ou `masque` n'a pas la forme de la coupe, ou si un accumulateur n'a pas la forme de la grille.
-    pub fn back_project_with_weight(&self, coupe: &Slice, psf: &Psf, y: ArrayView2<f32>, masque: ArrayView2<bool>, accumulateur_y: &mut Array3<f64>, accumulateur_poids: &mut Array3<f64>) {
+    pub fn back_project_with_weight(
+        &self,
+        coupe: &Slice,
+        psf: &Psf,
+        y: ArrayView2<f32>,
+        masque: ArrayView2<bool>,
+        accumulateur_y: &mut Array3<f64>,
+        accumulateur_poids: &mut Array3<f64>,
+    ) {
         assert_eq!(y.dim(), coupe.dim(), "y doit avoir la forme de la coupe");
         assert_eq!(masque.dim(), coupe.dim(), "le masque doit avoir la forme de la coupe");
-        assert_eq!(accumulateur_y.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
-        assert_eq!(accumulateur_poids.dim(), self.data.dim(), "l'accumulateur doit avoir la forme de la grille");
+        assert_eq!(
+            accumulateur_y.dim(),
+            self.data.dim(),
+            "l'accumulateur doit avoir la forme de la grille"
+        );
+        assert_eq!(
+            accumulateur_poids.dim(),
+            self.data.dim(),
+            "l'accumulateur doit avoir la forme de la grille"
+        );
         self.for_each_pixel(coupe, psf, Some(masque), |i, j, coefs, w| {
             if w > 0.0 {
                 let (part_y, part_1) = (f64::from(y[[i, j]]) / w, 1.0 / w);
@@ -551,7 +642,8 @@ impl Psf {
     /// Construction avec pas et rayon de troncature (en écarts types) explicites ; sert aux tests de sensibilité.
     fn sampled(sigma: [f64; 3], axes: [Vector3<f64>; 3], step: f64, cutoff: f64) -> Result<Psf, SvrError> {
         // `!(s > 0.0)` est vrai aussi pour NaN.
-        if sigma.iter().any(|s| !(*s > 0.0) || !s.is_finite()) || axes.iter().any(|a| !a.iter().all(|c| c.is_finite())) {
+        if sigma.iter().any(|s| !(*s > 0.0) || !s.is_finite()) || axes.iter().any(|a| !a.iter().all(|c| c.is_finite()))
+        {
             return Err(SvrError::InvalidPsf);
         }
         // Indices entiers -n..=n sur chaque axe de la coupe ; décalage = indice · pas · σ le long de l'axe.
@@ -565,7 +657,10 @@ impl Psf {
                         continue; // troncature sphérique
                     }
                     let offset = axes[0] * (z.x * sigma[0]) + axes[1] * (z.y * sigma[1]) + axes[2] * (z.z * sigma[2]);
-                    samples.push(PsfSample { offset, weight: (-0.5 * z.norm_squared()).exp() });
+                    samples.push(PsfSample {
+                        offset,
+                        weight: (-0.5 * z.norm_squared()).exp(),
+                    });
                 }
             }
         }
@@ -584,7 +679,11 @@ impl Psf {
     /// Covariance de la gaussienne **continue** dans le monde : `L · diag(σ²) · Lᵀ` (mm²).
     pub fn covariance(&self) -> Matrix3<f64> {
         let l = Matrix3::from_columns(&self.axes);
-        l * Matrix3::from_diagonal(&Vector3::new(self.sigma[0].powi(2), self.sigma[1].powi(2), self.sigma[2].powi(2))) * l.transpose()
+        l * Matrix3::from_diagonal(&Vector3::new(
+            self.sigma[0].powi(2),
+            self.sigma[1].powi(2),
+            self.sigma[2].powi(2),
+        )) * l.transpose()
     }
 
     /// Échantillons (décalage monde, poids), de poids total 1.
@@ -671,7 +770,10 @@ pub struct StackGroups {
 pub fn group_stacks(stacks: &[Stack], max_gap_mm: f64) -> Result<StackGroups, SvrError> {
     let barycentres: Vec<Vector3<f64>> = stacks
         .iter()
-        .map(|s| s.brain_barycenter_world().ok_or_else(|| SvrError::NoMask(s.path().to_path_buf())))
+        .map(|s| {
+            s.brain_barycenter_world()
+                .ok_or_else(|| SvrError::NoMask(s.path().to_path_buf()))
+        })
         .collect::<Result<_, _>>()?;
     let n = barycentres.len();
     let distances: Vec<Vec<f64>> = (0..n)
@@ -721,7 +823,10 @@ impl BoundingBox {
     /// Plus petite boîte contenant `self` et `autre`.
     pub fn union(&self, autre: &BoundingBox) -> BoundingBox {
         // `inf` / `sup` : minimum / maximum composante par composante.
-        BoundingBox { min: self.min.inf(&autre.min), max: self.max.sup(&autre.max) }
+        BoundingBox {
+            min: self.min.inf(&autre.min),
+            max: self.max.sup(&autre.max),
+        }
     }
 
     /// Dimensions de la boîte (mm), selon x, y, z.
@@ -767,7 +872,10 @@ impl Stack {
     /// [`SvrError::InconsistentSpacing`].
     pub fn read(path: &Path) -> Result<Stack, SvrError> {
         // `map_err` rattache le chemin à l'erreur du core : sur un ensemble de stacks, on sait lequel échoue.
-        let lecture = |source| SvrError::Read { path: path.to_path_buf(), source };
+        let lecture = |source| SvrError::Read {
+            path: path.to_path_buf(),
+            source,
+        };
         let info = volume_info(path).map_err(lecture)?;
         let lignes = info.affine.ok_or_else(|| SvrError::NoSform(path.to_path_buf()))?;
         // `f64::from` : conversion exacte du `f32` de l'en-tête.
@@ -788,7 +896,10 @@ impl Stack {
             cosinus_max = cosinus_max.max(cosinus);
         }
         if cosinus_max > COSINE_MAX {
-            return Err(SvrError::ShearedAffine { path: path.to_path_buf(), cosine: cosinus_max });
+            return Err(SvrError::ShearedAffine {
+                path: path.to_path_buf(),
+                cosine: cosinus_max,
+            });
         }
 
         let pixdim = [
@@ -805,7 +916,13 @@ impl Stack {
         }
 
         let data = read_volume(path).map_err(lecture)?;
-        Ok(Stack { path: path.to_path_buf(), data, affine, spacing: normes, mask: None })
+        Ok(Stack {
+            path: path.to_path_buf(),
+            data,
+            affine,
+            spacing: normes,
+            mask: None,
+        })
     }
 
     /// Chemin du fichier lu.
@@ -879,7 +996,10 @@ impl Stack {
         }
         let mut copie = self.clone();
         for (k, &s) in scales.iter().enumerate() {
-            copie.data.index_axis_mut(Axis(2), k).mapv_inplace(|v| (f64::from(v) / s) as f32);
+            copie
+                .data
+                .index_axis_mut(Axis(2), k)
+                .mapv_inplace(|v| (f64::from(v) / s) as f32);
         }
         Ok(copie)
     }
@@ -911,12 +1031,20 @@ impl Stack {
     ///
     /// La coupe **emprunte** ce stack : le `'_` de `Slice<'_>` dit qu'elle ne peut pas lui survivre.
     pub fn slice(&self, k: usize) -> Option<Slice<'_>> {
-        (k < self.data.dim().2).then_some(Slice { stack: self, k, motion: Matrix4::identity() })
+        (k < self.data.dim().2).then_some(Slice {
+            stack: self,
+            k,
+            motion: Matrix4::identity(),
+        })
     }
 
     /// Toutes les coupes, dans l'ordre des `k` croissants.
     pub fn slices(&self) -> impl Iterator<Item = Slice<'_>> {
-        (0..self.data.dim().2).map(move |k| Slice { stack: self, k, motion: Matrix4::identity() })
+        (0..self.data.dim().2).map(move |k| Slice {
+            stack: self,
+            k,
+            motion: Matrix4::identity(),
+        })
     }
 }
 
@@ -1045,8 +1173,8 @@ impl<'a> Slice<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array3, Array4};
     use nalgebra::Rotation3;
+    use ndarray::{Array3, Array4};
     use nifti::{writer::WriterOptions, NiftiHeader};
 
     fn racine() -> String {
@@ -1084,7 +1212,10 @@ mod tests {
 
     fn ecrire_3d(chemin: &Path, h: &NiftiHeader) {
         let data = Array3::<f32>::from_elem((4, 3, 2), 1.0);
-        WriterOptions::new(chemin).reference_header(h).write_nifti(&data).unwrap();
+        WriterOptions::new(chemin)
+            .reference_header(h)
+            .write_nifti(&data)
+            .unwrap();
     }
 
     const DIAG: [[f32; 4]; 3] = [[1.0, 0.0, 0.0, 10.0], [0.0, 2.0, 0.0, 20.0], [0.0, 0.0, 3.0, 30.0]];
@@ -1163,11 +1294,17 @@ mod tests {
             .unwrap();
         assert!(matches!(
             Stack::read(&f),
-            Err(SvrError::Read { source: CoreError::NotVolume3D(_), .. })
+            Err(SvrError::Read {
+                source: CoreError::NotVolume3D(_),
+                ..
+            })
         ));
         assert!(matches!(
             Stack::read(&t.fichier("absent.nii.gz")),
-            Err(SvrError::Read { source: CoreError::Nifti(_), .. })
+            Err(SvrError::Read {
+                source: CoreError::Nifti(_),
+                ..
+            })
         ));
     }
 
@@ -1176,9 +1313,30 @@ mod tests {
     #[test]
     fn reads_fetal_bet_volumes_with_nibabel_affines() {
         let attendu: [(&str, [[f64; 4]; 3]); 3] = [
-            ("fetus_03", [[-1.1719, 0.0, 0.0, 155.1199], [0.0, -1.0771, 0.7879, 58.3842], [0.0, 0.4617, 1.8383, -254.6115]]),
-            ("fetus_06", [[-0.8439, -0.147, -0.8127, 141.5291], [0.4083, -0.3038, -1.6797, -19.843], [0.0, -0.8747, 0.7199, -69.1684]]),
-            ("fetus_12", [[-0.5306, -0.4462, 1.8271, 96.2711], [-0.866, 0.2733, -1.1193, 46.4229], [0.0, -0.8705, -1.288, -12.331]]),
+            (
+                "fetus_03",
+                [
+                    [-1.1719, 0.0, 0.0, 155.1199],
+                    [0.0, -1.0771, 0.7879, 58.3842],
+                    [0.0, 0.4617, 1.8383, -254.6115],
+                ],
+            ),
+            (
+                "fetus_06",
+                [
+                    [-0.8439, -0.147, -0.8127, 141.5291],
+                    [0.4083, -0.3038, -1.6797, -19.843],
+                    [0.0, -0.8747, 0.7199, -69.1684],
+                ],
+            ),
+            (
+                "fetus_12",
+                [
+                    [-0.5306, -0.4462, 1.8271, 96.2711],
+                    [-0.866, 0.2733, -1.1193, 46.4229],
+                    [0.0, -0.8705, -1.288, -12.331],
+                ],
+            ),
         ];
         for (nom, voulu) in attendu {
             let s = Stack::read(Path::new(&format!("{}/data/sourcedata/{nom}.nii.gz", racine()))).unwrap();
@@ -1187,7 +1345,10 @@ mod tests {
                     assert!((s.affine()[(r, c)] - voulu[r][c]).abs() < 1e-3, "{nom} ({r},{c})");
                 }
             }
-            assert_eq!(s.affine().row(3).iter().copied().collect::<Vec<_>>(), vec![0.0, 0.0, 0.0, 1.0]);
+            assert_eq!(
+                s.affine().row(3).iter().copied().collect::<Vec<_>>(),
+                vec![0.0, 0.0, 0.0, 1.0]
+            );
         }
     }
 
@@ -1208,8 +1369,14 @@ mod tests {
     #[test]
     fn reads_all_development_stacks_even_left_handed() {
         let mut fichiers = Vec::new();
-        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
-        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        trouver(
+            &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
+            "_T2w.nii.gz",
+            &mut fichiers,
+        );
+        fichiers.retain(|f| {
+            !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/")
+        });
         assert_eq!(fichiers.len(), 96, "jeu de développement incomplet");
         let mut gauches = 0;
         for f in &fichiers {
@@ -1217,7 +1384,10 @@ mod tests {
             gauches += usize::from(s.affine().fixed_view::<3, 3>(0, 0).determinant() < 0.0);
             assert_eq!(s.dim().2, s.data().dim().2);
         }
-        assert_eq!(gauches, 96, "tous les stacks du jeu sont censés être à déterminant négatif");
+        assert_eq!(
+            gauches, 96,
+            "tous les stacks du jeu sont censés être à déterminant négatif"
+        );
     }
 
     // ------------------------------------------------------------------ étape 1b : coupes
@@ -1272,9 +1442,14 @@ mod tests {
             .map(|l| {
                 let (stack, reference) = l.split_once('\t').unwrap();
                 let octets = std::fs::read(format!("{racine}/{reference}")).unwrap();
-                let valeurs: Vec<f64> =
-                    octets.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
-                let lignes = valeurs.chunks_exact(9).map(|r| <[f64; 9]>::try_from(r).unwrap()).collect();
+                let valeurs: Vec<f64> = octets
+                    .chunks_exact(8)
+                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                let lignes = valeurs
+                    .chunks_exact(9)
+                    .map(|r| <[f64; 9]>::try_from(r).unwrap())
+                    .collect();
                 (PathBuf::from(format!("{racine}/{stack}")), lignes)
             })
             .collect()
@@ -1332,7 +1507,10 @@ mod tests {
                 assert!((n.norm() - 1.0).abs() < 1e-12 && (u.norm() - 1.0).abs() < 1e-12);
                 assert!(n.cross(&col3).norm() < 1e-9, "normale non colinéaire à la 3e colonne");
                 assert!(n.dot(&col3) > 0.0, "normale à l'envers");
-                assert!(n.dot(&u).abs() < 1e-6 && n.dot(&v).abs() < 1e-6, "normale non orthogonale au plan");
+                assert!(
+                    n.dot(&u).abs() < 1e-6 && n.dot(&v).abs() < 1e-6,
+                    "normale non orthogonale au plan"
+                );
                 // pas dans le plan = espacement (norme des colonnes) ≈ pixdim de l'en-tête (1e-4 mm)
                 let pas_i = (c.pixel_to_world(1.0, 0.0) - c.pixel_to_world(0.0, 0.0)).norm();
                 let pas_j = (c.pixel_to_world(0.0, 1.0) - c.pixel_to_world(0.0, 0.0)).norm();
@@ -1344,7 +1522,10 @@ mod tests {
                 let ecart = paire[1].geometric_center() - paire[0].geometric_center();
                 let n = paire[0].normal();
                 assert!((ecart.dot(&n) - pixdim[2]).abs() < 1e-4, "pas entre coupes");
-                assert!((ecart - n * ecart.dot(&n)).norm() < 1e-4, "décalage latéral entre coupes");
+                assert!(
+                    (ecart - n * ecart.dot(&n)).norm() < 1e-4,
+                    "décalage latéral entre coupes"
+                );
             }
         }
         println!("invariants vérifiés sur {n_coupes} coupes de {} stacks", refs.len());
@@ -1420,18 +1601,36 @@ mod tests {
     #[test]
     fn reads_each_development_subject_as_a_set() {
         let mut fichiers = Vec::new();
-        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
-        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        trouver(
+            &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
+            "_T2w.nii.gz",
+            &mut fichiers,
+        );
+        fichiers.retain(|f| {
+            !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/")
+        });
         let mut par_sujet: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
         for f in fichiers {
-            let sujet = f.strip_prefix(Path::new(&racine()).join("data/svr/jeu_reel_tru_haste")).unwrap().components().next().unwrap().as_os_str().to_string_lossy().into_owned();
+            let sujet = f
+                .strip_prefix(Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"))
+                .unwrap()
+                .components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned();
             par_sujet.entry(sujet).or_default().push(f);
         }
         assert_eq!(par_sujet.len(), 15);
         for (sujet, chemins) in &par_sujet {
             let stacks = read_stacks(chemins).unwrap_or_else(|e| panic!("{sujet} : {e}"));
             assert_eq!(stacks.len(), chemins.len());
-            let tout = stacks.iter().map(|s| s.world_bounding_box()).reduce(|a, b| a.union(&b)).unwrap();
+            let tout = stacks
+                .iter()
+                .map(|s| s.world_bounding_box())
+                .reduce(|a, b| a.union(&b))
+                .unwrap();
             for s in &stacks {
                 let b = s.world_bounding_box();
                 assert!(b.min >= tout.min && b.max <= tout.max, "{sujet}");
@@ -1446,12 +1645,18 @@ mod tests {
     fn stack_et_masque(t: &Temp, voxels: &[[usize; 3]], masque_header: Option<NiftiHeader>) -> (PathBuf, PathBuf) {
         let h = en_tete(DIAG, [1.0, 2.0, 3.0], 1);
         let (f, m) = (t.fichier("stack.nii.gz"), t.fichier("masque.nii.gz"));
-        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0)).unwrap();
+        WriterOptions::new(&f)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0))
+            .unwrap();
         let mut masque = Array3::<u8>::zeros((6, 5, 3));
         for v in voxels {
             masque[*v] = 1;
         }
-        WriterOptions::new(&m).reference_header(&masque_header.unwrap_or(h)).write_nifti(&masque).unwrap();
+        WriterOptions::new(&m)
+            .reference_header(&masque_header.unwrap_or(h))
+            .write_nifti(&masque)
+            .unwrap();
         (f, m)
     }
 
@@ -1460,7 +1665,13 @@ mod tests {
         let t = Temp::new("masque_composantes");
         // bloc 2×2×2 en (1..3, 1..3, 0..2), un voxel qui ne le touche que par un COIN (3,3,2), un îlot (5,4,2)
         let mut voxels = Vec::new();
-        for i in 1..3 { for j in 1..3 { for k in 0..2 { voxels.push([i, j, k]); } } }
+        for i in 1..3 {
+            for j in 1..3 {
+                for k in 0..2 {
+                    voxels.push([i, j, k]);
+                }
+            }
+        }
         voxels.push([3, 3, 2]);
         voxels.push([5, 4, 2]);
         let (f, m) = stack_et_masque(&t, &voxels, None);
@@ -1468,12 +1679,19 @@ mod tests {
         assert!(s.brain_mask().is_none());
         s.set_brain_mask(&m).unwrap();
         let masque = s.brain_mask().unwrap();
-        assert_eq!(masque.voxel_count(), 9, "bloc de 8 + voxel en contact par un coin (26 voisins)");
+        assert_eq!(
+            masque.voxel_count(),
+            9,
+            "bloc de 8 + voxel en contact par un coin (26 voisins)"
+        );
         assert_eq!(masque.discarded_count(), 1, "l'îlot est écarté");
         assert!(!masque.voxels()[[5, 4, 2]] && masque.voxels()[[3, 3, 2]]);
         // barycentre : i = (8 × 1,5 + 3) / 9, j idem, k = (8 × 0,5 + 2) / 9
         let b = masque.barycenter_index();
-        assert!((b - Vector3::new(15.0 / 9.0, 15.0 / 9.0, 6.0 / 9.0)).norm() < 1e-12, "{b:?}");
+        assert!(
+            (b - Vector3::new(15.0 / 9.0, 15.0 / 9.0, 6.0 / 9.0)).norm() < 1e-12,
+            "{b:?}"
+        );
     }
 
     #[test]
@@ -1481,10 +1699,16 @@ mod tests {
         let t = Temp::new("pivot");
         let (f, m) = stack_et_masque(&t, &[[1, 1, 0], [2, 1, 0], [1, 2, 1], [2, 2, 1]], None);
         let mut s = Stack::read(&f).unwrap();
-        assert!(s.slice(0).unwrap().brain_pivot().is_none(), "sans masque : pas de pivot, pas de repli silencieux");
+        assert!(
+            s.slice(0).unwrap().brain_pivot().is_none(),
+            "sans masque : pas de pivot, pas de repli silencieux"
+        );
         s.set_brain_mask(&m).unwrap();
         // barycentre en indices : (1,5 ; 1,5 ; 0,5). Affine DIAG : pas (1, 2, 3), origine (10, 20, 30).
-        let (p0, p1) = (s.slice(0).unwrap().brain_pivot().unwrap(), s.slice(1).unwrap().brain_pivot().unwrap());
+        let (p0, p1) = (
+            s.slice(0).unwrap().brain_pivot().unwrap(),
+            s.slice(1).unwrap().brain_pivot().unwrap(),
+        );
         assert!((p0 - Vector3::new(11.5, 23.0, 30.0)).norm() < 1e-12, "{p0:?}");
         assert!((p1 - Vector3::new(11.5, 23.0, 33.0)).norm() < 1e-12, "{p1:?}");
         // mêmes (x, y) pour toutes les coupes, décalage d'une coupe = 3e colonne de l'affine
@@ -1511,13 +1735,19 @@ mod tests {
         let m3 = t.fichier("petit.nii.gz");
         ecrire_3d(&m3, &en_tete(DIAG, [1.0, 2.0, 3.0], 1));
         let e = s.set_brain_mask(&m3).unwrap_err();
-        assert!(matches!(&e, SvrError::MaskGridMismatch { detail, .. } if detail.contains("dimensions")), "{e}");
+        assert!(
+            matches!(&e, SvrError::MaskGridMismatch { detail, .. } if detail.contains("dimensions")),
+            "{e}"
+        );
         // sform absent
         let m4 = t.fichier("sans_sform.nii.gz");
         ecrire_3d(&m4, &en_tete(DIAG, [1.0, 2.0, 3.0], 0));
         assert!(s.set_brain_mask(&m4).is_err());
         // fichier absent
-        assert!(matches!(s.set_brain_mask(&t.fichier("absent.nii.gz")), Err(SvrError::Read { .. })));
+        assert!(matches!(
+            s.set_brain_mask(&t.fichier("absent.nii.gz")),
+            Err(SvrError::Read { .. })
+        ));
         assert!(s.brain_mask().is_none());
     }
 
@@ -1540,7 +1770,8 @@ mod tests {
             let xyz = [c[2].parse().unwrap(), c[3].parse().unwrap(), c[4].parse().unwrap()];
             pivots.insert((c[0].clone(), c[1].parse().unwrap()), xyz);
         }
-        let (mut pire_b, mut pire_p, mut n_ecartes, mut n_pivots, mut n_stacks) = (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
+        let (mut pire_b, mut pire_p, mut n_ecartes, mut n_pivots, mut n_stacks) =
+            (0.0_f64, 0.0_f64, 0usize, 0usize, 0usize);
         let masques = lire_tsv("data/reference/pivots/masques.tsv");
         assert_eq!(masques.len(), 96);
         for c in masques.iter().step_by(pas) {
@@ -1585,11 +1816,20 @@ mod tests {
     fn stack_masque_en(t: &Temp, nom: &str, origine_x: f32) -> Stack {
         let mut h = en_tete(DIAG, [1.0, 2.0, 3.0], 1);
         h.srow_x[3] = origine_x;
-        let (f, m) = (t.fichier(&format!("{nom}.nii.gz")), t.fichier(&format!("{nom}_masque.nii.gz")));
-        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0)).unwrap();
+        let (f, m) = (
+            t.fichier(&format!("{nom}.nii.gz")),
+            t.fichier(&format!("{nom}_masque.nii.gz")),
+        );
+        WriterOptions::new(&f)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::from_elem((6, 5, 3), 1.0))
+            .unwrap();
         let mut masque = Array3::<u8>::zeros((6, 5, 3));
         masque[[1, 1, 1]] = 1;
-        WriterOptions::new(&m).reference_header(&h).write_nifti(&masque).unwrap();
+        WriterOptions::new(&m)
+            .reference_header(&h)
+            .write_nifti(&masque)
+            .unwrap();
         let mut s = Stack::read(&f).unwrap();
         s.set_brain_mask(&m).unwrap();
         s
@@ -1601,9 +1841,17 @@ mod tests {
         // x = 100, 0, 105, 10, 20 : {0, 10, 20} se chaînent (0-10, 10-20) bien que 0 et 20 soient à 20 mm ;
         // {100, 105} forment un autre groupe ; 0 et 20 > 15 mm, donc sans chaînage ils seraient séparés.
         let xs = [100.0_f32, 0.0, 105.0, 10.0, 20.0];
-        let stacks: Vec<Stack> = xs.iter().enumerate().map(|(i, &x)| stack_masque_en(&t, &format!("s{i}"), x)).collect();
+        let stacks: Vec<Stack> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| stack_masque_en(&t, &format!("s{i}"), x))
+            .collect();
         let g = group_stacks(&stacks, 15.0).unwrap();
-        assert_eq!(g.groups, vec![vec![1, 3, 4], vec![0, 2]], "plus grand groupe d'abord, indices croissants");
+        assert_eq!(
+            g.groups,
+            vec![vec![1, 3, 4], vec![0, 2]],
+            "plus grand groupe d'abord, indices croissants"
+        );
         // matrice de distances : symétrique, diagonale nulle, valeurs attendues
         assert_eq!(g.distances.len(), 5);
         for i in 0..5 {
@@ -1638,15 +1886,23 @@ mod tests {
     /// (`scripts/make_reference_groups.py`), sans nommer aucun sujet : `selection` choisit lesquels.
     fn verifier_groupes(mut selection: impl FnMut(usize, &str, usize) -> bool) {
         let racine = racine();
-        let masques: std::collections::HashMap<String, String> =
-            lire_tsv("data/reference/pivots/masques.tsv").into_iter().map(|c| (c[0].clone(), c[1].clone())).collect();
+        let masques: std::collections::HashMap<String, String> = lire_tsv("data/reference/pivots/masques.tsv")
+            .into_iter()
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
         let mut attendu: std::collections::BTreeMap<String, Vec<(usize, String, usize)>> = Default::default();
         for c in lire_tsv("data/reference/groups/groups.tsv") {
-            attendu.entry(c[0].clone()).or_default().push((c[1].parse().unwrap(), c[2].clone(), c[3].parse().unwrap()));
+            attendu
+                .entry(c[0].clone())
+                .or_default()
+                .push((c[1].parse().unwrap(), c[2].clone(), c[3].parse().unwrap()));
         }
         let mut dist: std::collections::HashMap<(String, usize, usize), f64> = Default::default();
         for c in lire_tsv("data/reference/groups/distances.tsv") {
-            dist.insert((c[0].clone(), c[1].parse().unwrap(), c[2].parse().unwrap()), c[3].parse().unwrap());
+            dist.insert(
+                (c[0].clone(), c[1].parse().unwrap(), c[2].parse().unwrap()),
+                c[3].parse().unwrap(),
+            );
         }
         // Le fichier liste les stacks groupe par groupe : on les remet dans l'ordre des indices avant de les charger.
         for items in attendu.values_mut() {
@@ -1662,7 +1918,8 @@ mod tests {
             let mut stacks = Vec::new();
             for (_, chemin, _) in items {
                 let mut s = Stack::read(Path::new(&format!("{racine}/{chemin}"))).unwrap();
-                s.set_brain_mask(Path::new(&format!("{racine}/{}", masques[chemin]))).unwrap();
+                s.set_brain_mask(Path::new(&format!("{racine}/{}", masques[chemin])))
+                    .unwrap();
                 stacks.push(s);
             }
             let g = group_stacks(&stacks, DEFAULT_GROUP_GAP_MM).unwrap();
@@ -1737,10 +1994,21 @@ mod tests {
         let v = volume_lineaire();
         assert!(v.affine().fixed_view::<3, 3>(0, 0).determinant() < 0.0);
         // points d'indices continus quelconques, convertis en monde par l'affine
-        for &(i, j, k) in &[(0.0, 0.0, 0.0), (3.0, 2.0, 4.0), (1.5, 0.25, 3.75), (2.9, 1.1, 0.3), (0.01, 1.99, 3.99)] {
+        for &(i, j, k) in &[
+            (0.0, 0.0, 0.0),
+            (3.0, 2.0, 4.0),
+            (1.5, 0.25, 3.75),
+            (2.9, 1.1, 0.3),
+            (0.01, 1.99, 3.99),
+        ] {
             let monde = (v.affine() * Vector4::new(i, j, k, 1.0)).xyz();
-            let valeur = v.sample(&monde).unwrap_or_else(|| panic!("({i}, {j}, {k}) devrait être dans la grille"));
-            assert!((f64::from(valeur) - lineaire(i, j, k)).abs() < 1e-5, "({i}, {j}, {k}) : {valeur}");
+            let valeur = v
+                .sample(&monde)
+                .unwrap_or_else(|| panic!("({i}, {j}, {k}) devrait être dans la grille"));
+            assert!(
+                (f64::from(valeur) - lineaire(i, j, k)).abs() < 1e-5,
+                "({i}, {j}, {k}) : {valeur}"
+            );
         }
         // aux centres de voxel, la valeur est celle du voxel
         let monde = (v.affine() * Vector4::new(2.0, 1.0, 3.0, 1.0)).xyz();
@@ -1754,11 +2022,23 @@ mod tests {
     fn sampling_outside_the_grid_is_none() {
         let v = volume_lineaire();
         let en = |i: f64, j: f64, k: f64| (v.affine() * Vector4::new(i, j, k, 1.0)).xyz();
-        assert!(v.sample(&en(3.0, 2.0, 4.0)).is_some(), "le dernier voxel est dedans (bord inclus)");
-        assert!(v.sample(&en(3.0 + 1e-6, 2.0, 4.0)).is_none(), "juste au-delà du dernier centre de voxel : dehors");
+        assert!(
+            v.sample(&en(3.0, 2.0, 4.0)).is_some(),
+            "le dernier voxel est dedans (bord inclus)"
+        );
+        assert!(
+            v.sample(&en(3.0 + 1e-6, 2.0, 4.0)).is_none(),
+            "juste au-delà du dernier centre de voxel : dehors"
+        );
         assert!(v.sample(&en(-1e-6, 0.0, 0.0)).is_none());
-        assert!(v.sample(&en(0.0, 0.0, -0.5)).is_none(), "un demi-voxel avant le premier centre : dehors");
-        assert!(v.sample(&Vector3::new(f64::NAN, 0.0, 0.0)).is_none(), "NaN : dehors, sans panique");
+        assert!(
+            v.sample(&en(0.0, 0.0, -0.5)).is_none(),
+            "un demi-voxel avant le premier centre : dehors"
+        );
+        assert!(
+            v.sample(&Vector3::new(f64::NAN, 0.0, 0.0)).is_none(),
+            "NaN : dehors, sans panique"
+        );
         assert!(v.sample(&Vector3::new(1e12, 0.0, 0.0)).is_none());
     }
 
@@ -1767,7 +2047,10 @@ mod tests {
         let data = Array3::<f32>::zeros((2, 2, 2));
         let mut a = Matrix4::<f64>::identity();
         a[(1, 1)] = 0.0; // une colonne nulle : non inversible
-        assert!(matches!(Volume::new(data.clone(), a), Err(SvrError::SingularVolumeAffine)));
+        assert!(matches!(
+            Volume::new(data.clone(), a),
+            Err(SvrError::SingularVolumeAffine)
+        ));
         let mut b = Matrix4::<f64>::identity();
         b[(0, 3)] = f64::NAN;
         assert!(matches!(Volume::new(data, b), Err(SvrError::SingularVolumeAffine)));
@@ -1802,7 +2085,10 @@ mod tests {
             let ks: Vec<usize> = c[2].split(',').map(|k| k.parse().unwrap()).collect();
             let pas: usize = c[3].parse().unwrap();
             let octets = std::fs::read(format!("{racine}/{}", c[4])).unwrap();
-            let ref_vals: Vec<f32> = octets.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            let ref_vals: Vec<f32> = octets
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
             let contraste = {
                 let d = volume.data();
                 f64::from(d.iter().cloned().fold(f32::MIN, f32::max) - d.iter().cloned().fold(f32::MAX, f32::min))
@@ -1813,7 +2099,8 @@ mod tests {
                 let coupe = coupes.slice(k).unwrap();
                 for i in (0..nx).step_by(pas) {
                     for j in (0..ny).step_by(pas) {
-                        let (dedans_ref, v_scipy, v_itk) = (ref_vals[3 * n] > 0.5, ref_vals[3 * n + 1], ref_vals[3 * n + 2]);
+                        let (dedans_ref, v_scipy, v_itk) =
+                            (ref_vals[3 * n] > 0.5, ref_vals[3 * n + 1], ref_vals[3 * n + 2]);
                         n += 1;
                         let monde = coupe.pixel_to_world(i as f64, j as f64);
                         match volume.sample(&monde) {
@@ -1837,7 +2124,10 @@ mod tests {
         }
         println!("{n_dedans} points comparés ; incohérences de domaine {n_incoherents} ; écart relatif max : scipy {pire_scipy:.2e}, SimpleITK {pire_itk:.2e}");
         assert!(n_dedans > 50_000, "trop peu de points comparés : {n_dedans}");
-        assert_eq!(n_incoherents, 0, "le domaine « dans la grille » diffère de la référence");
+        assert_eq!(
+            n_incoherents, 0,
+            "le domaine « dans la grille » diffère de la référence"
+        );
         assert!(pire_scipy < 1e-5, "scipy : {pire_scipy:.2e}");
         assert!(pire_itk < 1e-3, "SimpleITK : {pire_itk:.2e}");
     }
@@ -1855,10 +2145,22 @@ mod tests {
         let psf = s.slice(0).unwrap().psf();
         let attendu = [1.2 / FWHM_PER_SIGMA, 2.4 / FWHM_PER_SIGMA, 3.0 / FWHM_PER_SIGMA];
         for a in 0..3 {
-            assert!((psf.sigma()[a] - attendu[a]).abs() < 1e-12, "σ[{a}] = {}", psf.sigma()[a]);
+            assert!(
+                (psf.sigma()[a] - attendu[a]).abs() < 1e-12,
+                "σ[{a}] = {}",
+                psf.sigma()[a]
+            );
         }
         let cov = psf.covariance();
-        assert!((cov - Matrix3::from_diagonal(&Vector3::new(attendu[0].powi(2), attendu[1].powi(2), attendu[2].powi(2)))).norm() < 1e-12);
+        assert!(
+            (cov - Matrix3::from_diagonal(&Vector3::new(
+                attendu[0].powi(2),
+                attendu[1].powi(2),
+                attendu[2].powi(2)
+            )))
+            .norm()
+                < 1e-12
+        );
     }
 
     #[test]
@@ -1868,14 +2170,21 @@ mod tests {
         let psf = s.slice(0).unwrap().psf();
         let somme: f64 = psf.samples().iter().map(|e| e.weight).sum();
         let moyenne: Vector3<f64> = psf.samples().iter().map(|e| e.offset * e.weight).sum();
-        let cov: Matrix3<f64> = psf.samples().iter().map(|e| e.offset * e.offset.transpose() * e.weight).sum();
+        let cov: Matrix3<f64> = psf
+            .samples()
+            .iter()
+            .map(|e| e.offset * e.offset.transpose() * e.weight)
+            .sum();
         println!("{} échantillons ; somme {somme:.15} ; |moyenne| {:.1e} ; covariance échantillons / continue (diagonale) : {:.4?}",
             psf.samples().len(), moyenne.norm(), [0, 1, 2].map(|a| cov[(a, a)] / psf.covariance()[(a, a)]));
         assert!((somme - 1.0).abs() < 1e-12);
         assert!(moyenne.norm() < 1e-12, "la grille est symétrique : moyenne nulle");
         for a in 0..3 {
             let rapport = cov[(a, a)] / psf.covariance()[(a, a)];
-            assert!((rapport - 1.0).abs() < 0.02, "variance de l'axe {a} : rapport {rapport}");
+            assert!(
+                (rapport - 1.0).abs() < 0.02,
+                "variance de l'axe {a} : rapport {rapport}"
+            );
         }
     }
 
@@ -1883,7 +2192,10 @@ mod tests {
     fn psf_rejects_invalid_parameters() {
         let axes = [Vector3::x(), Vector3::y(), Vector3::z()];
         for mauvais in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(matches!(Psf::new([1.0, mauvais, 1.0], axes), Err(SvrError::InvalidPsf)), "σ = {mauvais}");
+            assert!(
+                matches!(Psf::new([1.0, mauvais, 1.0], axes), Err(SvrError::InvalidPsf)),
+                "σ = {mauvais}"
+            );
         }
         let axe_nan = [Vector3::x(), Vector3::new(f64::NAN, 0.0, 0.0), Vector3::z()];
         assert!(matches!(Psf::new([1.0, 1.0, 1.0], axe_nan), Err(SvrError::InvalidPsf)));
@@ -1911,19 +2223,27 @@ mod tests {
     /// Cas de la référence analytique : une coupe d'orientation donnée, un volume gaussien anisotrope et tourné.
     /// Rend l'écart maximal entre la somme pondérée des échantillons et la valeur exacte de la convolution
     /// `√(|Σ_b| / |Σ_b + Σ_psf|) · exp(−½ (p−c)ᵀ (Σ_b + Σ_psf)⁻¹ (p−c))`, rapporté au maximum de cette valeur.
-    fn ecart_analytique(nom: &str, rot: Rotation3<f64>, taille: [f64; 3], psf_de_reference: Option<Matrix3<f64>>) -> f64 {
+    fn ecart_analytique(
+        nom: &str,
+        rot: Rotation3<f64>,
+        taille: [f64; 3],
+        psf_de_reference: Option<Matrix3<f64>>,
+    ) -> f64 {
         let t = Temp::new(nom);
         let echelle = taille;
-        let s = stack_synthetique(&t, lignes_pivotees(&rot, echelle, [5.0, -7.0, 3.0]), [
-            taille[0].abs() as f32,
-            taille[1] as f32,
-            taille[2] as f32,
-        ]);
+        let s = stack_synthetique(
+            &t,
+            lignes_pivotees(&rot, echelle, [5.0, -7.0, 3.0]),
+            [taille[0].abs() as f32, taille[1] as f32, taille[2] as f32],
+        );
         let coupe = s.slice(1).unwrap();
         let psf = coupe.psf();
         let rb = Rotation3::from_euler_angles(0.9, 0.2, -0.5);
-        let sigma_b = rb.matrix() * Matrix3::from_diagonal(&Vector3::new(1.5_f64.powi(2), 2.5_f64.powi(2), 1.0)) * rb.matrix().transpose();
-        let sigma_psf = psf_de_reference.unwrap_or_else(|| covariance_attendue(&rot, [taille[0].abs(), taille[1], taille[2]]));
+        let sigma_b = rb.matrix()
+            * Matrix3::from_diagonal(&Vector3::new(1.5_f64.powi(2), 2.5_f64.powi(2), 1.0))
+            * rb.matrix().transpose();
+        let sigma_psf =
+            psf_de_reference.unwrap_or_else(|| covariance_attendue(&rot, [taille[0].abs(), taille[1], taille[2]]));
         let somme = sigma_b + sigma_psf;
         let somme_inverse = somme.try_inverse().unwrap();
         let b_inverse = sigma_b.try_inverse().unwrap();
@@ -1936,7 +2256,11 @@ mod tests {
             for j in [-2.0, 0.0, 1.5, 3.0] {
                 let p = coupe.pixel_to_world(i, j);
                 let attendu = echelle_conv * gaussienne(&p, &c, &somme_inverse);
-                let obtenu: f64 = psf.samples().iter().map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse)).sum();
+                let obtenu: f64 = psf
+                    .samples()
+                    .iter()
+                    .map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse))
+                    .sum();
                 max_attendu = max_attendu.max(attendu);
                 pire = pire.max((obtenu - attendu).abs());
             }
@@ -1949,9 +2273,17 @@ mod tests {
         vec![
             ("axiale", Rotation3::identity(), [0.8, 1.2, 3.5]),
             ("coronale", Rotation3::from_euler_angles(pi2, 0.0, 0.0), [0.8, 1.2, 3.5]),
-            ("sagittale", Rotation3::from_euler_angles(0.0, pi2, 0.0), [0.8, 1.2, 3.5]),
+            (
+                "sagittale",
+                Rotation3::from_euler_angles(0.0, pi2, 0.0),
+                [0.8, 1.2, 3.5],
+            ),
             ("oblique", Rotation3::from_euler_angles(0.4, -0.3, 0.7), [0.8, 1.2, 3.5]),
-            ("oblique_gauche", Rotation3::from_euler_angles(0.4, -0.3, 0.7), [-0.8, 1.2, 3.5]),
+            (
+                "oblique_gauche",
+                Rotation3::from_euler_angles(0.4, -0.3, 0.7),
+                [-0.8, 1.2, 3.5],
+            ),
         ]
     }
 
@@ -1964,7 +2296,11 @@ mod tests {
         }
         // le cas « gauche » l'est bien
         let t = Temp::new("psf_gauche_det");
-        let lignes = lignes_pivotees(&Rotation3::from_euler_angles(0.4, -0.3, 0.7), [-0.8, 1.2, 3.5], [0.0; 3]);
+        let lignes = lignes_pivotees(
+            &Rotation3::from_euler_angles(0.4, -0.3, 0.7),
+            [-0.8, 1.2, 3.5],
+            [0.0; 3],
+        );
         let s = stack_synthetique(&t, lignes, [0.8, 1.2, 3.5]);
         assert!(s.affine().fixed_view::<3, 3>(0, 0).determinant() < 0.0);
     }
@@ -1977,7 +2313,8 @@ mod tests {
         let sigma = Vector3::new(1.2 * taille[0], 1.2 * taille[1], taille[2]) / FWHM_PER_SIGMA;
         // σ le long de la mauvaise colonne : u ↔ normale
         let faux_sigma = Vector3::new(sigma.z, sigma.y, sigma.x);
-        let faux = rot.matrix() * Matrix3::from_diagonal(&faux_sigma.component_mul(&faux_sigma)) * rot.matrix().transpose();
+        let faux =
+            rot.matrix() * Matrix3::from_diagonal(&faux_sigma.component_mul(&faux_sigma)) * rot.matrix().transpose();
         let e = ecart_analytique("psf_faux", rot, taille, Some(faux));
         println!("covariance fausse : écart {e:.2e}");
         assert!(e > 5e-2, "le test ne distingue pas une orientation fausse : {e:.2e}");
@@ -2002,7 +2339,10 @@ mod tests {
                 .iter()
                 .map(|[i, j]| {
                     let p = coupe.pixel_to_world(*i, *j);
-                    psf.samples().iter().map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse)).sum()
+                    psf.samples()
+                        .iter()
+                        .map(|e| e.weight * gaussienne(&(p + e.offset), &c, &b_inverse))
+                        .sum()
                 })
                 .collect()
         };
@@ -2010,11 +2350,27 @@ mod tests {
         let maximum = reference.iter().cloned().fold(0.0, f64::max);
         for (pas, coupure) in [(1.0, 3.0), (0.5, 3.0), (1.0, 4.0), (1.0, 2.0), (1.5, 3.0)] {
             let psf = Psf::sampled(defaut.sigma(), axes, pas, coupure).unwrap();
-            let ecart = mesure(&psf).iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / maximum;
-            println!("pas {pas} σ, coupure {coupure} σ : {} échantillons, écart à la PSF fine {ecart:.2e}", psf.samples().len());
+            let ecart = mesure(&psf)
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max)
+                / maximum;
+            println!(
+                "pas {pas} σ, coupure {coupure} σ : {} échantillons, écart à la PSF fine {ecart:.2e}",
+                psf.samples().len()
+            );
         }
-        let ecart_defaut = mesure(&defaut).iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / maximum;
-        assert!(ecart_defaut < 5e-3, "pas et troncature par défaut : écart {ecart_defaut:.2e}");
+        let ecart_defaut = mesure(&defaut)
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max)
+            / maximum;
+        assert!(
+            ecart_defaut < 5e-3,
+            "pas et troncature par défaut : écart {ecart_defaut:.2e}"
+        );
     }
 
     /// Sur les 96 stacks réels (affines obliques, déterminant négatif) : σ attendus, et variance le long de la
@@ -2022,8 +2378,14 @@ mod tests {
     #[test]
     fn psf_of_all_development_stacks_follows_slice_axes() {
         let mut fichiers = Vec::new();
-        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
-        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        trouver(
+            &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
+            "_T2w.nii.gz",
+            &mut fichiers,
+        );
+        fichiers.retain(|f| {
+            !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/")
+        });
         assert_eq!(fichiers.len(), 96, "jeu de développement incomplet");
         let (mut s_plan, mut s_hors) = ((f64::MAX, 0.0_f64), (f64::MAX, 0.0_f64));
         for f in &fichiers {
@@ -2038,13 +2400,21 @@ mod tests {
             let cov = psf.covariance();
             for (axe, sigma) in [(n, psf.sigma()[2]), (u, psf.sigma()[0]), (v, psf.sigma()[1])] {
                 let variance = (axe.transpose() * cov * axe)[(0, 0)];
-                assert!((variance / sigma.powi(2) - 1.0).abs() < 1e-5, "{} : variance {variance} contre σ² {}", f.display(), sigma.powi(2));
+                assert!(
+                    (variance / sigma.powi(2) - 1.0).abs() < 1e-5,
+                    "{} : variance {variance} contre σ² {}",
+                    f.display(),
+                    sigma.powi(2)
+                );
             }
             assert!(cov.determinant() > 0.0);
             s_plan = (s_plan.0.min(psf.sigma()[0]), s_plan.1.max(psf.sigma()[0]));
             s_hors = (s_hors.0.min(psf.sigma()[2]), s_hors.1.max(psf.sigma()[2]));
         }
-        println!("96 stacks : σ dans le plan {:.3} à {:.3} mm ; σ hors plan {:.3} à {:.3} mm", s_plan.0, s_plan.1, s_hors.0, s_hors.1);
+        println!(
+            "96 stacks : σ dans le plan {:.3} à {:.3} mm ; σ hors plan {:.3} à {:.3} mm",
+            s_plan.0, s_plan.1, s_hors.0, s_hors.1
+        );
     }
     // ------------------------------------------------------------------ étape 2c : opérateur d'acquisition
 
@@ -2063,7 +2433,10 @@ mod tests {
     fn stack_de_dim(t: &Temp, dim: (usize, usize, usize), lignes: [[f32; 4]; 3], pixdim: [f32; 3]) -> Stack {
         let f = t.fichier("grand.nii.gz");
         let h = en_tete(lignes, pixdim, 1);
-        WriterOptions::new(&f).reference_header(&h).write_nifti(&Array3::<f32>::from_elem(dim, 1.0)).unwrap();
+        WriterOptions::new(&f)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::from_elem(dim, 1.0))
+            .unwrap();
         Stack::read(&f).unwrap()
     }
 
@@ -2102,7 +2475,11 @@ mod tests {
         let av = affine_pivotee(&rv, ev, origine_centree(&rv, ev, [10.5, 9.5, 8.5], [0.0; 3]));
         let volume = Volume::new(data, av).unwrap();
         let rs = Rotation3::from_euler_angles(-0.4, 0.5, 0.1);
-        let lignes = lignes_pivotees(&rs, [1.0, 1.0, 3.0], origine_centree(&rs, [1.0, 1.0, 3.0], [6.5, 5.5, 1.0], [13.0, 7.0, -3.0]));
+        let lignes = lignes_pivotees(
+            &rs,
+            [1.0, 1.0, 3.0],
+            origine_centree(&rs, [1.0, 1.0, 3.0], [6.5, 5.5, 1.0], [13.0, 7.0, -3.0]),
+        );
         (volume, stack_de_dim(t, (14, 12, 3), lignes, [1.0, 1.0, 3.0]))
     }
 
@@ -2132,13 +2509,22 @@ mod tests {
             let y = Array2::from_shape_fn(coupe.dim(), |_| alea.suivant());
             let mut aty = Array3::<f64>::zeros(volume.dim());
             volume.back_project(&coupe, &psf, y.view(), &mut aty);
-            let gauche = produit_scalaire(&ax.values.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(), &y.iter().map(|&v| f64::from(v)).collect::<Vec<_>>());
-            let droite = produit_scalaire(&x.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(), aty.as_slice().unwrap());
+            let gauche = produit_scalaire(
+                &ax.values.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(),
+                &y.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(),
+            );
+            let droite = produit_scalaire(
+                &x.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(),
+                aty.as_slice().unwrap(),
+            );
             let relatif = (gauche - droite).abs() / gauche.abs().max(droite.abs());
             println!("coupe {k} (pixels nul/partiel/plein {nul}/{partiel}/{plein}) : <Ax,y> = {gauche:.6}, <x,Aty> = {droite:.6}, écart relatif {relatif:.1e}");
             assert!(relatif < 1e-5, "coupe {k} : {relatif:.2e}");
         }
-        assert!(total.0 > 0 && total.1 > 0 && total.2 > 0, "les 3 coupes doivent couvrir les trois situations : {total:?}");
+        assert!(
+            total.0 > 0 && total.1 > 0 && total.2 > 0,
+            "les 3 coupes doivent couvrir les trois situations : {total:?}"
+        );
     }
 
     /// Critère 3 : partition de l'unité. Un volume constant donne une coupe constante partout où la couverture est
@@ -2202,7 +2588,9 @@ mod tests {
         let (rv, ev) = (Rotation3::from_euler_angles(0.2, 0.1, -0.3), [-0.5, 0.5, 0.5]);
         let av = affine_pivotee(&rv, ev, origine_centree(&rv, ev, [29.5; 3], [0.0; 3]));
         let rb = Rotation3::from_euler_angles(0.9, 0.2, -0.5);
-        let sigma_b = rb.matrix() * Matrix3::from_diagonal(&Vector3::new(2.0_f64.powi(2), 3.0_f64.powi(2), 2.5_f64.powi(2))) * rb.matrix().transpose();
+        let sigma_b = rb.matrix()
+            * Matrix3::from_diagonal(&Vector3::new(2.0_f64.powi(2), 3.0_f64.powi(2), 2.5_f64.powi(2)))
+            * rb.matrix().transpose();
         let b_inverse = sigma_b.try_inverse().unwrap();
         let c = Vector3::new(0.5, -0.3, 0.8);
         let mut data = Array3::<f32>::zeros((60, 60, 60));
@@ -2212,7 +2600,11 @@ mod tests {
         }
         let volume = Volume::new(data, av).unwrap();
         let rs = Rotation3::from_euler_angles(0.6, -0.4, 0.8);
-        let lignes = lignes_pivotees(&rs, [1.0, 1.0, 3.0], origine_centree(&rs, [1.0, 1.0, 3.0], [5.5, 5.5, 1.0], [0.5, 0.0, 0.0]));
+        let lignes = lignes_pivotees(
+            &rs,
+            [1.0, 1.0, 3.0],
+            origine_centree(&rs, [1.0, 1.0, 3.0], [5.5, 5.5, 1.0], [0.5, 0.0, 0.0]),
+        );
         let stack = stack_de_dim(&t, (12, 12, 2), lignes, [1.0, 1.0, 3.0]);
         let coupe = stack.slice(1).unwrap();
         let psf = coupe.psf();
@@ -2222,7 +2614,10 @@ mod tests {
         let echelle = (sigma_b.determinant() / somme.determinant()).sqrt();
         let (mut maxi, mut pire) = (0.0_f64, 0.0_f64);
         for ((i, j), v) in sim.values.indexed_iter() {
-            assert!(sim.coverage[[i, j]] >= 1.0 - 1e-9, "la coupe doit être entièrement dans le volume");
+            assert!(
+                sim.coverage[[i, j]] >= 1.0 - 1e-9,
+                "la coupe doit être entièrement dans le volume"
+            );
             let attendu = echelle * gaussienne(&coupe.pixel_to_world(i as f64, j as f64), &c, &somme_inverse);
             maxi = maxi.max(attendu);
             pire = pire.max((f64::from(*v) - attendu).abs());
@@ -2235,13 +2630,26 @@ mod tests {
     fn slice_outside_the_volume_has_zero_coverage() {
         let t = Temp::new("op_dehors");
         let (volume, _) = volume_et_stack_chevauchants(&t, |_, _, _| 1.0);
-        let loin = stack_de_dim(&t, (6, 6, 2), [[1.0, 0.0, 0.0, 1000.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]], [1.0, 1.0, 3.0]);
+        let loin = stack_de_dim(
+            &t,
+            (6, 6, 2),
+            [[1.0, 0.0, 0.0, 1000.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 3.0, 0.0]],
+            [1.0, 1.0, 3.0],
+        );
         let coupe = loin.slice(0).unwrap();
         let sim = volume.simulate_slice(&coupe, &coupe.psf());
         assert!(sim.coverage.iter().all(|&c| c == 0.0) && sim.values.iter().all(|&v| v == 0.0));
         let mut acc = Array3::<f64>::zeros(volume.dim());
-        volume.back_project(&coupe, &coupe.psf(), Array2::from_elem(coupe.dim(), 5.0).view(), &mut acc);
-        assert!(acc.iter().all(|&v| v == 0.0), "une coupe hors du volume ne projette rien");
+        volume.back_project(
+            &coupe,
+            &coupe.psf(),
+            Array2::from_elem(coupe.dim(), 5.0).view(),
+            &mut acc,
+        );
+        assert!(
+            acc.iter().all(|&v| v == 0.0),
+            "une coupe hors du volume ne projette rien"
+        );
     }
 
     /// Coût et couverture sur des stacks réels (données locales) : un stack sert de volume, une coupe d'un autre
@@ -2250,8 +2658,14 @@ mod tests {
     #[ignore = "mesure de temps sur données locales"]
     fn operator_cost_on_real_stacks() {
         let mut fichiers = Vec::new();
-        trouver(&Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"), "_T2w.nii.gz", &mut fichiers);
-        fichiers.retain(|f| !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/"));
+        trouver(
+            &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
+            "_T2w.nii.gz",
+            &mut fichiers,
+        );
+        fichiers.retain(|f| {
+            !f.to_string_lossy().contains("/derivatives/") && !f.to_string_lossy().contains("/sourcedata/")
+        });
         fichiers.sort();
         let volume = Volume::from_stack(&Stack::read(&fichiers[0]).unwrap());
         let stack = Stack::read(&fichiers[1]).unwrap();
@@ -2302,9 +2716,13 @@ mod tests {
             let volume = Volume::from_stack(&Stack::read(Path::new(&format!("{racine}/{}", c[0]))).unwrap());
             let stack = Stack::read(Path::new(&format!("{racine}/{}", c[1]))).unwrap();
             let ks: Vec<usize> = c[2].split(',').map(|k| k.parse().unwrap()).collect();
-            let (i0, j0, bloc): (usize, usize, usize) = (c[3].parse().unwrap(), c[4].parse().unwrap(), c[5].parse().unwrap());
+            let (i0, j0, bloc): (usize, usize, usize) =
+                (c[3].parse().unwrap(), c[4].parse().unwrap(), c[5].parse().unwrap());
             let octets = std::fs::read(format!("{racine}/{}", c[6])).unwrap();
-            let ref_vals: Vec<f32> = octets.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+            let ref_vals: Vec<f32> = octets
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
             assert_eq!(ref_vals.len(), ks.len() * 2 * bloc * bloc);
             let sp = stack.spacing();
             for (n, &k) in ks.iter().enumerate() {
@@ -2319,7 +2737,10 @@ mod tests {
                     Psf::new([1e-3, 1e-3, 1e-3], axes).unwrap(),
                 ];
                 let base = n * 2 * bloc * bloc;
-                let (vals_ref, poids_ref) = (&ref_vals[base..base + bloc * bloc], &ref_vals[base + bloc * bloc..base + 2 * bloc * bloc]);
+                let (vals_ref, poids_ref) = (
+                    &ref_vals[base..base + bloc * bloc],
+                    &ref_vals[base + bloc * bloc..base + 2 * bloc * bloc],
+                );
                 for (m, psf) in psfs.iter().enumerate() {
                     let sim = volume.simulate_slice(&coupe, psf);
                     let (mut a, mut b) = (Vec::new(), Vec::new());
@@ -2343,7 +2764,10 @@ mod tests {
                 }
             }
         }
-        println!("{} coupes comparées, {pixels} pixels (variante nesvor)", par_variante[0].len());
+        println!(
+            "{} coupes comparées, {pixels} pixels (variante nesvor)",
+            par_variante[0].len()
+        );
         for m in 0..4 {
             let mut c = par_variante[m].clone();
             c.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -2461,14 +2885,22 @@ mod tests {
             // le stack de référence : une coupe, d'affine = affine de la coupe avec mouvement
             let chemin = t.fichier("deplace.nii.gz");
             let h = en_tete(lignes_depuis(&posee.affine()), [sx.abs() as f32, 1.5, 2.5], 1);
-            WriterOptions::new(&chemin).reference_header(&h).write_nifti(&Array3::<f32>::from_elem((4, 3, 1), 1.0)).unwrap();
+            WriterOptions::new(&chemin)
+                .reference_header(&h)
+                .write_nifti(&Array3::<f32>::from_elem((4, 3, 1), 1.0))
+                .unwrap();
             let deplace = Stack::read(&chemin).unwrap();
             let ref_c = deplace.slice(0).unwrap();
             for (i, j) in [(0.0, 0.0), (3.0, 2.0), (1.5, 0.5)] {
-                assert!((posee.pixel_to_world(i, j) - ref_c.pixel_to_world(i, j)).norm() < 1e-4, "sx = {sx}");
+                assert!(
+                    (posee.pixel_to_world(i, j) - ref_c.pixel_to_world(i, j)).norm() < 1e-4,
+                    "sx = {sx}"
+                );
             }
             let ([u, v], [ur, vr]) = (posee.in_plane_axes(), ref_c.in_plane_axes());
-            assert!((u - ur).norm() < 1e-6 && (v - vr).norm() < 1e-6 && (posee.normal() - ref_c.normal()).norm() < 1e-6);
+            assert!(
+                (u - ur).norm() < 1e-6 && (v - vr).norm() < 1e-6 && (posee.normal() - ref_c.normal()).norm() < 1e-6
+            );
             assert!((posee.psf().covariance() - ref_c.psf().covariance()).norm() < 1e-5);
             // simulation d'un volume : mêmes valeurs
             let mut graine = 12345u64;
@@ -2483,8 +2915,16 @@ mod tests {
             a[(1, 3)] = -18.0;
             a[(2, 3)] = 0.0;
             let volume = Volume::new(data, a).unwrap();
-            let (sim_posee, sim_ref) = (volume.simulate_slice(&posee, &posee.psf()), volume.simulate_slice(&ref_c, &ref_c.psf()));
-            let pire = sim_posee.values.iter().zip(sim_ref.values.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            let (sim_posee, sim_ref) = (
+                volume.simulate_slice(&posee, &posee.psf()),
+                volume.simulate_slice(&ref_c, &ref_c.psf()),
+            );
+            let pire = sim_posee
+                .values
+                .iter()
+                .zip(sim_ref.values.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
             let couvert = sim_ref.coverage.iter().filter(|&&c| c > 0.0).count();
             println!("sx = {sx} : {couvert} pixels couverts sur 12 ; écart max des valeurs simulées {pire:.1e}");
             assert!(couvert >= 6, "le cas de test doit couvrir des pixels : {couvert}");
@@ -2502,13 +2942,21 @@ mod tests {
             etat ^= etat << 17;
             (etat % 10_000) as f32 / 100.0
         });
-        Volume::new(data, Matrix4::new(0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0)).unwrap()
+        Volume::new(
+            data,
+            Matrix4::new(
+                0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0,
+            ),
+        )
+        .unwrap()
     }
 
     /// Noyau gaussien 1D normalisé de rayon ⌈3σ⌉, écrit indépendamment du code de production (formule explicite).
     fn noyau_gaussien(sigma: f64) -> Vec<f64> {
         let rayon = (3.0 * sigma).ceil() as i32;
-        let w: Vec<f64> = (-rayon..=rayon).map(|i| (-(i as f64).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
+        let w: Vec<f64> = (-rayon..=rayon)
+            .map(|i| (-(i as f64).powi(2) / (2.0 * sigma * sigma)).exp())
+            .collect();
         let somme: f64 = w.iter().sum();
         w.iter().map(|v| v / somme).collect()
     }
@@ -2520,7 +2968,9 @@ mod tests {
         let (n, c) = (25usize, 12usize);
         let mut data = Array3::<f32>::zeros((n, n, n));
         data[[c, c, c]] = 1.0;
-        let affine = Matrix4::new(0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0);
+        let affine = Matrix4::new(
+            0.8, 0.0, 0.0, -3.0, 0.0, -0.8, 0.0, 5.0, 0.0, 0.0, 1.2, 2.0, 0.0, 0.0, 0.0, 1.0,
+        );
         let volume = Volume::new(data, affine).unwrap();
         for sigma in [0.7, 1.5, 2.0] {
             let flou = volume.blurred(sigma).unwrap();
@@ -2528,8 +2978,19 @@ mod tests {
             let r = (k.len() / 2) as isize;
             let mut ecart_max = 0.0_f64;
             for ((i, j, l), &v) in flou.data().indexed_iter() {
-                let (di, dj, dl) = (i as isize - c as isize + r, j as isize - c as isize + r, l as isize - c as isize + r);
-                let attendu = if (0..k.len() as isize).contains(&di) && (0..k.len() as isize).contains(&dj) && (0..k.len() as isize).contains(&dl) { k[di as usize] * k[dj as usize] * k[dl as usize] } else { 0.0 };
+                let (di, dj, dl) = (
+                    i as isize - c as isize + r,
+                    j as isize - c as isize + r,
+                    l as isize - c as isize + r,
+                );
+                let attendu = if (0..k.len() as isize).contains(&di)
+                    && (0..k.len() as isize).contains(&dj)
+                    && (0..k.len() as isize).contains(&dl)
+                {
+                    k[di as usize] * k[dj as usize] * k[dl as usize]
+                } else {
+                    0.0
+                };
                 ecart_max = ecart_max.max((f64::from(v) - attendu).abs());
             }
             let total: f64 = flou.data().iter().map(|&v| f64::from(v)).sum();
@@ -2545,7 +3006,12 @@ mod tests {
     #[test]
     fn blurring_matches_a_direct_3d_convolution_and_keeps_constants() {
         let constant = Volume::new(Array3::from_elem((9, 8, 7), 3.5_f32), Matrix4::identity()).unwrap();
-        assert!(constant.blurred(1.3).unwrap().data().iter().all(|&v| (v - 3.5).abs() < 1e-5));
+        assert!(constant
+            .blurred(1.3)
+            .unwrap()
+            .data()
+            .iter()
+            .all(|&v| (v - 3.5).abs() < 1e-5));
         let volume = volume_aleatoire((11, 9, 8), 0x9E3779B97F4A7C15);
         let sigma = 1.2;
         let flou = volume.blurred(sigma).unwrap();
@@ -2571,7 +3037,10 @@ mod tests {
         }
         assert!(pire < 1e-4, "écart à la convolution directe : {pire:e}");
         for mauvais in [-1.0, f64::NAN, f64::INFINITY] {
-            assert!(matches!(volume.blurred(mauvais), Err(SvrError::InvalidBlur)), "{mauvais}");
+            assert!(
+                matches!(volume.blurred(mauvais), Err(SvrError::InvalidBlur)),
+                "{mauvais}"
+            );
         }
     }
 
@@ -2595,8 +3064,14 @@ mod tests {
             h.pixdim = [1.0, 0.9, 0.9, 3.0, 1.0, 1.0, 1.0, 1.0];
             h
         };
-        WriterOptions::new(&chemin).reference_header(&h).write_nifti(&data).unwrap();
-        WriterOptions::new(&chemin_masque).reference_header(&h).write_nifti(&masque).unwrap();
+        WriterOptions::new(&chemin)
+            .reference_header(&h)
+            .write_nifti(&data)
+            .unwrap();
+        WriterOptions::new(&chemin_masque)
+            .reference_header(&h)
+            .write_nifti(&masque)
+            .unwrap();
         let mut stack = Stack::read(&chemin).unwrap();
         stack.set_brain_mask(&chemin_masque).unwrap();
         let echelles = [0.5, 1.0, 2.0, 1.25];
@@ -2607,11 +3082,28 @@ mod tests {
         }
         assert_eq!(corrige.affine(), stack.affine());
         assert_eq!(corrige.spacing(), stack.spacing());
-        assert_eq!(corrige.brain_mask().unwrap().voxels(), stack.brain_mask().unwrap().voxels());
-        assert_eq!(stack.data()[[1, 1, 0]], data[[1, 1, 0]], "le stack d'origine doit rester inchangé");
+        assert_eq!(
+            corrige.brain_mask().unwrap().voxels(),
+            stack.brain_mask().unwrap().voxels()
+        );
+        assert_eq!(
+            stack.data()[[1, 1, 0]],
+            data[[1, 1, 0]],
+            "le stack d'origine doit rester inchangé"
+        );
         assert_eq!(stack.divided_by_slice_scales(&[1.0; 4]).unwrap().data(), stack.data());
-        for mauvais in [vec![1.0; 3], vec![1.0; 5], vec![1.0, 0.0, 1.0, 1.0], vec![1.0, -1.0, 1.0, 1.0], vec![1.0, f64::NAN, 1.0, 1.0], vec![1.0, f64::INFINITY, 1.0, 1.0]] {
-            assert!(matches!(stack.divided_by_slice_scales(&mauvais), Err(SvrError::InvalidScales)), "{mauvais:?}");
+        for mauvais in [
+            vec![1.0; 3],
+            vec![1.0; 5],
+            vec![1.0, 0.0, 1.0, 1.0],
+            vec![1.0, -1.0, 1.0, 1.0],
+            vec![1.0, f64::NAN, 1.0, 1.0],
+            vec![1.0, f64::INFINITY, 1.0, 1.0],
+        ] {
+            assert!(
+                matches!(stack.divided_by_slice_scales(&mauvais), Err(SvrError::InvalidScales)),
+                "{mauvais:?}"
+            );
         }
         std::fs::remove_dir_all(&dossier).ok();
     }

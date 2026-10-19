@@ -9,9 +9,9 @@ use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
 use ndarray::{Array2, ArrayView2};
 
-use crate::diff::{apply_pose, ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
 use crate::diff::pose_to_matrix;
+use crate::diff::{apply_pose, ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::recon::SlicePoses;
 use crate::{Stack, SvrError};
 
@@ -46,7 +46,11 @@ pub fn bilinear_sample(image: &Tensor<1>, dims: [usize; 2], coords: Tensor<2>) -
     for a in 0..2 {
         let c = coords.clone().narrow(1, a, 1).reshape([p]);
         let max = (dims[a] - 1) as f64;
-        inside = inside * c.clone().greater_equal_elem(0.0).bool_and(c.clone().lower_equal_elem(max)).float();
+        inside = inside
+            * c.clone()
+                .greater_equal_elem(0.0)
+                .bool_and(c.clone().lower_equal_elem(max))
+                .float();
         let c = c.clamp(0.0, max);
         let plancher = c.clone().floor();
         frac.push(c - plancher.clone());
@@ -61,13 +65,20 @@ pub fn bilinear_sample(image: &Tensor<1>, dims: [usize; 2], coords: Tensor<2>) -
         let mut poids = Tensor::<1>::ones([p], &device);
         for a in 0..2 {
             let haut_a = (coin >> (1 - a)) & 1 == 1; // i est le bit de poids fort
-            let (i, w) = if haut_a { (haut[a].clone(), frac[a].clone()) } else { (bas[a].clone(), frac[a].clone().neg() + 1.0) };
+            let (i, w) = if haut_a {
+                (haut[a].clone(), frac[a].clone())
+            } else {
+                (bas[a].clone(), frac[a].clone().neg() + 1.0)
+            };
             indice = indice + i * pas[a];
             poids = poids * w;
         }
         valeurs = valeurs + poids * image.clone().select(0, indice);
     }
-    BilinearSample { values: valeurs, inside }
+    BilinearSample {
+        values: valeurs,
+        inside,
+    }
 }
 
 /// Les images et masques de TOUTES les coupes de tous les stacks, aplatis dans deux tenseurs : un échantillonnage par lot peut alors lire des coupes différentes dans un seul appel.
@@ -87,7 +98,9 @@ pub(crate) fn blur_slice_in_mask(image: ArrayView2<f32>, masque: ArrayView2<bool
         return image.to_owned();
     }
     let rayon = (3.0 * sigma_pixels).ceil() as isize;
-    let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma_pixels).powi(2)).exp()).collect();
+    let noyau: Vec<f64> = (-rayon..=rayon)
+        .map(|i| (-0.5 * (i as f64 / sigma_pixels).powi(2)).exp())
+        .collect();
     // pas de normalisation du noyau : elle s'annulerait dans le rapport signal / masque
     let mut valeurs = image.mapv(|v| f64::from(v));
     let mut poids = masque.mapv(|m| if m { 1.0_f64 } else { 0.0 });
@@ -98,7 +111,11 @@ pub(crate) fn blur_slice_in_mask(image: ArrayView2<f32>, masque: ArrayView2<bool
                 let n = ligne.len() as isize;
                 let source: Vec<f64> = ligne.iter().copied().collect();
                 for (i, v) in ligne.iter_mut().enumerate() {
-                    *v = noyau.iter().enumerate().map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize]).sum();
+                    *v = noyau
+                        .iter()
+                        .enumerate()
+                        .map(|(t, w)| w * source[(i as isize + t as isize - rayon).clamp(0, n - 1) as usize])
+                        .sum();
                 }
             }
         }
@@ -128,12 +145,19 @@ impl SliceAtlas {
     pub fn new_blurred(stacks: &[Stack], device: &Device, sigma_pixels: f64) -> Result<SliceAtlas, SvrError> {
         let (mut images, mut masks, mut entries) = (Vec::new(), Vec::new(), Vec::new());
         for stack in stacks {
-            let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?.voxels();
+            let masque = stack
+                .brain_mask()
+                .ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?
+                .voxels();
             let (nx, ny, nz) = stack.dim();
             let mut e = Vec::with_capacity(nz);
             for k in 0..nz {
                 e.push((images.len(), [nx, ny]));
-                let lisse = blur_slice_in_mask(stack.data().index_axis(ndarray::Axis(2), k), masque.index_axis(ndarray::Axis(2), k), sigma_pixels);
+                let lisse = blur_slice_in_mask(
+                    stack.data().index_axis(ndarray::Axis(2), k),
+                    masque.index_axis(ndarray::Axis(2), k),
+                    sigma_pixels,
+                );
                 for i in 0..nx {
                     for j in 0..ny {
                         images.push(lisse[[i, j]]);
@@ -143,7 +167,11 @@ impl SliceAtlas {
             }
             entries.push(e);
         }
-        Ok(SliceAtlas { images: Tensor::<1>::from_floats(images.as_slice(), device), masks: Tensor::<1>::from_floats(masks.as_slice(), device), entries })
+        Ok(SliceAtlas {
+            images: Tensor::<1>::from_floats(images.as_slice(), device),
+            masks: Tensor::<1>::from_floats(masks.as_slice(), device),
+            entries,
+        })
     }
 }
 
@@ -163,9 +191,16 @@ fn bilinear_sample_atlas(atlas: &Tensor<1>, idx: &AtlasIndex, coords: Tensor<2>)
     let device = coords.device();
     let mut inside = Tensor::<1>::ones([p], &device);
     let (mut bas, mut haut, mut frac) = (Vec::new(), Vec::new(), Vec::new());
-    for (a, (max, max_int)) in [(&idx.max_i, &idx.max_i_int), (&idx.max_j, &idx.max_j_int)].into_iter().enumerate() {
+    for (a, (max, max_int)) in [(&idx.max_i, &idx.max_i_int), (&idx.max_j, &idx.max_j_int)]
+        .into_iter()
+        .enumerate()
+    {
         let c = coords.clone().narrow(1, a, 1).reshape([p]);
-        inside = inside * c.clone().greater_equal_elem(0.0).bool_and(c.clone().lower_equal(max.clone())).float();
+        inside = inside
+            * c.clone()
+                .greater_equal_elem(0.0)
+                .bool_and(c.clone().lower_equal(max.clone()))
+                .float();
         let c = c.clamp_min(0.0).min_pair(max.clone());
         let plancher = c.clone().floor();
         frac.push(c - plancher.clone());
@@ -180,7 +215,11 @@ fn bilinear_sample_atlas(atlas: &Tensor<1>, idx: &AtlasIndex, coords: Tensor<2>)
         let mut j_choisi = None;
         for a in 0..2 {
             let haut_a = (coin >> (1 - a)) & 1 == 1;
-            let (indice, w) = if haut_a { (haut[a].clone(), frac[a].clone()) } else { (bas[a].clone(), frac[a].clone().neg() + 1.0) };
+            let (indice, w) = if haut_a {
+                (haut[a].clone(), frac[a].clone())
+            } else {
+                (bas[a].clone(), frac[a].clone().neg() + 1.0)
+            };
             poids = poids * w;
             if a == 0 {
                 i_choisi = Some(indice);
@@ -191,7 +230,10 @@ fn bilinear_sample_atlas(atlas: &Tensor<1>, idx: &AtlasIndex, coords: Tensor<2>)
         let indice = idx.offset.clone() + i_choisi.unwrap() * idx.ny.clone() + j_choisi.unwrap();
         valeurs = valeurs + poids * atlas.clone().select(0, indice);
     }
-    BilinearSample { values: valeurs, inside }
+    BilinearSample {
+        values: valeurs,
+        inside,
+    }
 }
 
 fn produit_vectoriel(a: Tensor<2>, b: Tensor<2>) -> Tensor<2> {
@@ -226,7 +268,14 @@ pub struct IntersectionConfig {
 
 impl Default for IntersectionConfig {
     fn default() -> Self {
-        IntersectionConfig { min_angle_deg: 30.0, step_mm: 0.5, reach_mm: 150.0, min_points: 20, anchor_stack: None, highpass_sigma_mm: 0.0 }
+        IntersectionConfig {
+            min_angle_deg: 30.0,
+            step_mm: 0.5,
+            reach_mm: 150.0,
+            min_points: 20,
+            anchor_stack: None,
+            highpass_sigma_mm: 0.0,
+        }
     }
 }
 
@@ -250,7 +299,9 @@ pub(crate) fn plan_de(stack: &Stack, k: usize, pose: &Matrix4<f64>) -> Plan {
 /// Matrice `[T, T]` du lissage gaussien le long d'un profil : `K[a][b] = exp(−½ ((tₐ − t_b) / σ)²)` pour les abscisses `t` (mm).
 pub(crate) fn gaussian_smoothing_matrix(t: &[f64], sigma_mm: f64, device: &Device) -> Tensor<2> {
     let n = t.len();
-    let valeurs: Vec<f32> = (0..n).flat_map(|a| (0..n).map(move |b| (-0.5 * ((t[a] - t[b]) / sigma_mm).powi(2)).exp() as f32)).collect();
+    let valeurs: Vec<f32> = (0..n)
+        .flat_map(|a| (0..n).map(move |b| (-0.5 * ((t[a] - t[b]) / sigma_mm).powi(2)).exp() as f32))
+        .collect();
     Tensor::<2>::from_floats(TensorData::new(valeurs, [n, n]), device)
 }
 
@@ -300,7 +351,15 @@ pub struct IntersectionProblem {
 
 impl IntersectionProblem {
     /// Construit le problème de la coupe `k` du stack `si` à la pose courante `poses`. `None` si elle n'a aucun partenaire (aucune paire valide).
-    pub fn build(atlas: &SliceAtlas, stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, config: &IntersectionConfig, device: &Device) -> Option<IntersectionProblem> {
+    pub fn build(
+        atlas: &SliceAtlas,
+        stacks: &[Stack],
+        poses: &SlicePoses,
+        si: usize,
+        k: usize,
+        config: &IntersectionConfig,
+        device: &Device,
+    ) -> Option<IntersectionProblem> {
         let mobile = plan_de(&stacks[si], k, poses.get(si, k));
         let masque_mobile = stacks[si].brain_mask()?.voxels();
         let (nx, ny, _) = stacks[si].dim();
@@ -321,14 +380,23 @@ impl IntersectionProblem {
                 if d.norm() < sin_min {
                     continue;
                 }
-                let x0 = ((mobile.normale.dot(&mobile.centre)) * autre.normale.cross(&d) + (autre.normale.dot(&autre.centre)) * d.cross(&mobile.normale)) / d.norm_squared();
+                let x0 = ((mobile.normale.dot(&mobile.centre)) * autre.normale.cross(&d)
+                    + (autre.normale.dot(&autre.centre)) * d.cross(&mobile.normale))
+                    / d.norm_squared();
                 let dh = d / d.norm();
                 let mut compte = 0usize;
                 for &t in &t_valeurs {
                     let p = (x0 + t * dh).push(1.0);
                     let (a, b) = (mobile.inverse * p, autre.inverse * p);
                     let (ia, ja, ib, jb) = (a.x.round(), a.y.round(), b.x.round(), b.y.round());
-                    if a.x >= 0.0 && a.x <= (nx - 1) as f64 && a.y >= 0.0 && a.y <= (ny - 1) as f64 && b.x >= 0.0 && b.x <= (mx - 1) as f64 && b.y >= 0.0 && b.y <= (my - 1) as f64
+                    if a.x >= 0.0
+                        && a.x <= (nx - 1) as f64
+                        && a.y >= 0.0
+                        && a.y <= (ny - 1) as f64
+                        && b.x >= 0.0
+                        && b.x <= (mx - 1) as f64
+                        && b.y >= 0.0
+                        && b.y <= (my - 1) as f64
                         && masque_mobile[[ia as usize, ja as usize, k]]
                         && masque[[ib as usize, jb as usize, j]]
                     {
@@ -346,7 +414,8 @@ impl IntersectionProblem {
         }
         let jn = partenaires.len();
         let n_samples = echantillons;
-        let lisse = |v: &[f64]| Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), device);
+        let lisse =
+            |v: &[f64]| Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), device);
         let fk = mobile.inverse.fixed_view::<3, 3>(0, 0).into_owned();
         let mut pn = Vec::new();
         let mut ph = Vec::new();
@@ -387,16 +456,47 @@ impl IntersectionProblem {
             dims: [nx, ny],
             normal: lisse(mobile.normale.as_slice()),
             centre: lisse(mobile.centre.as_slice()),
-            to_pixel_t: Tensor::<2>::from_floats(TensorData::new(fk.iter().map(|&x| x as f32).collect::<Vec<_>>(), [3, 3]), device), // ordre colonne de F = ordre ligne de Fᵀ
-            to_pixel_offset: lisse(mobile.inverse.fixed_view::<3, 1>(0, 3).iter().copied().collect::<Vec<f64>>().as_slice()),
-            partner_normals: Tensor::<2>::from_floats(TensorData::new(pn.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3]), device),
-            partner_offsets: Tensor::<2>::from_floats(TensorData::new(ph.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 1]), device),
-            partner_to_pixel_t: Tensor::<3>::from_floats(TensorData::new(pf_t.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3, 3]), device),
-            partner_to_pixel_offset: Tensor::<2>::from_floats(TensorData::new(po.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3]), device),
-            index: AtlasIndex { offset: int(&off), ny: int(&nyv), max_i: lisse(&mi), max_j: lisse(&mj), max_i_int: int(&max_i_int), max_j_int: int(&max_j_int) },
+            to_pixel_t: Tensor::<2>::from_floats(
+                TensorData::new(fk.iter().map(|&x| x as f32).collect::<Vec<_>>(), [3, 3]),
+                device,
+            ), // ordre colonne de F = ordre ligne de Fᵀ
+            to_pixel_offset: lisse(
+                mobile
+                    .inverse
+                    .fixed_view::<3, 1>(0, 3)
+                    .iter()
+                    .copied()
+                    .collect::<Vec<f64>>()
+                    .as_slice(),
+            ),
+            partner_normals: Tensor::<2>::from_floats(
+                TensorData::new(pn.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3]),
+                device,
+            ),
+            partner_offsets: Tensor::<2>::from_floats(
+                TensorData::new(ph.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 1]),
+                device,
+            ),
+            partner_to_pixel_t: Tensor::<3>::from_floats(
+                TensorData::new(pf_t.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3, 3]),
+                device,
+            ),
+            partner_to_pixel_offset: Tensor::<2>::from_floats(
+                TensorData::new(po.iter().map(|&x| x as f32).collect::<Vec<_>>(), [jn, 3]),
+                device,
+            ),
+            index: AtlasIndex {
+                offset: int(&off),
+                ny: int(&nyv),
+                max_i: lisse(&mi),
+                max_j: lisse(&mj),
+                max_i_int: int(&max_i_int),
+                max_j_int: int(&max_j_int),
+            },
             atlas_images: atlas.images.clone(),
             atlas_masks: atlas.masks.clone(),
-            highpass: (config.highpass_sigma_mm > 0.0).then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
+            highpass: (config.highpass_sigma_mm > 0.0)
+                .then(|| gaussian_smoothing_matrix(&t_valeurs, config.highpass_sigma_mm, device)),
             partner_weights: None,
             temporal_prior: None,
             temporal_robust_mm: 0.0,
@@ -415,10 +515,25 @@ impl IntersectionProblem {
 
     /// **Régularisation temporelle** : les coupes d'un stack étant acquises l'une après l'autre, deux coupes voisines ont presque le même mouvement. Ajoute au coût une pénalité `λ · moyenne |P' − Q|²` (mm²) où `P'` sont les `points` de la coupe (à sa pose courante) après la correction et `Q` les `targets` : les positions
     /// que leur donnerait le mouvement des coupes voisines. Le coût devient `concordance − λ · écart quadratique moyen` (à maximiser) : une coupe mal placée est tirée vers ses voisines, bien placées. `points` et `targets` ont la même longueur ; `weight` = 0 ne change rien.
-    pub fn with_temporal_prior(mut self, points: &[Vector3<f64>], targets: &[Vector3<f64>], weight: f64) -> IntersectionProblem {
+    pub fn with_temporal_prior(
+        mut self,
+        points: &[Vector3<f64>],
+        targets: &[Vector3<f64>],
+        weight: f64,
+    ) -> IntersectionProblem {
         assert_eq!(points.len(), targets.len(), "autant de cibles que de points");
         let device = self.t_grid.device();
-        let tenseur = |v: &[Vector3<f64>]| Tensor::<2>::from_floats(TensorData::new(v.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect::<Vec<_>>(), [v.len(), 3]), &device);
+        let tenseur = |v: &[Vector3<f64>]| {
+            Tensor::<2>::from_floats(
+                TensorData::new(
+                    v.iter()
+                        .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                        .collect::<Vec<_>>(),
+                    [v.len(), 3],
+                ),
+                &device,
+            )
+        };
         self.temporal_prior = Some((tenseur(points), tenseur(targets), weight));
         self
     }
@@ -450,7 +565,12 @@ impl IntersectionProblem {
             let ecart = apply_pose(points.clone(), pivot.clone(), params.clone(), rotation_scale_mm) - cibles.clone();
             let d2 = (ecart.clone() * ecart).sum_dim(1);
             let par_point = match self.temporal_robust_mm > 0.0 {
-                true => d2.clone() / (d2.mul_scalar(1.0 / (self.temporal_robust_mm * self.temporal_robust_mm)).add_scalar(1.0)),
+                true => {
+                    d2.clone()
+                        / (d2
+                            .mul_scalar(1.0 / (self.temporal_robust_mm * self.temporal_robust_mm))
+                            .add_scalar(1.0))
+                }
                 false => d2,
             };
             par_point.sum().reshape([1]) * (*poids / points.dims()[0] as f64)
@@ -471,27 +591,41 @@ impl IntersectionProblem {
         let pivot = pivot.reshape([1, 3]);
         // plan de la coupe mobile après correction : normale R n, centre c + R (c_k − c) + t
         let n_mob = self.normal.clone().reshape([1, 3]).matmul(r.clone().transpose());
-        let c_mob = pivot.clone() + (self.centre.clone().reshape([1, 3]) - pivot.clone()).matmul(r.clone().transpose()) + tr.clone();
+        let c_mob = pivot.clone()
+            + (self.centre.clone().reshape([1, 3]) - pivot.clone()).matmul(r.clone().transpose())
+            + tr.clone();
         let h1 = (n_mob.clone() * c_mob).sum().reshape([1, 1]);
         let n_mob_j = n_mob.expand([j, 3]);
         let d = produit_vectoriel(n_mob_j.clone(), self.partner_normals.clone());
         let d2 = (d.clone() * d.clone()).sum_dim(1).clamp_min(1e-6);
         let dh = d.clone() / d2.clone().sqrt();
-        let x0 = (produit_vectoriel(self.partner_normals.clone(), d.clone()) * h1 + produit_vectoriel(d, n_mob_j) * self.partner_offsets.clone()) / d2;
+        let x0 = (produit_vectoriel(self.partner_normals.clone(), d.clone()) * h1
+            + produit_vectoriel(d, n_mob_j) * self.partner_offsets.clone())
+            / d2;
         let x = x0.reshape([j, 1, 3]) + dh.reshape([j, 1, 3]) * self.t_grid.clone().reshape([1, t, 1]);
         // coordonnées de pixel dans la coupe mobile : D⁻¹(x) = c + (x − c − t) R, puis l'inverse de sa pose de départ
         let y = pivot.clone() + (x.clone().reshape([j * t, 3]) - pivot - tr).matmul(r);
         let u = y.matmul(self.to_pixel_t.clone()) + self.to_pixel_offset.clone().reshape([1, 3]);
-        let v = (x.matmul(self.partner_to_pixel_t.clone()) + self.partner_to_pixel_offset.clone().reshape([j, 1, 3])).reshape([j * t, 3]);
+        let v = (x.matmul(self.partner_to_pixel_t.clone()) + self.partner_to_pixel_offset.clone().reshape([j, 1, 3]))
+            .reshape([j * t, 3]);
         let (u2, v2) = (u.narrow(1, 0, 2), v.narrow(1, 0, 2));
         let mobile = bilinear_sample(&self.image, self.dims, u2.clone());
-        let masque_mobile = bilinear_sample(&self.mask, self.dims, u2).values.greater_elem(0.5).float();
+        let masque_mobile = bilinear_sample(&self.mask, self.dims, u2)
+            .values
+            .greater_elem(0.5)
+            .float();
         let fixe = bilinear_sample_atlas(&self.atlas_images, &self.index, v2.clone());
-        let masque_fixe = bilinear_sample_atlas(&self.atlas_masks, &self.index, v2).values.greater_elem(0.5).float();
+        let masque_fixe = bilinear_sample_atlas(&self.atlas_masks, &self.index, v2)
+            .values
+            .greater_elem(0.5)
+            .float();
         let w = (mobile.inside * fixe.inside * masque_mobile * masque_fixe).reshape([j, t]);
         let (profil_mobile, profil_fixe) = (mobile.values.reshape([j, t]), fixe.values.reshape([j, t]));
         let (profil_mobile, profil_fixe) = match &self.highpass {
-            Some(k) => (highpass_profiles(profil_mobile, w.clone(), k.clone()), highpass_profiles(profil_fixe, w.clone(), k.clone())),
+            Some(k) => (
+                highpass_profiles(profil_mobile, w.clone(), k.clone()),
+                highpass_profiles(profil_fixe, w.clone(), k.clone()),
+            ),
             None => (profil_mobile, profil_fixe),
         };
         let ncc_paires = ncc(profil_mobile, profil_fixe, w.clone());
@@ -511,10 +645,17 @@ impl IntersectionProblem {
 /// et de ses partenaires : la nouvelle pose de la coupe est `D(params) · M`, avec `M` sa pose au moment de [`IntersectionProblem::build`].
 ///
 /// `ncc_history` du résultat contient la concordance moyenne à chaque itération (avant la mise à jour) puis à la correction finale. Les tenseurs doivent être sur un `Device` avec autodiff.
-pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig) -> RegistrationResult {
+pub fn register_slice_s2s(
+    problem: &IntersectionProblem,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    config: RegistrationConfig,
+) -> RegistrationResult {
     let device = pivot.device();
     let depart: Vec<f32> = config.initial.iter().map(|&v| v as f32).collect();
-    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
+    let mut module = PoseModule {
+        params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)),
+    };
     let mut optimiseur = AdamConfig::new().init();
     let valeur = |t: &Tensor<1>| f64::from(t.clone().into_data().try_to_vec::<f32>().unwrap()[0]);
     let mut historique = Vec::with_capacity(config.iterations + 1);
@@ -529,7 +670,10 @@ pub fn register_slice_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotat
     let finale = module.params.val();
     historique.push(valeur(&problem.cost(finale.clone(), pivot, rotation_scale_mm)));
     let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
-    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
+    RegistrationResult {
+        params: std::array::from_fn(|i| f64::from(params[i])),
+        ncc_history: historique,
+    }
 }
 
 /// Module à trois paramètres (les translations) pour [`register_translation_s2s`].
@@ -541,17 +685,29 @@ struct TranslationModule {
 #[cfg(test)]
 /// **Recalage des seules translations d'une coupe, la rotation étant fixée** : comme [`register_slice_s2s`], mais seuls `(tx, ty, tz)` sont optimisés (Adam, `config.initial[3..6]` au départ) ; la rotation `rotation_mm` (`(φx, φy, φz)` en mm équivalents) est une constante.
 /// C'est le pas élémentaire de la recherche par grille de rotations : à chaque rotation candidate, la meilleure translation est cherchée localement (comme FLIRT et ROSI). Rend les six paramètres (rotation fixée, translations optimisées) et l'historique de la concordance.
-pub(crate) fn register_translation_s2s(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, rotation_mm: [f64; 3], config: RegistrationConfig) -> RegistrationResult {
+pub(crate) fn register_translation_s2s(
+    problem: &IntersectionProblem,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    rotation_mm: [f64; 3],
+    config: RegistrationConfig,
+) -> RegistrationResult {
     let device = pivot.device();
     let rotation = Tensor::<1>::from_floats(rotation_mm.map(|v| v as f32), &device);
     let depart: Vec<f32> = config.initial[3..6].iter().map(|&v| v as f32).collect();
-    let mut module = TranslationModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
+    let mut module = TranslationModule {
+        params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)),
+    };
     let mut optimiseur = AdamConfig::new().init();
     let valeur = |t: &Tensor<1>| f64::from(t.clone().into_data().try_to_vec::<f32>().unwrap()[0]);
     let mut historique = Vec::with_capacity(config.iterations + 1);
     let mut pas = config.learning_rate;
     for _ in 0..config.iterations {
-        let concordance = problem.cost(Tensor::cat(vec![rotation.clone(), module.params.val()], 0), pivot.clone(), rotation_scale_mm);
+        let concordance = problem.cost(
+            Tensor::cat(vec![rotation.clone(), module.params.val()], 0),
+            pivot.clone(),
+            rotation_scale_mm,
+        );
         historique.push(valeur(&concordance));
         let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
         module = optimiseur.step(pas, module, gradients);
@@ -560,7 +716,10 @@ pub(crate) fn register_translation_s2s(problem: &IntersectionProblem, pivot: Ten
     let finale = Tensor::cat(vec![rotation, module.params.val()], 0);
     historique.push(valeur(&problem.cost(finale.clone(), pivot, rotation_scale_mm)));
     let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
-    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
+    RegistrationResult {
+        params: std::array::from_fn(|i| f64::from(params[i])),
+        ncc_history: historique,
+    }
 }
 
 #[cfg(test)]
@@ -574,14 +733,24 @@ pub(crate) struct Candidate {
 #[cfg(test)]
 /// **Candidats par grille de rotations** (FLIRT, ROSI) : pour chaque triplet d'angles `(a, b, c)` de `angles_deg` (un angle en degrés autour de chaque axe, autour de la pose courante), recale les translations seules
 /// ([`register_translation_s2s`]) et note la concordance. Rend `n³` candidats, `n = angles_deg.len()`, dans l'ordre `(i · n + j) · n + k`.
-pub(crate) fn rotation_grid_candidates(problem: &IntersectionProblem, pivot: Tensor<1>, rotation_scale_mm: f64, angles_deg: &[f64], config: RegistrationConfig) -> Vec<Candidate> {
+pub(crate) fn rotation_grid_candidates(
+    problem: &IntersectionProblem,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    angles_deg: &[f64],
+    config: RegistrationConfig,
+) -> Vec<Candidate> {
     let mm = |angle_deg: f64| angle_deg.to_radians() * rotation_scale_mm;
     let mut candidats = Vec::with_capacity(angles_deg.len().pow(3));
     for &a in angles_deg {
         for &b in angles_deg {
             for &c in angles_deg {
-                let r = register_translation_s2s(problem, pivot.clone(), rotation_scale_mm, [mm(a), mm(b), mm(c)], config);
-                candidats.push(Candidate { params: r.params, concordance: *r.ncc_history.last().unwrap() });
+                let r =
+                    register_translation_s2s(problem, pivot.clone(), rotation_scale_mm, [mm(a), mm(b), mm(c)], config);
+                candidats.push(Candidate {
+                    params: r.params,
+                    concordance: *r.ncc_history.last().unwrap(),
+                });
             }
         }
     }
@@ -598,14 +767,30 @@ pub(crate) fn grid_local_maxima(candidats: &[Candidate], n: usize) -> Vec<usize>
         for j in 0..n {
             for k in 0..n {
                 let c = candidats[idx(i, j, k)].concordance;
-                let voisins = [(i.wrapping_sub(1), j, k), (i + 1, j, k), (i, j.wrapping_sub(1), k), (i, j + 1, k), (i, j, k.wrapping_sub(1)), (i, j, k + 1)];
-                if voisins.iter().filter(|&&(a, b, d)| a < n && b < n && d < n).all(|&(a, b, d)| c > candidats[idx(a, b, d)].concordance) {
+                let voisins = [
+                    (i.wrapping_sub(1), j, k),
+                    (i + 1, j, k),
+                    (i, j.wrapping_sub(1), k),
+                    (i, j + 1, k),
+                    (i, j, k.wrapping_sub(1)),
+                    (i, j, k + 1),
+                ];
+                if voisins
+                    .iter()
+                    .filter(|&&(a, b, d)| a < n && b < n && d < n)
+                    .all(|&(a, b, d)| c > candidats[idx(a, b, d)].concordance)
+                {
                     maxima.push(idx(i, j, k));
                 }
             }
         }
     }
-    maxima.sort_by(|&x, &y| candidats[y].concordance.partial_cmp(&candidats[x].concordance).unwrap_or(std::cmp::Ordering::Equal));
+    maxima.sort_by(|&x, &y| {
+        candidats[y]
+            .concordance
+            .partial_cmp(&candidats[x].concordance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     maxima
 }
 
@@ -669,7 +854,34 @@ pub(crate) fn reliability_weight(score: f64, low: f64, high: f64, floor: f64) ->
 
 impl Default for S2sConfig {
     fn default() -> Self {
-        S2sConfig { sweeps: 3, registration: RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] }, intersection: IntersectionConfig::default(), seed: 1, coarse_sigma_pixels: 0.0, coarse_sweeps: 2, coarse_levels: 1, block_levels: 0, block_sweeps: 2, block_search_mm: 12.0, block_search_step_mm: 4.0, block_multistart_deg: 0.0, block_multistart_keep: 2, temporal_weight: 0.0, temporal_points: 64, temporal_robust_mm: 0.0, temporal_robust_start_mm: 0.0, temporal_info_exponent: 0.0, reliability_low: 0.0, reliability_high: 0.0, reliability_floor: 0.05 }
+        S2sConfig {
+            sweeps: 3,
+            registration: RegistrationConfig {
+                learning_rate: 0.3,
+                iterations: 120,
+                lr_decay: 0.97,
+                initial: [0.0; 6],
+            },
+            intersection: IntersectionConfig::default(),
+            seed: 1,
+            coarse_sigma_pixels: 0.0,
+            coarse_sweeps: 2,
+            coarse_levels: 1,
+            block_levels: 0,
+            block_sweeps: 2,
+            block_search_mm: 12.0,
+            block_search_step_mm: 4.0,
+            block_multistart_deg: 0.0,
+            block_multistart_keep: 2,
+            temporal_weight: 0.0,
+            temporal_points: 64,
+            temporal_robust_mm: 0.0,
+            temporal_robust_start_mm: 0.0,
+            temporal_info_exponent: 0.0,
+            reliability_low: 0.0,
+            reliability_high: 0.0,
+            reliability_floor: 0.05,
+        }
     }
 }
 
@@ -687,15 +899,29 @@ fn ordre_aleatoire(n: usize, graine: u64) -> Vec<usize> {
 }
 
 /// Concordance moyenne d'un bloc : la moyenne, sur les coupes du bloc, de la concordance de chacune (`IntersectionProblem::cost`) pour la MÊME transformation rigide `params` autour du MÊME `pivot`.
-fn block_cost(problems: &[IntersectionProblem], params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
+fn block_cost(
+    problems: &[IntersectionProblem],
+    params: Tensor<1>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+) -> Tensor<1> {
     block_cost_subset(problems, 1, params, pivot, rotation_scale_mm)
 }
 
 /// Comme [`block_cost`], sur une coupe du bloc sur `stride` (la première, puis de `stride` en `stride`) : un coût approché, `stride` fois moins cher, pour trier de nombreux candidats.
-pub(crate) fn block_cost_subset(problems: &[IntersectionProblem], stride: usize, params: Tensor<1>, pivot: Tensor<1>, rotation_scale_mm: f64) -> Tensor<1> {
+pub(crate) fn block_cost_subset(
+    problems: &[IntersectionProblem],
+    stride: usize,
+    params: Tensor<1>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+) -> Tensor<1> {
     let n = problems.iter().step_by(stride).count() as f64;
     let mut sous_ensemble = problems.iter().step_by(stride);
-    let mut somme = sous_ensemble.next().expect("bloc non vide").cost(params.clone(), pivot.clone(), rotation_scale_mm);
+    let mut somme = sous_ensemble
+        .next()
+        .expect("bloc non vide")
+        .cost(params.clone(), pivot.clone(), rotation_scale_mm);
     for p in sous_ensemble {
         somme = somme + p.cost(params.clone(), pivot.clone(), rotation_scale_mm);
     }
@@ -741,17 +967,33 @@ pub(crate) fn recherche_exhaustive(evaluer: &dyn Fn([f64; 6]) -> f64, grille: &[
 /// **Recalage rigide commun d'un bloc de coupes** : un seul jeu de 6 paramètres (autour de `pivot`, rotations en mm équivalents) pour toutes les coupes de `problems`. Avec `search_mm > 0`, une recherche exhaustive précède
 /// l'optimisation : d'abord la meilleure translation de la grille `[-search_mm, search_mm]³` (pas `step_mm`, rotation nulle), puis la meilleure rotation de la grille (mêmes bornes, en mm équivalents) autour de cette translation ; Adam part de ce point.
 /// Rend les paramètres et l'historique de la concordance (première valeur : au zéro ; dernière : finale).
-pub(crate) fn register_block_s2s(problems: &[IntersectionProblem], pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig, search_mm: f64, step_mm: f64) -> RegistrationResult {
+pub(crate) fn register_block_s2s(
+    problems: &[IntersectionProblem],
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    config: RegistrationConfig,
+    search_mm: f64,
+    step_mm: f64,
+) -> RegistrationResult {
     let device = pivot.device();
     let valeur = |t: Tensor<1>| f64::from(t.into_data().try_to_vec::<f32>().unwrap()[0]);
-    let evaluer = |p: [f64; 6]| valeur(block_cost(problems, Tensor::<1>::from_floats(p.map(|v| v as f32), &device), pivot.clone(), rotation_scale_mm));
+    let evaluer = |p: [f64; 6]| {
+        valeur(block_cost(
+            problems,
+            Tensor::<1>::from_floats(p.map(|v| v as f32), &device),
+            pivot.clone(),
+            rotation_scale_mm,
+        ))
+    };
     let zero = evaluer([0.0; 6]);
     let mut depart = config.initial;
     if search_mm > 0.0 && step_mm > 0.0 {
         depart = recherche_exhaustive(&evaluer, &grille_1d(search_mm, step_mm), zero);
     }
     let module_depart: Vec<f32> = depart.iter().map(|&v| v as f32).collect();
-    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(module_depart.as_slice(), &device)) };
+    let mut module = PoseModule {
+        params: Param::from_tensor(Tensor::<1>::from_floats(module_depart.as_slice(), &device)),
+    };
     let mut optimiseur = AdamConfig::new().init();
     let mut pas = config.learning_rate;
     for _ in 0..config.iterations {
@@ -763,33 +1005,65 @@ pub(crate) fn register_block_s2s(problems: &[IntersectionProblem], pivot: Tensor
     let finale = module.params.val();
     let apres = valeur(block_cost(problems, finale.clone(), pivot.clone(), rotation_scale_mm));
     let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
-    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: vec![zero, apres] }
+    RegistrationResult {
+        params: std::array::from_fn(|i| f64::from(params[i])),
+        ncc_history: vec![zero, apres],
+    }
 }
 
 /// **Recherche multi-départs d'un bloc** (FLIRT, ROSI) : balaie une grille de rotations `angles_deg × angles_deg × angles_deg` (degrés autour de chaque axe, autour du pivot du bloc) ; à chaque rotation, les TRANSLATIONS seules sont optimisées (Adam, `translation_iterations` itérations de pas
 /// `translation_step_mm`, sur une coupe du bloc sur `stride` pour que le tri reste bon marché) ; les `keep` meilleurs départs sont raffinés à six paramètres sur le bloc entier (Adam, `config.iterations / 2` itérations). Rend le meilleur candidat et l'historique `[concordance au zéro, concordance finale]`
 /// sur le bloc entier. Diffère de la recherche de [`register_block_s2s`] (translation d'abord, à rotation nulle) : ici la rotation, dimension non convexe, est balayée et la translation suit.
-pub(crate) fn register_block_multistart(problems: &[IntersectionProblem], pivot: Tensor<1>, rotation_scale_mm: f64, config: RegistrationConfig, angles_deg: &[f64], stride: usize, keep: usize, translation_iterations: usize, translation_step_mm: f64) -> RegistrationResult {
+pub(crate) fn register_block_multistart(
+    problems: &[IntersectionProblem],
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    config: RegistrationConfig,
+    angles_deg: &[f64],
+    stride: usize,
+    keep: usize,
+    translation_iterations: usize,
+    translation_step_mm: f64,
+) -> RegistrationResult {
     let device = pivot.device();
     let valeur = |t: Tensor<1>| f64::from(t.into_data().try_to_vec::<f32>().unwrap()[0]);
-    let zero = valeur(block_cost(problems, Tensor::<1>::from_floats([0.0_f32; 6], &device), pivot.clone(), rotation_scale_mm));
+    let zero = valeur(block_cost(
+        problems,
+        Tensor::<1>::from_floats([0.0_f32; 6], &device),
+        pivot.clone(),
+        rotation_scale_mm,
+    ));
     let mm = |angle_deg: f64| angle_deg.to_radians() * rotation_scale_mm;
     let mut departs: Vec<([f64; 6], f64)> = Vec::new();
     for &a in angles_deg {
         for &b in angles_deg {
             for &c in angles_deg {
                 let rotation = Tensor::<1>::from_floats([mm(a) as f32, mm(b) as f32, mm(c) as f32], &device);
-                let mut module = TranslationModule { params: Param::from_tensor(Tensor::<1>::from_floats([0.0_f32; 3], &device)) };
+                let mut module = TranslationModule {
+                    params: Param::from_tensor(Tensor::<1>::from_floats([0.0_f32; 3], &device)),
+                };
                 let mut optimiseur = AdamConfig::new().init();
                 let mut pas = translation_step_mm;
                 for _ in 0..translation_iterations {
-                    let concordance = block_cost_subset(problems, stride, Tensor::cat(vec![rotation.clone(), module.params.val()], 0), pivot.clone(), rotation_scale_mm);
+                    let concordance = block_cost_subset(
+                        problems,
+                        stride,
+                        Tensor::cat(vec![rotation.clone(), module.params.val()], 0),
+                        pivot.clone(),
+                        rotation_scale_mm,
+                    );
                     let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
                     module = optimiseur.step(pas, module, gradients);
                     pas *= 0.9;
                 }
                 let params = Tensor::cat(vec![rotation, module.params.val()], 0);
-                let v = valeur(block_cost_subset(problems, stride, params.clone(), pivot.clone(), rotation_scale_mm));
+                let v = valeur(block_cost_subset(
+                    problems,
+                    stride,
+                    params.clone(),
+                    pivot.clone(),
+                    rotation_scale_mm,
+                ));
                 let p: Vec<f32> = params.into_data().try_to_vec::<f32>().unwrap();
                 departs.push((std::array::from_fn(|i| f64::from(p[i])), v));
             }
@@ -799,7 +1073,9 @@ pub(crate) fn register_block_multistart(problems: &[IntersectionProblem], pivot:
     let (mut meilleur, mut valeur_max) = ([0.0; 6], zero);
     for (depart, _) in departs.into_iter().take(keep) {
         let initial: Vec<f32> = depart.iter().map(|&v| v as f32).collect();
-        let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(initial.as_slice(), &device)) };
+        let mut module = PoseModule {
+            params: Param::from_tensor(Tensor::<1>::from_floats(initial.as_slice(), &device)),
+        };
         let mut optimiseur = AdamConfig::new().init();
         let mut pas = config.learning_rate;
         for _ in 0..(config.iterations / 2).max(1) {
@@ -815,7 +1091,10 @@ pub(crate) fn register_block_multistart(problems: &[IntersectionProblem], pivot:
             (meilleur, valeur_max) = (std::array::from_fn(|i| f64::from(p[i])), v);
         }
     }
-    RegistrationResult { params: meilleur, ncc_history: vec![zero, valeur_max] }
+    RegistrationResult {
+        params: meilleur,
+        ncc_history: vec![zero, valeur_max],
+    }
 }
 
 /// Partition des `n` coupes d'un stack en `2^niveau` blocs consécutifs de tailles presque égales (indices de coupes) ; niveau 0 : un seul bloc.
@@ -834,7 +1113,14 @@ fn align_blocks(stacks: &[Stack], poses: &mut SlicePoses, atlas: &SliceAtlas, co
 /// Un niveau de l'alignement par blocs : `config.block_sweeps` balayages ; chaque bloc de coupes consécutives (les coupes recalables : assez de pixels de masque et au moins une paire ; au moins 3 pour que le bloc soit recalé) reçoit une
 /// transformation rigide COMMUNE ([`register_block_s2s`]), acceptée seulement si la concordance du bloc ne baisse pas, et composée à la pose de toutes ses coupes. Au niveau 0, le premier stack ne bouge pas (le repère est libre). Les stacks sont traités dans l'ordre
 /// (Gauss-Seidel : un bloc voit les poses déjà corrigées des autres stacks).
-pub(crate) fn align_blocks_level(stacks: &[Stack], poses: &mut SlicePoses, atlas: &SliceAtlas, config: &S2sConfig, niveau: usize, device: &Device) {
+pub(crate) fn align_blocks_level(
+    stacks: &[Stack],
+    poses: &mut SlicePoses,
+    atlas: &SliceAtlas,
+    config: &S2sConfig,
+    niveau: usize,
+    device: &Device,
+) {
     for _ in 0..config.block_sweeps {
         for si in 0..stacks.len() {
             if niveau == 0 && si == 0 {
@@ -845,8 +1131,14 @@ pub(crate) fn align_blocks_level(stacks: &[Stack], poses: &mut SlicePoses, atlas
                 let (mut pivots, mut echelles, mut ks) = (Vec::new(), Vec::new(), Vec::new());
                 for k in bloc {
                     let courante = *poses.get(si, k);
-                    let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
-                    let Some(probleme) = IntersectionProblem::build(atlas, stacks, poses, si, k, &config.intersection, device) else { continue };
+                    let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else {
+                        continue;
+                    };
+                    let Some(probleme) =
+                        IntersectionProblem::build(atlas, stacks, poses, si, k, &config.intersection, device)
+                    else {
+                        continue;
+                    };
                     problemes.push(probleme);
                     pivots.push(preparee.pivot);
                     echelles.push(preparee.echelle);
@@ -858,10 +1150,27 @@ pub(crate) fn align_blocks_level(stacks: &[Stack], poses: &mut SlicePoses, atlas
                 let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
                 let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
                 let t_pivot = Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device);
-                let mut resultat = register_block_s2s(&problemes, t_pivot.clone(), echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+                let mut resultat = register_block_s2s(
+                    &problemes,
+                    t_pivot.clone(),
+                    echelle,
+                    config.registration,
+                    config.block_search_mm,
+                    config.block_search_step_mm,
+                );
                 if config.block_multistart_deg > 0.0 {
                     let d = config.block_multistart_deg;
-                    let multi = register_block_multistart(&problemes, t_pivot, echelle, config.registration, &[-d, 0.0, d], 3, config.block_multistart_keep, 10, 1.0);
+                    let multi = register_block_multistart(
+                        &problemes,
+                        t_pivot,
+                        echelle,
+                        config.registration,
+                        &[-d, 0.0, d],
+                        3,
+                        config.block_multistart_keep,
+                        10,
+                        1.0,
+                    );
                     if multi.ncc_history[1] > resultat.ncc_history[1] {
                         resultat.params = multi.params;
                         resultat.ncc_history[1] = multi.ncc_history[1];
@@ -885,7 +1194,11 @@ pub(crate) fn sweep_schedule(config: &S2sConfig) -> Vec<(f64, usize, bool)> {
     let mut niveaux = Vec::new();
     if config.coarse_sigma_pixels > 0.0 && config.coarse_sweeps > 0 {
         for l in 0..config.coarse_levels.max(1) {
-            niveaux.push((config.coarse_sigma_pixels / 2f64.powi(l as i32), config.coarse_sweeps, false));
+            niveaux.push((
+                config.coarse_sigma_pixels / 2f64.powi(l as i32),
+                config.coarse_sweeps,
+                false,
+            ));
         }
     }
     niveaux.push((0.0, config.sweeps, true));
@@ -920,7 +1233,14 @@ pub(crate) fn robust_scale(debut: f64, fin: f64, balayage: usize, total: usize) 
 
 /// Entrées de la régularisation temporelle d'une coupe `k` du stack `si` : `(points, cibles)`. Les `points` sont `n_points` pixels de masque de la coupe (pas régulier parmi `tous_les_points`) ; la cible de chacun est la moyenne, sur les voisines directes recalables (`k − 1` et `k + 1`, absentes aux bords ou si
 /// elles n'ont pas de pixel de masque), de la position que lui donnerait leur mouvement RELATIF `M_voisine · M_coupe⁻¹` (poses courantes). `None` si la coupe n'a aucune voisine recalable.
-pub(crate) fn temporal_prior_inputs(stack: &Stack, courantes: &SlicePoses, si: usize, k: usize, tous_les_points: &[Vector3<f64>], n_points: usize) -> Option<(Vec<Vector3<f64>>, Vec<Vector3<f64>>)> {
+pub(crate) fn temporal_prior_inputs(
+    stack: &Stack,
+    courantes: &SlicePoses,
+    si: usize,
+    k: usize,
+    tous_les_points: &[Vector3<f64>],
+    n_points: usize,
+) -> Option<(Vec<Vector3<f64>>, Vec<Vector3<f64>>)> {
     let courante = *courantes.get(si, k);
     let relatives: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
         .into_iter()
@@ -932,7 +1252,10 @@ pub(crate) fn temporal_prior_inputs(stack: &Stack, courantes: &SlicePoses, si: u
     }
     let pas = (tous_les_points.len() / n_points.max(1)).max(1);
     let points: Vec<Vector3<f64>> = tous_les_points.iter().step_by(pas).copied().collect();
-    let cibles = points.iter().map(|p| relatives.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / relatives.len() as f64).collect();
+    let cibles = points
+        .iter()
+        .map(|p| relatives.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / relatives.len() as f64)
+        .collect();
     Some((points, cibles))
 }
 
@@ -949,12 +1272,31 @@ pub(crate) fn temporal_prior_inputs(stack: &Stack, courantes: &SlicePoses, si: u
 ///
 /// # Erreurs
 /// [`SvrError::NoMask`] si un stack n'a pas de masque ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+pub fn register_slices_s2s(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    config: &S2sConfig,
+    device: &Device,
+) -> Result<AlignmentReport, SvrError> {
     verifier_entrees(stacks, poses)?;
-    let coupes: Vec<(usize, usize)> = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).collect();
+    let coupes: Vec<(usize, usize)> = stacks
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+        .collect();
     let mut courantes = poses.clone();
-    let mut rapports: Vec<SliceReport> =
-        coupes.iter().map(|&(stack, slice)| SliceReport { stack, slice, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }).collect();
+    let mut rapports: Vec<SliceReport> = coupes
+        .iter()
+        .map(|&(stack, slice)| SliceReport {
+            stack,
+            slice,
+            registered: false,
+            ncc_first: 0.0,
+            ncc_final: 0.0,
+            runs: 0,
+            correction_rms_mm: 0.0,
+        })
+        .collect();
     if config.block_levels > 0 {
         let atlas = SliceAtlas::new(stacks, device)?;
         align_blocks(stacks, &mut courantes, &atlas, config, device);
@@ -966,30 +1308,76 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
     let mut scores = vec![1.0_f64; coupes.len()];
     // dernier nombre de points d'intersection valides de chaque coupe (0 : pas encore vu), pour la pondération du poids temporel par l'information
     let mut echantillons = vec![0.0_f64; coupes.len()];
-    let decalages: Vec<usize> = stacks.iter().scan(0usize, |cumul, s| { let d = *cumul; *cumul += s.dim().2; Some(d) }).collect();
+    let decalages: Vec<usize> = stacks
+        .iter()
+        .scan(0usize, |cumul, s| {
+            let d = *cumul;
+            *cumul += s.dim().2;
+            Some(d)
+        })
+        .collect();
     for (sigma, balayages, net) in niveaux {
         let atlas = SliceAtlas::new_blurred(stacks, device, sigma)?;
         for balayage in 0..balayages {
             for &n in &ordre_aleatoire(coupes.len(), config.seed + decalage_graine + balayage as u64) {
                 let (si, k) = coupes[n];
                 let courante = *courantes.get(si, k);
-                let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else { continue };
-                let Some(probleme) = IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device) else { continue };
+                let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else {
+                    continue;
+                };
+                let Some(probleme) =
+                    IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device)
+                else {
+                    continue;
+                };
                 echantillons[n] = probleme.n_samples() as f64;
-                let poids_temporel = config.temporal_weight * information_weight(echantillons[n], median_of_known(&echantillons), config.temporal_info_exponent);
+                let poids_temporel = config.temporal_weight
+                    * information_weight(
+                        echantillons[n],
+                        median_of_known(&echantillons),
+                        config.temporal_info_exponent,
+                    );
                 let probleme = match config.temporal_weight > 0.0 {
-                    true => match temporal_prior_inputs(&stacks[si], &courantes, si, k, &preparee.points, config.temporal_points) {
-                        Some((points, cibles)) => probleme.with_temporal_prior(&points, &cibles, poids_temporel).with_temporal_robustness(robust_scale(config.temporal_robust_start_mm, config.temporal_robust_mm, decalage_graine as usize + balayage, total_balayages)),
+                    true => match temporal_prior_inputs(
+                        &stacks[si],
+                        &courantes,
+                        si,
+                        k,
+                        &preparee.points,
+                        config.temporal_points,
+                    ) {
+                        Some((points, cibles)) => probleme
+                            .with_temporal_prior(&points, &cibles, poids_temporel)
+                            .with_temporal_robustness(robust_scale(
+                                config.temporal_robust_start_mm,
+                                config.temporal_robust_mm,
+                                decalage_graine as usize + balayage,
+                                total_balayages,
+                            )),
                         None => probleme,
                     },
                     false => probleme,
                 };
                 let probleme = if config.reliability_high > config.reliability_low {
-                    probleme.with_partner_weights(|sj, kj| reliability_weight(scores[decalages[sj] + kj], config.reliability_low, config.reliability_high, config.reliability_floor))
+                    probleme.with_partner_weights(|sj, kj| {
+                        reliability_weight(
+                            scores[decalages[sj] + kj],
+                            config.reliability_low,
+                            config.reliability_high,
+                            config.reliability_floor,
+                        )
+                    })
                 } else {
                     probleme
                 };
-                let pivot = Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], device);
+                let pivot = Tensor::<1>::from_floats(
+                    [
+                        preparee.pivot.x as f32,
+                        preparee.pivot.y as f32,
+                        preparee.pivot.z as f32,
+                    ],
+                    device,
+                );
                 let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
                 let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
                 scores[n] = apres.max(avant);
@@ -1004,7 +1392,11 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
                     }
                 }
                 if apres >= avant {
-                    courantes.set(si, k, pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante);
+                    courantes.set(
+                        si,
+                        k,
+                        pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante,
+                    );
                 }
             }
         }
@@ -1013,10 +1405,19 @@ pub fn register_slices_s2s(stacks: &[Stack], poses: &SlicePoses, config: &S2sCon
     for (n, &(si, k)) in coupes.iter().enumerate() {
         if let Some(depart) = preparer_coupe(&stacks[si], k, *poses.get(si, k)) {
             let relatif = courantes.get(si, k) * poses.get(si, k).try_inverse().expect("une pose est inversible");
-            rapports[n].correction_rms_mm = (depart.points.iter().map(|x| ((relatif * x.push(1.0)).xyz() - x).norm_squared()).sum::<f64>() / depart.points.len() as f64).sqrt();
+            rapports[n].correction_rms_mm = (depart
+                .points
+                .iter()
+                .map(|x| ((relatif * x.push(1.0)).xyz() - x).norm_squared())
+                .sum::<f64>()
+                / depart.points.len() as f64)
+                .sqrt();
         }
     }
-    Ok(AlignmentReport { poses: courantes, slices: rapports })
+    Ok(AlignmentReport {
+        poses: courantes,
+        slices: rapports,
+    })
 }
 
 #[cfg(test)]
@@ -1033,7 +1434,12 @@ mod tests {
     }
 
     fn valeurs(t: Tensor<1>) -> Vec<f64> {
-        t.into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect()
+        t.into_data()
+            .try_to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect()
     }
 
     /// Générateur pseudo-aléatoire déterministe (xorshift64) dans [0, 1).
@@ -1053,7 +1459,12 @@ mod tests {
         let (i1, j1) = ((i0 + 1).min(nx - 1), (j0 + 1).min(ny - 1));
         let (ti, tj) = (i - i0 as f64, j - j0 as f64);
         let px = |a: usize, b: usize| image[a * ny + b];
-        Some((1.0 - ti) * (1.0 - tj) * px(i0, j0) + (1.0 - ti) * tj * px(i0, j1) + ti * (1.0 - tj) * px(i1, j0) + ti * tj * px(i1, j1))
+        Some(
+            (1.0 - ti) * (1.0 - tj) * px(i0, j0)
+                + (1.0 - ti) * tj * px(i0, j1)
+                + ti * (1.0 - tj) * px(i1, j0)
+                + ti * tj * px(i1, j1),
+        )
     }
 
     /// Critères fixés avant : (1) sur une rampe `a + b·i + c·j` l'interpolation est exacte à l'arrondi `f32` (1e-4 relatif à la dynamique) en 500 points intérieurs aléatoires ; (2) sur une image aléatoire elle
@@ -1064,20 +1475,59 @@ mod tests {
         let device = Device::flex();
         let (nx, ny) = (13usize, 9usize);
         let (a, b, c) = (3.0, 0.7, -1.3);
-        let rampe: Vec<f64> = (0..nx).flat_map(|i| (0..ny).map(move |j| a + b * i as f64 + c * j as f64)).collect();
+        let rampe: Vec<f64> = (0..nx)
+            .flat_map(|i| (0..ny).map(move |j| a + b * i as f64 + c * j as f64))
+            .collect();
         let dynamique = 0.7 * (nx - 1) as f64 + 1.3 * (ny - 1) as f64;
         let mut etat = 0x9E3779B97F4A7C15u64;
-        let pts: Vec<(f64, f64)> = (0..500).map(|_| (aleatoire(&mut etat) * (nx - 1) as f64, aleatoire(&mut etat) * (ny - 1) as f64)).collect();
+        let pts: Vec<(f64, f64)> = (0..500)
+            .map(|_| {
+                (
+                    aleatoire(&mut etat) * (nx - 1) as f64,
+                    aleatoire(&mut etat) * (ny - 1) as f64,
+                )
+            })
+            .collect();
         let r = bilinear_sample(&tenseur_image(&rampe, &device), [nx, ny], tenseur_points(&pts, &device));
         let (v, d) = (valeurs(r.values), valeurs(r.inside));
         for (k, &(i, j)) in pts.iter().enumerate() {
-            assert!((v[k] - (a + b * i + c * j)).abs() < 1e-4 * dynamique, "rampe en ({i},{j}) : {} contre {}", v[k], a + b * i + c * j);
+            assert!(
+                (v[k] - (a + b * i + c * j)).abs() < 1e-4 * dynamique,
+                "rampe en ({i},{j}) : {} contre {}",
+                v[k],
+                a + b * i + c * j
+            );
             assert_eq!(d[k], 1.0);
         }
         let image: Vec<f64> = (0..nx * ny).map(|_| aleatoire(&mut etat) * 100.0).collect();
-        let mut pts: Vec<(f64, f64)> = (0..450).map(|_| (aleatoire(&mut etat) * (nx - 1) as f64, aleatoire(&mut etat) * (ny - 1) as f64)).collect();
-        pts.extend([(0.0, 0.0), ((nx - 1) as f64, (ny - 1) as f64), (0.0, (ny - 1) as f64), ((nx - 1) as f64, 0.0), (4.0, 3.0), (6.0, 0.0), (0.0, 5.0), ((nx - 1) as f64, 4.0)]);
-        pts.extend([(-0.5, 2.0), (2.0, -0.01), ((nx - 1) as f64 + 0.01, 3.0), (3.0, (ny - 1) as f64 + 1.0), (-3.0, -3.0), (100.0, 100.0), (f64::from(f32::MAX) / 2.0, 1.0), (1.0, -1e6)]);
+        let mut pts: Vec<(f64, f64)> = (0..450)
+            .map(|_| {
+                (
+                    aleatoire(&mut etat) * (nx - 1) as f64,
+                    aleatoire(&mut etat) * (ny - 1) as f64,
+                )
+            })
+            .collect();
+        pts.extend([
+            (0.0, 0.0),
+            ((nx - 1) as f64, (ny - 1) as f64),
+            (0.0, (ny - 1) as f64),
+            ((nx - 1) as f64, 0.0),
+            (4.0, 3.0),
+            (6.0, 0.0),
+            (0.0, 5.0),
+            ((nx - 1) as f64, 4.0),
+        ]);
+        pts.extend([
+            (-0.5, 2.0),
+            (2.0, -0.01),
+            ((nx - 1) as f64 + 0.01, 3.0),
+            (3.0, (ny - 1) as f64 + 1.0),
+            (-3.0, -3.0),
+            (100.0, 100.0),
+            (f64::from(f32::MAX) / 2.0, 1.0),
+            (1.0, -1e6),
+        ]);
         let r = bilinear_sample(&tenseur_image(&image, &device), [nx, ny], tenseur_points(&pts, &device));
         let (v, d) = (valeurs(r.values), valeurs(r.inside));
         for (k, &(i, j)) in pts.iter().enumerate() {
@@ -1091,7 +1541,11 @@ mod tests {
         }
         // un axe d'un seul pixel
         let une_ligne = tenseur_image(&[1.0, 2.0, 4.0], &device);
-        let r = bilinear_sample(&une_ligne, [1, 3], tenseur_points(&[(0.0, 0.5), (0.0, 1.5), (0.5, 1.0)], &device));
+        let r = bilinear_sample(
+            &une_ligne,
+            [1, 3],
+            tenseur_points(&[(0.0, 0.5), (0.0, 1.5), (0.5, 1.0)], &device),
+        );
         assert_eq!(valeurs(r.inside), vec![1.0, 1.0, 0.0]);
         let v = valeurs(r.values);
         assert!((v[0] - 1.5).abs() < 1e-6 && (v[1] - 3.0).abs() < 1e-6);
@@ -1104,26 +1558,57 @@ mod tests {
         let device = Device::flex().autodiff();
         let (nx, ny) = (11usize, 8usize);
         let (a, b, c) = (3.0, 0.7, -1.3);
-        let rampe: Vec<f64> = (0..nx).flat_map(|i| (0..ny).map(move |j| a + b * i as f64 + c * j as f64)).collect();
+        let rampe: Vec<f64> = (0..nx)
+            .flat_map(|i| (0..ny).map(move |j| a + b * i as f64 + c * j as f64))
+            .collect();
         let mut etat = 0xD1B54A32D192ED03u64;
-        let pts: Vec<(f64, f64)> = (0..200).map(|_| (0.05 + aleatoire(&mut etat) * (nx as f64 - 1.1), 0.05 + aleatoire(&mut etat) * (ny as f64 - 1.1))).collect();
+        let pts: Vec<(f64, f64)> = (0..200)
+            .map(|_| {
+                (
+                    0.05 + aleatoire(&mut etat) * (nx as f64 - 1.1),
+                    0.05 + aleatoire(&mut etat) * (ny as f64 - 1.1),
+                )
+            })
+            .collect();
         let coords = tenseur_points(&pts, &device).require_grad();
         let r = bilinear_sample(&tenseur_image(&rampe, &device), [nx, ny], coords.clone());
-        let g = coords.grad(&r.values.sum().backward()).unwrap().into_data().try_to_vec::<f32>().unwrap();
+        let g = coords
+            .grad(&r.values.sum().backward())
+            .unwrap()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         for k in 0..pts.len() {
-            assert!((f64::from(g[2 * k]) - b).abs() < 1e-4 && (f64::from(g[2 * k + 1]) - c).abs() < 1e-4, "gradient de la rampe en {:?} : ({}, {})", pts[k], g[2 * k], g[2 * k + 1]);
+            assert!(
+                (f64::from(g[2 * k]) - b).abs() < 1e-4 && (f64::from(g[2 * k + 1]) - c).abs() < 1e-4,
+                "gradient de la rampe en {:?} : ({}, {})",
+                pts[k],
+                g[2 * k],
+                g[2 * k + 1]
+            );
         }
         let image: Vec<f64> = (0..nx * ny).map(|_| aleatoire(&mut etat) * 50.0).collect();
         let coords = tenseur_points(&pts, &device).require_grad();
         let r = bilinear_sample(&tenseur_image(&image, &device), [nx, ny], coords.clone());
-        let g = coords.grad(&r.values.sum().backward()).unwrap().into_data().try_to_vec::<f32>().unwrap();
+        let g = coords
+            .grad(&r.values.sum().backward())
+            .unwrap()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         for (k, &(i, j)) in pts.iter().enumerate() {
             let (i0, j0) = (i.floor() as usize, j.floor() as usize);
             let (ti, tj) = (i - i0 as f64, j - j0 as f64);
             let px = |u: usize, v: usize| image[u * ny + v];
             let di = (1.0 - tj) * (px(i0 + 1, j0) - px(i0, j0)) + tj * (px(i0 + 1, j0 + 1) - px(i0, j0 + 1));
             let dj = (1.0 - ti) * (px(i0, j0 + 1) - px(i0, j0)) + ti * (px(i0 + 1, j0 + 1) - px(i0 + 1, j0));
-            assert!((f64::from(g[2 * k]) - di).abs() < 1e-3 * (1.0 + di.abs()) && (f64::from(g[2 * k + 1]) - dj).abs() < 1e-3 * (1.0 + dj.abs()), "point ({i},{j}) : ({}, {}) contre ({di}, {dj})", g[2 * k], g[2 * k + 1]);
+            assert!(
+                (f64::from(g[2 * k]) - di).abs() < 1e-3 * (1.0 + di.abs())
+                    && (f64::from(g[2 * k + 1]) - dj).abs() < 1e-3 * (1.0 + dj.abs()),
+                "point ({i},{j}) : ({}, {}) contre ({di}, {dj})",
+                g[2 * k],
+                g[2 * k + 1]
+            );
         }
     }
 }

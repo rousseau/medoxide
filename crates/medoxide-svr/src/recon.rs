@@ -3,9 +3,9 @@
 //! Le volume reconstruit est une grille isotrope **alignée sur les axes du monde** (RAS+), qui ne dépend d'aucun stack. Son
 //! étendue est la boîte englobante de tous les voxels de masque cérébral de tous les stacks, plus une marge.
 
+use nalgebra::{Matrix4, Vector3};
 use ndarray::{Array3, ArrayView2, Axis};
 use rayon::prelude::*;
-use nalgebra::{Matrix4, Vector3};
 
 use crate::{Stack, SvrError, Volume};
 
@@ -19,7 +19,9 @@ pub struct SlicePoses {
 impl SlicePoses {
     /// Des poses identité pour toutes les coupes de `stacks`.
     pub fn identity(stacks: &[Stack]) -> SlicePoses {
-        SlicePoses { motions: stacks.iter().map(|s| vec![Matrix4::identity(); s.dim().2]).collect() }
+        SlicePoses {
+            motions: stacks.iter().map(|s| vec![Matrix4::identity(); s.dim().2]).collect(),
+        }
     }
 
     /// Mouvement de la coupe `k` du stack `s`.
@@ -43,7 +45,9 @@ impl SlicePoses {
     /// # Panics
     /// Si un indice est hors du jeu de poses.
     pub fn select(&self, indices: &[usize]) -> SlicePoses {
-        SlicePoses { motions: indices.iter().map(|&s| self.motions[s].clone()).collect() }
+        SlicePoses {
+            motions: indices.iter().map(|&s| self.motions[s].clone()).collect(),
+        }
     }
 
     /// `true` si ce jeu de poses a exactement la forme de `stacks` (même nombre de stacks, même nombre de coupes par stack).
@@ -59,7 +63,11 @@ impl SlicePoses {
 ///
 /// # Erreurs
 /// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-pub fn raw_slice_scales(stacks: &[Stack], poses: &SlicePoses, volume: &Volume) -> Result<Vec<Vec<Option<f64>>>, SvrError> {
+pub fn raw_slice_scales(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    volume: &Volume,
+) -> Result<Vec<Vec<Option<f64>>>, SvrError> {
     if !poses.matches(stacks) {
         return Err(SvrError::PoseMismatch);
     }
@@ -67,7 +75,10 @@ pub fn raw_slice_scales(stacks: &[Stack], poses: &SlicePoses, volume: &Volume) -
         .iter()
         .enumerate()
         .map(|(si, stack)| {
-            let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?.voxels();
+            let masque = stack
+                .brain_mask()
+                .ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?
+                .voxels();
             Ok(stack
                 .slices()
                 .map(|coupe| {
@@ -105,7 +116,14 @@ pub fn estimate_slice_scales(stacks: &[Stack], poses: &SlicePoses, volume: &Volu
     }
     valeurs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mediane = valeurs[valeurs.len() / 2];
-    Ok(brutes.iter().map(|v| v.iter().map(|s| s.map_or(1.0, |s| s.clamp(0.2, 5.0) / mediane)).collect()).collect())
+    Ok(brutes
+        .iter()
+        .map(|v| {
+            v.iter()
+                .map(|s| s.map_or(1.0, |s| s.clamp(0.2, 5.0) / mediane))
+                .collect()
+        })
+        .collect())
 }
 
 /// Support minimal (somme des poids rétroprojetés) au-dessous duquel un voxel est considéré comme non couvert par les données.
@@ -127,7 +145,8 @@ pub struct GridSpec {
 impl GridSpec {
     /// Un [`Volume`] nul de cette géométrie.
     pub fn zeros(&self) -> Volume {
-        Volume::new(Array3::<f32>::zeros(self.dims), self.affine).expect("l'affine d'une grille est diagonale, de pas > 0 : inversible")
+        Volume::new(Array3::<f32>::zeros(self.dims), self.affine)
+            .expect("l'affine d'une grille est diagonale, de pas > 0 : inversible")
     }
 }
 
@@ -149,7 +168,9 @@ pub fn reconstruction_grid(stacks: &[Stack], resolution_mm: f64, margin_mm: f64)
     let mut bas = Vector3::from_element(f64::INFINITY);
     let mut haut = Vector3::from_element(f64::NEG_INFINITY);
     for stack in stacks {
-        let masque = stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
+        let masque = stack
+            .brain_mask()
+            .ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
         let a = stack.affine();
         for ((i, j, k), &dedans) in masque.voxels().indexed_iter() {
             if dedans {
@@ -167,7 +188,11 @@ pub fn reconstruction_grid(stacks: &[Stack], resolution_mm: f64, margin_mm: f64)
         affine[(a, a)] = resolution_mm;
         affine[(a, 3)] = bas[a];
     }
-    Ok(GridSpec { affine, dims: (n(0), n(1), n(2)), resolution_mm })
+    Ok(GridSpec {
+        affine,
+        dims: (n(0), n(1), n(2)),
+        resolution_mm,
+    })
 }
 
 /// Toutes les coupes de tous les stacks, **avec leur mouvement** (`poses`), chacune avec son masque 2D (vue sur le masque du stack). Les stacks
@@ -178,7 +203,12 @@ fn coupes_avec_masque<'a>(stacks: &'a [Stack], poses: &'a SlicePoses) -> Vec<(Ar
         .enumerate()
         .flat_map(|(s, stack)| {
             let masque = stack.brain_mask().expect("le masque a été vérifié").voxels();
-            stack.slices().map(move |coupe| (masque.index_axis(Axis(2), coupe.index()), coupe.with_motion(*poses.get(s, coupe.index()))))
+            stack.slices().map(move |coupe| {
+                (
+                    masque.index_axis(Axis(2), coupe.index()),
+                    coupe.with_motion(*poses.get(s, coupe.index())),
+                )
+            })
         })
         .collect()
 }
@@ -209,13 +239,19 @@ pub fn normalized_adjoint(grid: &GridSpec, stacks: &[Stack]) -> Result<Normalize
 ///
 /// # Erreurs
 /// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-pub(crate) fn adjoint_sums(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<(Array3<f64>, Array3<f64>), SvrError> {
+pub(crate) fn adjoint_sums(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+) -> Result<(Array3<f64>, Array3<f64>), SvrError> {
     if !poses.matches(stacks) {
         return Err(SvrError::PoseMismatch);
     }
     let geometrie = grid.zeros();
     for stack in stacks {
-        stack.brain_mask().ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
+        stack
+            .brain_mask()
+            .ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
     }
     let coupes = coupes_avec_masque(stacks, poses);
     // Les coupes sont indépendantes : chaque tâche accumule dans ses propres volumes (écrire dans un volume partagé serait une course aux
@@ -243,7 +279,11 @@ pub(crate) fn adjoint_sums(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses
 ///
 /// # Erreurs
 /// [`SvrError::NoMask`] ; [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-pub fn normalized_adjoint_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses) -> Result<NormalizedAdjoint, SvrError> {
+pub fn normalized_adjoint_with_poses(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+) -> Result<NormalizedAdjoint, SvrError> {
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let mut image = Array3::<f32>::zeros(grid.dims);
     let mut support = Array3::<f32>::zeros(grid.dims);
@@ -310,7 +350,12 @@ impl<'a> ReconstructionProblem<'a> {
     ///
     /// # Erreurs
     /// Celles de [`ReconstructionProblem::new`], plus [`SvrError::PoseMismatch`] si `poses` n'a pas la forme de `stacks`.
-    pub fn with_poses(grid: &GridSpec, stacks: &'a [Stack], poses: &SlicePoses, alpha: f64) -> Result<ReconstructionProblem<'a>, SvrError> {
+    pub fn with_poses(
+        grid: &GridSpec,
+        stacks: &'a [Stack],
+        poses: &SlicePoses,
+        alpha: f64,
+    ) -> Result<ReconstructionProblem<'a>, SvrError> {
         ReconstructionProblem::with_poses_covered(grid, stacks, poses, alpha, 1)
     }
 
@@ -319,7 +364,13 @@ impl<'a> ReconstructionProblem<'a> {
     ///
     /// # Erreurs
     /// Celles de [`ReconstructionProblem::with_poses`].
-    pub fn with_poses_covered(grid: &GridSpec, stacks: &'a [Stack], poses: &SlicePoses, alpha: f64, min_stacks: usize) -> Result<ReconstructionProblem<'a>, SvrError> {
+    pub fn with_poses_covered(
+        grid: &GridSpec,
+        stacks: &'a [Stack],
+        poses: &SlicePoses,
+        alpha: f64,
+        min_stacks: usize,
+    ) -> Result<ReconstructionProblem<'a>, SvrError> {
         // `!(a >= 0.0)` est vrai aussi pour NaN.
         if !(alpha >= 0.0) || !alpha.is_finite() {
             return Err(SvrError::InvalidRegularization);
@@ -341,7 +392,16 @@ impl<'a> ReconstructionProblem<'a> {
                 *d = *d && c >= requis;
             }
         }
-        Ok(ReconstructionProblem { grid: grid.clone(), stacks, alpha, poses: poses.clone(), domain, initial: init.image, support: init.support, edge_weights: None })
+        Ok(ReconstructionProblem {
+            grid: grid.clone(),
+            stacks,
+            alpha,
+            poses: poses.clone(),
+            domain,
+            initial: init.image,
+            support: init.support,
+            edge_weights: None,
+        })
     }
 
     /// Voxels inconnus du problème.
@@ -403,13 +463,24 @@ impl<'a> ReconstructionProblem<'a> {
                 (g1, d1 + d2)
             })
             .unwrap_or_else(|| (Array3::<f64>::zeros(dims), 0.0));
-        let regularization = regularization(x, &self.domain, self.grid.resolution_mm, self.alpha, self.edge_weights.as_ref(), &mut gradient);
+        let regularization = regularization(
+            x,
+            &self.domain,
+            self.grid.resolution_mm,
+            self.alpha,
+            self.edge_weights.as_ref(),
+            &mut gradient,
+        );
         for (g, &d) in gradient.iter_mut().zip(self.domain.iter()) {
             if !d {
                 *g = 0.0;
             }
         }
-        Evaluation { data, regularization, gradient }
+        Evaluation {
+            data,
+            regularization,
+            gradient,
+        }
     }
 }
 
@@ -443,7 +514,14 @@ impl<'a> ReconstructionProblem<'a> {
 
     /// **Reconstruction préservant les contours** (Huber par moindres carrés repondérés itérés) : une première résolution de Tikhonov depuis `x0`, puis `outer` repondérations (poids de Huber de [`EdgeWeights::huber`] pour l'image courante, seuil
     /// `kappa × médiane`) suivies chacune d'une résolution par gradient conjugué (`max_iterations`, `tolerance`) à partir de l'image précédente. `outer = 0` : Tikhonov seul. Laisse le problème avec les derniers poids.
-    pub fn conjugate_gradient_edge_preserving(&mut self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64, outer: usize, kappa: f64) -> CgResult {
+    pub fn conjugate_gradient_edge_preserving(
+        &mut self,
+        x0: &Array3<f64>,
+        max_iterations: usize,
+        tolerance: f64,
+        outer: usize,
+        kappa: f64,
+    ) -> CgResult {
         self.edge_weights = None;
         let mut resultat = self.conjugate_gradient(x0, max_iterations, tolerance);
         for _ in 0..outer {
@@ -475,7 +553,13 @@ impl<'a> ReconstructionProblem<'a> {
 
     /// Comme [`ReconstructionProblem::conjugate_gradient`], en appelant `observateur(k, x)` avec l'itéré `x` après chaque itération `k`
     /// (`k = 0` : le départ restreint au domaine). Sert à enregistrer des instantanés pour comparer les optimiseurs.
-    pub fn conjugate_gradient_observed(&self, x0: &Array3<f64>, max_iterations: usize, tolerance: f64, mut observateur: impl FnMut(usize, &Array3<f64>)) -> CgResult {
+    pub fn conjugate_gradient_observed(
+        &self,
+        x0: &Array3<f64>,
+        max_iterations: usize,
+        tolerance: f64,
+        mut observateur: impl FnMut(usize, &Array3<f64>),
+    ) -> CgResult {
         let b = self.right_hand_side();
         let norme_b = dot(&b, &b).sqrt();
         let mut x = x0.clone();
@@ -510,13 +594,26 @@ impl<'a> ReconstructionProblem<'a> {
             historique_r.push(rs.sqrt() / norme_b);
             converge = *historique_r.last().unwrap() <= tolerance;
         }
-        CgResult { x, iterations, objective_history: historique_f, residual_history: historique_r, converged: converge }
+        CgResult {
+            x,
+            iterations,
+            objective_history: historique_f,
+            residual_history: historique_r,
+            converged: converge,
+        }
     }
 }
 
 /// `(α/2) Σ w · d²` sur les arêtes `a → b` (différences avant `d = (x_b − x_a) / h`, les deux voxels dans `domaine`), où `w` est le poids de l'arête (1 sans `poids` : `(α/2) ‖G x‖²`, `G` le gradient discret) ;
 /// ajoute son gradient à `gradient`. Les poids sont **fixés** : la valeur reste quadratique en `x`.
-fn regularization(x: &Array3<f64>, domaine: &Array3<bool>, h: f64, alpha: f64, poids: Option<&EdgeWeights>, gradient: &mut Array3<f64>) -> f64 {
+fn regularization(
+    x: &Array3<f64>,
+    domaine: &Array3<bool>,
+    h: f64,
+    alpha: f64,
+    poids: Option<&EdgeWeights>,
+    gradient: &mut Array3<f64>,
+) -> f64 {
     let (nx, ny, nz) = x.dim();
     let mut valeur = 0.0;
     for axe in 0..3 {
@@ -549,7 +646,9 @@ pub struct EdgeWeights {
 impl EdgeWeights {
     /// Tous les poids à 1 (la régularisation de Tikhonov).
     pub fn ones(dims: (usize, usize, usize)) -> EdgeWeights {
-        EdgeWeights { by_axis: [Array3::ones(dims), Array3::ones(dims), Array3::ones(dims)] }
+        EdgeWeights {
+            by_axis: [Array3::ones(dims), Array3::ones(dims), Array3::ones(dims)],
+        }
     }
 
     /// **Poids de Huber** (moindres carrés repondérés itérés) pour l'image courante `x` : sur une arête de différence `d = x_b − x_a`, le poids vaut 1 si `|d| ≤ δ` (zone lisse ou bruitée : pénalité quadratique) et `δ / |d|` sinon
@@ -579,7 +678,9 @@ impl EdgeWeights {
             return poids;
         }
         let milieu = valeurs.len() / 2;
-        let mediane = *valeurs.select_nth_unstable_by(milieu, |a, b| a.partial_cmp(b).unwrap()).1;
+        let mediane = *valeurs
+            .select_nth_unstable_by(milieu, |a, b| a.partial_cmp(b).unwrap())
+            .1;
         let delta = kappa * mediane;
         if !(delta > 0.0) || !delta.is_finite() {
             return poids;
@@ -641,10 +742,23 @@ mod tests {
     }
 
     /// Écrit un stack (image et masque) d'affine donnée et le relit, masque attaché.
-    fn stack_avec_masque(t: &Temp, nom: &str, data: &Array3<f32>, masque: &Array3<u8>, affine: &Matrix4<f64>, pixdim: [f32; 3]) -> Stack {
+    fn stack_avec_masque(
+        t: &Temp,
+        nom: &str,
+        data: &Array3<f32>,
+        masque: &Array3<u8>,
+        affine: &Matrix4<f64>,
+        pixdim: [f32; 3],
+    ) -> Stack {
         let h = en_tete(affine, pixdim);
-        let (image, m) = (t.fichier(&format!("{nom}.nii.gz")), t.fichier(&format!("{nom}_mask.nii.gz")));
-        WriterOptions::new(&image).reference_header(&h).write_nifti(data).unwrap();
+        let (image, m) = (
+            t.fichier(&format!("{nom}.nii.gz")),
+            t.fichier(&format!("{nom}_mask.nii.gz")),
+        );
+        WriterOptions::new(&image)
+            .reference_header(&h)
+            .write_nifti(data)
+            .unwrap();
         WriterOptions::new(&m).reference_header(&h).write_nifti(masque).unwrap();
         let mut stack = Stack::read(&image).unwrap();
         stack.set_brain_mask(&m).unwrap();
@@ -665,7 +779,8 @@ mod tests {
     /// pour 3 couples résolution / marge.
     #[test]
     fn grid_matches_the_python_reference_on_real_stacks() {
-        let tsv = std::fs::read_to_string(format!("{}/data/reference/grid/grilles.tsv", racine())).expect("références absentes : lancer scripts/make_reference_grid.py");
+        let tsv = std::fs::read_to_string(format!("{}/data/reference/grid/grilles.tsv", racine()))
+            .expect("références absentes : lancer scripts/make_reference_grid.py");
         let mut n_lignes = 0;
         for ligne in tsv.lines() {
             let c: Vec<&str> = ligne.split('\t').collect();
@@ -678,15 +793,30 @@ mod tests {
                     let mut s = Stack::read(Path::new(&format!("{}/{chemin}", racine()))).unwrap();
                     let (dossier, nom) = chemin.rsplit_once("/anat/").unwrap();
                     let (sujet_ses, _) = (dossier.strip_prefix("data/svr/jeu_reel_tru_haste/").unwrap(), ());
-                    let masque = format!("{}/data/svr/jeu_reel_tru_haste/derivatives/medx-fetalbet/{sujet_ses}/anat/{}", racine(), nom.replace("_T2w.nii.gz", "_desc-brain_mask.nii.gz"));
+                    let masque = format!(
+                        "{}/data/svr/jeu_reel_tru_haste/derivatives/medx-fetalbet/{sujet_ses}/anat/{}",
+                        racine(),
+                        nom.replace("_T2w.nii.gz", "_desc-brain_mask.nii.gz")
+                    );
                     s.set_brain_mask(Path::new(&masque)).unwrap();
                     s
                 })
                 .collect();
             let g = reconstruction_grid(&stacks, resolution, marge).unwrap();
-            assert_eq!((g.dims.0, g.dims.1, g.dims.2), (n[0], n[1], n[2]), "{} résolution {resolution} marge {marge}", c[2]);
+            assert_eq!(
+                (g.dims.0, g.dims.1, g.dims.2),
+                (n[0], n[1], n[2]),
+                "{} résolution {resolution} marge {marge}",
+                c[2]
+            );
             for a in 0..3 {
-                assert!((g.affine[(a, 3)] - bas[a]).abs() < 1e-6, "{} axe {a} : {} contre {}", c[2], g.affine[(a, 3)], bas[a]);
+                assert!(
+                    (g.affine[(a, 3)] - bas[a]).abs() < 1e-6,
+                    "{} axe {a} : {} contre {}",
+                    c[2],
+                    g.affine[(a, 3)],
+                    bas[a]
+                );
                 assert_eq!(g.affine[(a, a)], resolution);
             }
             n_lignes += 1;
@@ -698,16 +828,28 @@ mod tests {
     #[test]
     fn grid_covers_the_mask_with_the_margin() {
         let t = Temp::new("grille");
-        let affine = Matrix4::new(1.0, 0.0, 0.0, 10.0, 0.0, 2.0, 0.0, 20.0, 0.0, 0.0, 3.0, 30.0, 0.0, 0.0, 0.0, 1.0);
+        let affine = Matrix4::new(
+            1.0, 0.0, 0.0, 10.0, 0.0, 2.0, 0.0, 20.0, 0.0, 0.0, 3.0, 30.0, 0.0, 0.0, 0.0, 1.0,
+        );
         let mut masque = Array3::<u8>::zeros((6, 5, 4));
         for k in 0..3 {
             masque[[k, k, k]] = 1; // positions monde (10, 20, 30), (11, 22, 33), (12, 24, 36)
         }
-        let stack = stack_avec_masque(&t, "s", &Array3::from_elem((6, 5, 4), 1.0), &masque, &affine, [1.0, 2.0, 3.0]);
+        let stack = stack_avec_masque(
+            &t,
+            "s",
+            &Array3::from_elem((6, 5, 4), 1.0),
+            &masque,
+            &affine,
+            [1.0, 2.0, 3.0],
+        );
         let g = reconstruction_grid(&[stack], 1.0, 2.0).unwrap();
         // bas = (8, 18, 28), haut = (14, 26, 38) -> n = (6+1, 8+1, 10+1)
         assert_eq!((g.dims.0, g.dims.1, g.dims.2), (7, 9, 11));
-        assert_eq!([g.affine[(0, 3)], g.affine[(1, 3)], g.affine[(2, 3)]], [8.0, 18.0, 28.0]);
+        assert_eq!(
+            [g.affine[(0, 3)], g.affine[(1, 3)], g.affine[(2, 3)]],
+            [8.0, 18.0, 28.0]
+        );
         assert!(g.affine.fixed_view::<3, 3>(0, 0).determinant() > 0.0);
         let v = g.zeros();
         assert_eq!(v.dim(), g.dims);
@@ -720,13 +862,36 @@ mod tests {
         let t = Temp::new("grille_erreurs");
         let affine = Matrix4::identity();
         let masque = Array3::<u8>::from_elem((3, 3, 3), 1);
-        let avec = stack_avec_masque(&t, "a", &Array3::from_elem((3, 3, 3), 1.0), &masque, &affine, [1.0, 1.0, 1.0]);
+        let avec = stack_avec_masque(
+            &t,
+            "a",
+            &Array3::from_elem((3, 3, 3), 1.0),
+            &masque,
+            &affine,
+            [1.0, 1.0, 1.0],
+        );
         assert!(matches!(reconstruction_grid(&[], 1.0, 0.0), Err(SvrError::NoStacks)));
-        for (res, marge) in [(0.0, 1.0), (-1.0, 1.0), (f64::NAN, 1.0), (f64::INFINITY, 1.0), (1.0, -0.1), (1.0, f64::NAN)] {
-            assert!(matches!(reconstruction_grid(std::slice::from_ref(&avec), res, marge), Err(SvrError::InvalidGrid)), "{res} / {marge}");
+        for (res, marge) in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (1.0, -0.1),
+            (1.0, f64::NAN),
+        ] {
+            assert!(
+                matches!(
+                    reconstruction_grid(std::slice::from_ref(&avec), res, marge),
+                    Err(SvrError::InvalidGrid)
+                ),
+                "{res} / {marge}"
+            );
         }
         let sans = Stack::read(&t.fichier("a.nii.gz")).unwrap();
-        assert!(matches!(reconstruction_grid(&[sans], 1.0, 0.0), Err(SvrError::NoMask(_))));
+        assert!(matches!(
+            reconstruction_grid(&[sans], 1.0, 0.0),
+            Err(SvrError::NoMask(_))
+        ));
     }
 
     /// Critère 2 : si toutes les coupes viennent d'un volume constant, l'adjoint normalisé redonne la constante partout où le support
@@ -741,32 +906,64 @@ mod tests {
             alea ^= alea << 17;
             (alea >> 11) as f64 / (1u64 << 53) as f64
         };
-        let axial = affine_centree(&Rotation3::from_euler_angles(0.1, -0.15, 0.2), [1.0, 1.0, 2.0], [11.5, 11.5, 1.5], [0.0, 0.0, 0.0]);
-        let coronal = affine_centree(&Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2 + 0.1, 0.05, -0.1), [1.0, 1.0, 2.0], [11.5, 11.5, 1.5], [1.0, 0.5, -0.5]);
+        let axial = affine_centree(
+            &Rotation3::from_euler_angles(0.1, -0.15, 0.2),
+            [1.0, 1.0, 2.0],
+            [11.5, 11.5, 1.5],
+            [0.0, 0.0, 0.0],
+        );
+        let coronal = affine_centree(
+            &Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2 + 0.1, 0.05, -0.1),
+            [1.0, 1.0, 2.0],
+            [11.5, 11.5, 1.5],
+            [1.0, 0.5, -0.5],
+        );
         let stacks: Vec<Stack> = [("ax", axial), ("cor", coronal)]
             .iter()
             .map(|(nom, a)| {
                 let masque = Array3::from_shape_fn((24, 24, 4), |_| u8::from(suivant() < 0.6)); // masque partiel : 60 % des pixels
-                stack_avec_masque(&t, nom, &Array3::from_elem((24, 24, 4), 5.0), &masque, a, [1.0, 1.0, 2.0])
+                stack_avec_masque(
+                    &t,
+                    nom,
+                    &Array3::from_elem((24, 24, 4), 5.0),
+                    &masque,
+                    a,
+                    [1.0, 1.0, 2.0],
+                )
             })
             .collect();
         // BrainMask::read garde la plus grande composante connexe : le masque effectif est un sous-ensemble du tirage
         let grille = reconstruction_grid(&stacks, 1.0, 3.0).unwrap();
         let r = normalized_adjoint(&grille, &stacks).unwrap();
         let couverts = r.support.iter().filter(|&&s| s >= SUPPORT_MIN).count();
-        let pire = r.image.iter().zip(r.support.iter()).filter(|(_, &s)| s >= SUPPORT_MIN).map(|(&v, _)| (v - 5.0).abs()).fold(0.0_f32, f32::max);
-        println!("{couverts} voxels couverts sur {} ; écart max à la constante : {pire:.1e}", r.image.len());
+        let pire = r
+            .image
+            .iter()
+            .zip(r.support.iter())
+            .filter(|(_, &s)| s >= SUPPORT_MIN)
+            .map(|(&v, _)| (v - 5.0).abs())
+            .fold(0.0_f32, f32::max);
+        println!(
+            "{couverts} voxels couverts sur {} ; écart max à la constante : {pire:.1e}",
+            r.image.len()
+        );
         assert!(couverts > 1000, "trop peu de voxels couverts : {couverts}");
         assert!(pire < 1e-4, "{pire}");
         // hors support : 0
-        assert!(r.image.iter().zip(r.support.iter()).filter(|(_, &s)| s < SUPPORT_MIN).all(|(&v, _)| v == 0.0));
+        assert!(r
+            .image
+            .iter()
+            .zip(r.support.iter())
+            .filter(|(_, &s)| s < SUPPORT_MIN)
+            .all(|(&v, _)| v == 0.0));
     }
     /// Un atlas de Gholipour (`STAxx`, tous centrés en 0) et trois stacks (axial, coronal, sagittal ; pixels 0,8 mm, épaisseur 3,5 mm, légèrement
     /// obliques) simulés par l'opérateur de l'étape 2, sans mouvement ni bruit. Les stacks sont mis en **cache** dans `data/atlas/sim/<atlas>/` (hors de Git) : la
     /// simulation (≈ 1 min en release) n'est refaite que si les fichiers manquent. Le masque d'un pixel est « couvert et tissu (> 150) ».
     fn stacks_atlas_sans_bruit(nom_atlas: &str) -> (Volume, Vec<Stack>) {
         let chemin = format!("{}/data/atlas/gholipour/{nom_atlas}.nii.gz", racine());
-        let atlas = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
+        let atlas =
+            Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
         let dossier = PathBuf::from(format!("{}/data/atlas/sim/{nom_atlas}", racine()));
         std::fs::create_dir_all(&dossier).unwrap();
         let demi_tour = std::f64::consts::FRAC_PI_2;
@@ -779,11 +976,21 @@ mod tests {
         let stacks = specs
             .iter()
             .map(|(nom, r)| {
-                let (image, masque_chemin) = (dossier.join(format!("{nom}.nii.gz")), dossier.join(format!("{nom}_mask.nii.gz")));
+                let (image, masque_chemin) = (
+                    dossier.join(format!("{nom}.nii.gz")),
+                    dossier.join(format!("{nom}_mask.nii.gz")),
+                );
                 if !image.exists() || !masque_chemin.exists() {
                     let affine = affine_centree(r, [0.8, 0.8, 3.5], [93.5, 93.5, 19.5], [0.0, 0.0, 0.0]);
                     let t = Temp::new(&format!("atlas_{nom}"));
-                    let modele = stack_avec_masque(&t, "modele", &Array3::zeros(dims), &Array3::from_elem(dims, 1u8), &affine, [0.8, 0.8, 3.5]);
+                    let modele = stack_avec_masque(
+                        &t,
+                        "modele",
+                        &Array3::zeros(dims),
+                        &Array3::from_elem(dims, 1u8),
+                        &affine,
+                        [0.8, 0.8, 3.5],
+                    );
                     let (mut data, mut masque) = (Array3::<f32>::zeros(dims), Array3::<u8>::zeros(dims));
                     for coupe in modele.slices() {
                         let sim = atlas.simulate_slice(&coupe, &coupe.psf());
@@ -793,8 +1000,14 @@ mod tests {
                         }
                     }
                     let h = en_tete(&affine, [0.8, 0.8, 3.5]);
-                    WriterOptions::new(&image).reference_header(&h).write_nifti(&data).unwrap();
-                    WriterOptions::new(&masque_chemin).reference_header(&h).write_nifti(&masque).unwrap();
+                    WriterOptions::new(&image)
+                        .reference_header(&h)
+                        .write_nifti(&data)
+                        .unwrap();
+                    WriterOptions::new(&masque_chemin)
+                        .reference_header(&h)
+                        .write_nifti(&masque)
+                        .unwrap();
                 }
                 let mut stack = Stack::read(&image).unwrap();
                 stack.set_brain_mask(&masque_chemin).unwrap();
@@ -822,16 +1035,34 @@ mod tests {
                 let masque_chemin = dossier.join(format!("stack{n}_mask.nii.gz"));
                 if !image.exists() || !masque_chemin.exists() {
                     let masque = propre.brain_mask().unwrap().voxels();
-                    let (somme, n_m) = propre.data().iter().zip(masque.iter()).filter(|(_, &m)| m).fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
+                    let (somme, n_m) = propre
+                        .data()
+                        .iter()
+                        .zip(masque.iter())
+                        .filter(|(_, &m)| m)
+                        .fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
                     let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
                     let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919);
                     let bruite = propre.data().mapv(|v| {
                         let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0; // somme de 12 uniformes - 6 : gaussienne centrée réduite approchée
                         (f64::from(v) + sigma * gauss) as f32
                     });
-                    let h = en_tete(propre.affine(), [propre.spacing()[0] as f32, propre.spacing()[1] as f32, propre.spacing()[2] as f32]);
-                    WriterOptions::new(&image).reference_header(&h).write_nifti(&bruite).unwrap();
-                    WriterOptions::new(&masque_chemin).reference_header(&h).write_nifti(&masque.mapv(u8::from)).unwrap();
+                    let h = en_tete(
+                        propre.affine(),
+                        [
+                            propre.spacing()[0] as f32,
+                            propre.spacing()[1] as f32,
+                            propre.spacing()[2] as f32,
+                        ],
+                    );
+                    WriterOptions::new(&image)
+                        .reference_header(&h)
+                        .write_nifti(&bruite)
+                        .unwrap();
+                    WriterOptions::new(&masque_chemin)
+                        .reference_header(&h)
+                        .write_nifti(&masque.mapv(u8::from))
+                        .unwrap();
                 }
                 let mut stack = Stack::read(&image).unwrap();
                 stack.set_brain_mask(&masque_chemin).unwrap();
@@ -845,7 +1076,10 @@ mod tests {
         let n = a.len() as f64;
         let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
         let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
-        let (va, vb): (f64, f64) = (a.iter().map(|x| (x - ma).powi(2)).sum(), b.iter().map(|y| (y - mb).powi(2)).sum());
+        let (va, vb): (f64, f64) = (
+            a.iter().map(|x| (x - ma).powi(2)).sum(),
+            b.iter().map(|y| (y - mb).powi(2)).sum(),
+        );
         cov / (va * vb).sqrt()
     }
 
@@ -867,7 +1101,12 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let debut = std::time::Instant::now();
         let r = normalized_adjoint(&grille, &stacks).unwrap();
-        println!("grille {:?} ({} voxels) ; adjoint normalisé en {:.1} s", grille.dims, r.image.len(), debut.elapsed().as_secs_f64());
+        println!(
+            "grille {:?} ({} voxels) ; adjoint normalisé en {:.1} s",
+            grille.dims,
+            r.image.len(),
+            debut.elapsed().as_secs_f64()
+        );
         let singles: Vec<Volume> = stacks.iter().map(Volume::from_stack).collect();
         // voxels de comparaison : support suffisant, tissu de l'atlas, et lisibles dans les trois stacks pour les lignes de base
         let (mut x0, mut verite) = (Vec::new(), Vec::new());
@@ -896,10 +1135,21 @@ mod tests {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             v[(v.len() as f64 * 0.99) as usize]
         };
-        println!("{} voxels de comparaison ; dynamique (p99 de l'atlas) {plage:.0}", verite.len());
-        println!("adjoint normalisé : NCC {:.4}, PSNR {:.2} dB", correlation(&x0, &verite), psnr(&x0, &verite, plage));
+        println!(
+            "{} voxels de comparaison ; dynamique (p99 de l'atlas) {plage:.0}",
+            verite.len()
+        );
+        println!(
+            "adjoint normalisé : NCC {:.4}, PSNR {:.2} dB",
+            correlation(&x0, &verite),
+            psnr(&x0, &verite, plage)
+        );
         for (nom, b) in specs.iter().zip(&bases) {
-            println!("stack {nom:9} seul (trilinéaire) : NCC {:.4}, PSNR {:.2} dB", correlation(b, &verite), psnr(b, &verite, plage));
+            println!(
+                "stack {nom:9} seul (trilinéaire) : NCC {:.4}, PSNR {:.2} dB",
+                correlation(b, &verite),
+                psnr(b, &verite, plage)
+            );
         }
         assert!(verite.len() > 100_000, "trop peu de voxels de comparaison");
     }
@@ -925,7 +1175,11 @@ mod tests {
         let mut alea = Alea(0xDEAD_BEEF_1234_5678);
         let specs = [
             ("ax", Rotation3::from_euler_angles(0.1, -0.08, 0.15), [0.0, 0.0, 0.0]),
-            ("cor", Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2 + 0.1, 0.05, -0.08), [1.0, 0.5, -0.5]),
+            (
+                "cor",
+                Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2 + 0.1, 0.05, -0.08),
+                [1.0, 0.5, -0.5],
+            ),
         ];
         let stacks: Vec<Stack> = specs
             .iter()
@@ -940,7 +1194,6 @@ mod tests {
         (grille, stacks)
     }
 
-
     /// Le problème sous forme dense : voxels du domaine, matrice `A` (lignes : pixels de toutes les coupes de tous les stacks ; colonnes :
     /// voxels du domaine, obtenues en appliquant l'opérateur à chaque voxel unité), pixels `y`, masque `m`, paires de voisins du domaine.
     struct Dense {
@@ -952,7 +1205,12 @@ mod tests {
     }
 
     fn systeme_dense(probleme: &ReconstructionProblem, grille: &GridSpec, stacks: &[Stack]) -> Dense {
-        let voxels: Vec<[usize; 3]> = probleme.domain().indexed_iter().filter(|(_, &d)| d).map(|((i, j, k), _)| [i, j, k]).collect();
+        let voxels: Vec<[usize; 3]> = probleme
+            .domain()
+            .indexed_iter()
+            .filter(|(_, &d)| d)
+            .map(|((i, j, k), _)| [i, j, k])
+            .collect();
         let n = voxels.len();
         let (mut y, mut m) = (Vec::new(), Vec::new());
         for stack in stacks {
@@ -985,7 +1243,8 @@ mod tests {
                 }
             }
         }
-        let colonne: std::collections::HashMap<[usize; 3], usize> = voxels.iter().enumerate().map(|(c, v)| (*v, c)).collect();
+        let colonne: std::collections::HashMap<[usize; 3], usize> =
+            voxels.iter().enumerate().map(|(c, v)| (*v, c)).collect();
         let mut paires = Vec::new();
         for (c, v) in voxels.iter().enumerate() {
             for axe in 0..3 {
@@ -996,7 +1255,13 @@ mod tests {
                 }
             }
         }
-        Dense { voxels, a, y, m, paires }
+        Dense {
+            voxels,
+            a,
+            y,
+            m,
+            paires,
+        }
     }
 
     /// Critère 1 : valeur et gradient égalent l'algèbre dense. La matrice `A` est construite en appliquant l'opérateur à chaque voxel
@@ -1030,7 +1295,11 @@ mod tests {
             for coupe in stack.slices() {
                 let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
                 let t = Vector3::new(tire(mm), tire(mm), tire(mm));
-                poses.set(si, coupe.index(), mouvement_rigide(&omega, &t, &coupe.geometric_center()));
+                poses.set(
+                    si,
+                    coupe.index(),
+                    mouvement_rigide(&omega, &t, &coupe.geometric_center()),
+                );
             }
         }
         poses
@@ -1040,15 +1309,25 @@ mod tests {
         let t = Temp::new(if avec_poses { "dense_poses" } else { "dense" });
         let (grille, stacks) = petit_probleme(&t);
         let alpha = 0.7;
-        let poses = if avec_poses { poses_aleatoires(&stacks, 3.0, 2.0, 99) } else { SlicePoses::identity(&stacks) };
+        let poses = if avec_poses {
+            poses_aleatoires(&stacks, 3.0, 2.0, 99)
+        } else {
+            SlicePoses::identity(&stacks)
+        };
         let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &poses, alpha).unwrap();
         let dense = systeme_dense(&probleme, &grille, &stacks);
         let (voxels, a, y, m, paires) = (dense.voxels, dense.a, dense.y, dense.m, dense.paires);
         let n = voxels.len();
         let hors = probleme.domain().iter().filter(|&&d| !d).count();
-        println!("grille {:?}, {n} voxels dans le domaine, {hors} hors du domaine", grille.dims);
+        println!(
+            "grille {:?}, {n} voxels dans le domaine, {hors} hors du domaine",
+            grille.dims
+        );
         assert!(n > 40 && n < 600, "taille du problème dense : {n}");
-        assert!(hors > 100, "il faut des voxels hors du domaine pour éprouver leur exclusion : {hors}");
+        assert!(
+            hors > 100,
+            "il faut des voxels hors du domaine pour éprouver leur exclusion : {hors}"
+        );
         let h = grille.resolution_mm;
         let mut alea = Alea(77);
         let x_d = DVector::from_fn(n, |_, _| alea.suivant() * 10.0);
@@ -1060,7 +1339,10 @@ mod tests {
         let masque_ligne = DVector::from_vec(m.clone());
         let r = (&a * &x_d - DVector::from_vec(y)).component_mul(&masque_ligne);
         let data = 0.5 * r.norm_squared();
-        let reg: f64 = paires.iter().map(|&(c1, c2)| 0.5 * alpha * (x_d[c2] - x_d[c1]).powi(2) / (h * h)).sum();
+        let reg: f64 = paires
+            .iter()
+            .map(|&(c1, c2)| 0.5 * alpha * (x_d[c2] - x_d[c1]).powi(2) / (h * h))
+            .sum();
         let mut g = a.transpose() * &r;
         for &(c1, c2) in &paires {
             let d = alpha * (x_d[c2] - x_d[c1]) / (h * h);
@@ -1069,15 +1351,31 @@ mod tests {
         }
         let e = probleme.evaluate(&x_plein);
         let relatif = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-12);
-        println!("attache {:.6} (dense {data:.6}) ; régularisation {:.6} (dense {reg:.6})", e.data, e.regularization);
+        println!(
+            "attache {:.6} (dense {data:.6}) ; régularisation {:.6} (dense {reg:.6})",
+            e.data, e.regularization
+        );
         assert!(relatif(e.data, data) < 1e-5, "{} contre {data}", e.data);
-        assert!(relatif(e.regularization, reg) < 1e-5, "{} contre {reg}", e.regularization);
+        assert!(
+            relatif(e.regularization, reg) < 1e-5,
+            "{} contre {reg}",
+            e.regularization
+        );
         let norme = g.amax();
-        let pire = voxels.iter().enumerate().map(|(c, v)| (e.gradient[*v] - g[c]).abs()).fold(0.0, f64::max) / norme;
+        let pire = voxels
+            .iter()
+            .enumerate()
+            .map(|(c, v)| (e.gradient[*v] - g[c]).abs())
+            .fold(0.0, f64::max)
+            / norme;
         println!("gradient : écart max relatif {pire:.2e} (|g|max = {norme:.2})");
         assert!(pire < 1e-5, "{pire:.2e}");
         // hors du domaine : gradient nul ; changer x hors du domaine ne change rien
-        assert!(e.gradient.indexed_iter().filter(|(idx, _)| !probleme.domain()[*idx]).all(|(_, &v)| v == 0.0));
+        assert!(e
+            .gradient
+            .indexed_iter()
+            .filter(|(idx, _)| !probleme.domain()[*idx])
+            .all(|(_, &v)| v == 0.0));
         let mut autre = x_plein.clone();
         for (idx, v) in autre.indexed_iter_mut() {
             if !probleme.domain()[idx] {
@@ -1129,7 +1427,13 @@ mod tests {
         let t = Temp::new("alpha");
         let (grille, stacks) = petit_probleme(&t);
         for alpha in [-0.1, f64::NAN, f64::INFINITY] {
-            assert!(matches!(ReconstructionProblem::new(&grille, &stacks, alpha), Err(SvrError::InvalidRegularization)), "{alpha}");
+            assert!(
+                matches!(
+                    ReconstructionProblem::new(&grille, &stacks, alpha),
+                    Err(SvrError::InvalidRegularization)
+                ),
+                "{alpha}"
+            );
         }
         assert!(ReconstructionProblem::new(&grille, &stacks, 0.0).is_ok());
     }
@@ -1170,7 +1474,10 @@ mod tests {
 
         // H p dense contre normal_operator, et symétrie pᵀHq = qᵀHp
         let mut alea = Alea(5);
-        let (p, q) = (DVector::from_fn(n, |_, _| alea.suivant() - 0.5), DVector::from_fn(n, |_, _| alea.suivant() - 0.5));
+        let (p, q) = (
+            DVector::from_fn(n, |_, _| alea.suivant() - 0.5),
+            DVector::from_fn(n, |_, _| alea.suivant() - 0.5),
+        );
         let hp = vers_dense(&probleme.normal_operator(&en_plein(&p)));
         let hq = vers_dense(&probleme.normal_operator(&en_plein(&q)));
         let ecart_h = (&hp - &h_d * &p).norm() / (&h_d * &p).norm();
@@ -1202,10 +1509,21 @@ mod tests {
         assert!(r.converged && r.iterations > 5);
         assert!(ecart < 1e-4, "écart à la solution dense {ecart:.2e}");
         assert!(residu_reel <= 1e-3, "résidu réel {residu_reel:.2e}");
-        assert!(r.objective_history.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()), "l'objectif doit décroître");
-        assert!((r.objective_history.last().unwrap() - f_reel).abs() / f_reel.abs() < 1e-6, "{} contre {f_reel}", r.objective_history.last().unwrap());
+        assert!(
+            r.objective_history.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()),
+            "l'objectif doit décroître"
+        );
+        assert!(
+            (r.objective_history.last().unwrap() - f_reel).abs() / f_reel.abs() < 1e-6,
+            "{} contre {f_reel}",
+            r.objective_history.last().unwrap()
+        );
         // nul hors du domaine
-        assert!(r.x.indexed_iter().filter(|(idx, _)| !probleme.domain()[*idx]).all(|(_, &v)| v == 0.0));
+        assert!(r
+            .x
+            .indexed_iter()
+            .filter(|(idx, _)| !probleme.domain()[*idx])
+            .all(|(_, &v)| v == 0.0));
     }
 
     /// Le suivi de l'objectif par récurrence égale l'objectif recalculé à chaque itération (0 à 4), et décroît strictement.
@@ -1220,7 +1538,11 @@ mod tests {
         for k in 0..=4 {
             let r = probleme.conjugate_gradient(&x0, k, 0.0);
             let reel = probleme.evaluate(&r.x).value();
-            assert!((suivi[k] - reel).abs() / reel.abs() < 1e-6, "itération {k} : suivi {} contre recalculé {reel}", suivi[k]);
+            assert!(
+                (suivi[k] - reel).abs() / reel.abs() < 1e-6,
+                "itération {k} : suivi {} contre recalculé {reel}",
+                suivi[k]
+            );
             assert_eq!(r.iterations, k);
         }
         assert!(suivi.windows(2).all(|w| w[1] < w[0]), "{suivi:?}");
@@ -1234,7 +1556,10 @@ mod tests {
         let probleme = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap();
         let depart = Array3::<f64>::from_elem(grille.dims, 3.0);
         let r = probleme.conjugate_gradient(&depart, 0, 1e-12);
-        assert_eq!((r.iterations, r.objective_history.len(), r.residual_history.len()), (0, 1, 1));
+        assert_eq!(
+            (r.iterations, r.objective_history.len(), r.residual_history.len()),
+            (0, 1, 1)
+        );
         for (idx, &v) in r.x.indexed_iter() {
             assert_eq!(v, if probleme.domain()[idx] { 3.0 } else { 0.0 });
         }
@@ -1246,15 +1571,30 @@ mod tests {
     fn bench_reconstruction_on_the_atlas() {
         let (_atlas, stacks) = stacks_atlas_simules("STA21", 0);
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
-        let pixels: usize = stacks.iter().map(|s| s.brain_mask().unwrap().voxels().iter().filter(|&&v| v).count()).sum();
-        println!("{} coupes, {pixels} pixels de masque sur {} ; grille {:?}", stacks.iter().map(|s| s.dim().2).sum::<usize>(), stacks.iter().map(|s| s.data().len()).sum::<usize>(), grille.dims);
+        let pixels: usize = stacks
+            .iter()
+            .map(|s| s.brain_mask().unwrap().voxels().iter().filter(|&&v| v).count())
+            .sum();
+        println!(
+            "{} coupes, {pixels} pixels de masque sur {} ; grille {:?}",
+            stacks.iter().map(|s| s.dim().2).sum::<usize>(),
+            stacks.iter().map(|s| s.data().len()).sum::<usize>(),
+            grille.dims
+        );
         let t = std::time::Instant::now();
         let probleme = ReconstructionProblem::new(&grille, &stacks, 0.1).unwrap();
-        println!("construction (adjoint normalisé compris) : {:.2} s", t.elapsed().as_secs_f64());
+        println!(
+            "construction (adjoint normalisé compris) : {:.2} s",
+            t.elapsed().as_secs_f64()
+        );
         let x0 = probleme.initial_guess();
         let t = std::time::Instant::now();
         let e = probleme.evaluate(&x0);
-        println!("evaluate : {:.2} s (valeur {:.6e})", t.elapsed().as_secs_f64(), e.value());
+        println!(
+            "evaluate : {:.2} s (valeur {:.6e})",
+            t.elapsed().as_secs_f64(),
+            e.value()
+        );
         let t = std::time::Instant::now();
         let hp = probleme.normal_operator(&x0);
         println!("H p : {:.2} s (|Hp|² {:.6e})", t.elapsed().as_secs_f64(), dot(&hp, &hp));
@@ -1263,7 +1603,11 @@ mod tests {
 
     /// Référence **séquentielle et non optimisée** de [`ReconstructionProblem::evaluate_with`] : tous les pixels de chaque coupe sont
     /// simulés, puis rétroprojetés en deux passes (`simulate_slice` suivi de `back_project`), sans `rayon` ni masque dans l'opérateur.
-    fn evaluation_de_reference(probleme: &ReconstructionProblem, x: &Array3<f64>, use_data: bool) -> (f64, f64, Array3<f64>) {
+    fn evaluation_de_reference(
+        probleme: &ReconstructionProblem,
+        x: &Array3<f64>,
+        use_data: bool,
+    ) -> (f64, f64, Array3<f64>) {
         let mut restreint = Array3::<f32>::zeros(probleme.grid.dims);
         for (r, (&v, &d)) in restreint.iter_mut().zip(x.iter().zip(probleme.domain.iter())) {
             if d {
@@ -1288,7 +1632,14 @@ mod tests {
                 volume.back_project(&coupe, &coupe.psf(), residu.view(), &mut gradient);
             }
         }
-        let reg = regularization(x, &probleme.domain, probleme.grid.resolution_mm, probleme.alpha, None, &mut gradient);
+        let reg = regularization(
+            x,
+            &probleme.domain,
+            probleme.grid.resolution_mm,
+            probleme.alpha,
+            None,
+            &mut gradient,
+        );
         for (g, &d) in gradient.iter_mut().zip(probleme.domain.iter()) {
             if !d {
                 *g = 0.0;
@@ -1310,9 +1661,19 @@ mod tests {
             let (data_ref, reg_ref, grad_ref) = evaluation_de_reference(&probleme, &x, use_data);
             let e = probleme.evaluate_with(&x, use_data);
             let norme = grad_ref.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-            let ecart_grad = e.gradient.iter().zip(grad_ref.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / norme;
+            let ecart_grad = e
+                .gradient
+                .iter()
+                .zip(grad_ref.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max)
+                / norme;
             println!("use_data {use_data} : valeur {:.9} (réf {data_ref:.9}) ; gradient : écart max relatif {ecart_grad:.1e}", e.data);
-            assert!((e.data - data_ref).abs() / data_ref.abs() < 1e-9, "{} contre {data_ref}", e.data);
+            assert!(
+                (e.data - data_ref).abs() / data_ref.abs() < 1e-9,
+                "{} contre {data_ref}",
+                e.data
+            );
             assert!((e.regularization - reg_ref).abs() / reg_ref.abs() < 1e-12);
             assert!(ecart_grad < 1e-9, "{ecart_grad:.2e}");
         }
@@ -1328,7 +1689,10 @@ mod tests {
         for stack in &stacks {
             let masque = stack.brain_mask().unwrap();
             for coupe in stack.slices() {
-                let m = masque.voxels().index_axis(Axis(2), coupe.index()).mapv(|v| f32::from(u8::from(v)));
+                let m = masque
+                    .voxels()
+                    .index_axis(Axis(2), coupe.index())
+                    .mapv(|v| f32::from(u8::from(v)));
                 let y = &coupe.data() * &m;
                 let psf = coupe.psf();
                 geometrie.back_project(&coupe, &psf, y.view(), &mut num);
@@ -1338,9 +1702,14 @@ mod tests {
         let r = normalized_adjoint(&grille, &stacks).unwrap();
         let mut pire = 0.0_f64;
         for (idx, &s) in r.support.indexed_iter() {
-            assert!((f64::from(s) - den[idx]).abs() <= 1e-6 * den[idx].abs().max(1e-12), "support {s} contre {}", den[idx]);
+            assert!(
+                (f64::from(s) - den[idx]).abs() <= 1e-6 * den[idx].abs().max(1e-12),
+                "support {s} contre {}",
+                den[idx]
+            );
             if den[idx] as f32 >= SUPPORT_MIN {
-                pire = pire.max((f64::from(r.image[idx]) - num[idx] / den[idx]).abs() / (num[idx] / den[idx]).abs().max(1e-9));
+                pire = pire
+                    .max((f64::from(r.image[idx]) - num[idx] / den[idx]).abs() / (num[idx] / den[idx]).abs().max(1e-9));
             } else {
                 assert_eq!(r.image[idx], 0.0);
             }
@@ -1361,9 +1730,21 @@ mod tests {
         dans: Array3<bool>,
     }
 
-    fn construire_comparaison(grille: &GridSpec, support: &Array3<f32>, atlas: &Volume, stacks: &[Stack]) -> Comparaison {
+    fn construire_comparaison(
+        grille: &GridSpec,
+        support: &Array3<f32>,
+        atlas: &Volume,
+        stacks: &[Stack],
+    ) -> Comparaison {
         let singles: Vec<Volume> = stacks.iter().map(Volume::from_stack).collect();
-        let mut c = Comparaison { voxels: Vec::new(), verite: Vec::new(), bases: vec![Vec::new(); singles.len()], plage: 0.0, atlas_grille: Array3::zeros(grille.dims), dans: Array3::from_elem(grille.dims, false) };
+        let mut c = Comparaison {
+            voxels: Vec::new(),
+            verite: Vec::new(),
+            bases: vec![Vec::new(); singles.len()],
+            plage: 0.0,
+            atlas_grille: Array3::zeros(grille.dims),
+            dans: Array3::from_elem(grille.dims, false),
+        };
         for ((i, j, k), &s) in support.indexed_iter() {
             let monde = (grille.affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
             if let Some(a) = atlas.sample(&monde) {
@@ -1398,7 +1779,10 @@ mod tests {
     /// Norme du gradient (différences centrées, en intensité par voxel) de `a` en `(i, j, k)`.
     fn norme_gradient(a: &Array3<f32>, i: usize, j: usize, k: usize) -> f64 {
         let d = |p: [usize; 3], q: [usize; 3]| f64::from(a[p] - a[q]) / 2.0;
-        (d([i + 1, j, k], [i - 1, j, k]).powi(2) + d([i, j + 1, k], [i, j - 1, k]).powi(2) + d([i, j, k + 1], [i, j, k - 1]).powi(2)).sqrt()
+        (d([i + 1, j, k], [i - 1, j, k]).powi(2)
+            + d([i, j + 1, k], [i, j - 1, k]).powi(2)
+            + d([i, j, k + 1], [i, j, k - 1]).powi(2))
+        .sqrt()
     }
 
     /// (NCC, PSNR en dB, netteté) d'une image sur la grille par rapport à l'atlas, sur le jeu de comparaison. Netteté = gradient moyen de
@@ -1412,7 +1796,14 @@ mod tests {
             if i == 0 || j == 0 || k == 0 || i + 1 >= nx || j + 1 >= ny || k + 1 >= nz {
                 continue;
             }
-            let voisins = [[i + 1, j, k], [i - 1, j, k], [i, j + 1, k], [i, j - 1, k], [i, j, k + 1], [i, j, k - 1]];
+            let voisins = [
+                [i + 1, j, k],
+                [i - 1, j, k],
+                [i, j + 1, k],
+                [i, j - 1, k],
+                [i, j, k + 1],
+                [i, j, k - 1],
+            ];
             if voisins.iter().all(|v| c.dans[*v]) {
                 g_image += norme_gradient(&image32, i, j, k);
                 g_atlas += norme_gradient(&c.atlas_grille, i, j, k);
@@ -1420,7 +1811,11 @@ mod tests {
             }
         }
         assert!(n > 1000);
-        (correlation(&valeurs, &c.verite), psnr(&valeurs, &c.verite, c.plage), g_image / g_atlas)
+        (
+            correlation(&valeurs, &c.verite),
+            psnr(&valeurs, &c.verite, c.plage),
+            g_image / g_atlas,
+        )
     }
 
     /// Reconstruit par gradient conjugué (depuis l'adjoint normalisé) ; rend l'image, le nombre d'itérations, le résidu relatif final et la durée.
@@ -1428,13 +1823,25 @@ mod tests {
         let debut = std::time::Instant::now();
         let probleme = ReconstructionProblem::new(grille, stacks, alpha).unwrap();
         let r = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4);
-        (r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64())
+        (
+            r.x,
+            r.iterations,
+            *r.residual_history.last().unwrap(),
+            debut.elapsed().as_secs_f64(),
+        )
     }
 
     /// Poids de régularisation essayés (log-espacés). La première grille (0,01 à 10, données sans bruit) avait son optimum au bord : étendue vers le bas.
     const ALPHAS_REGLAGE: [f64; 9] = [0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0];
 
-    fn ligne_qualite(nom: &str, c: &Comparaison, image: &Array3<f64>, iterations: usize, residu: f64, duree: f64) -> (f64, f64, f64) {
+    fn ligne_qualite(
+        nom: &str,
+        c: &Comparaison,
+        image: &Array3<f64>,
+        iterations: usize,
+        residu: f64,
+        duree: f64,
+    ) -> (f64, f64, f64) {
         let q = qualite(c, image);
         println!("{nom:12} : NCC {:.4}, PSNR {:6.2} dB, netteté {:.3} ({iterations} itérations, résidu {residu:.1e}, {duree:.1} s)", q.0, q.1, q.2);
         q
@@ -1451,10 +1858,18 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let init = normalized_adjoint(&grille, &stacks).unwrap();
         let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
-        println!("STA21 : {} voxels de comparaison, dynamique {:.0}", c.voxels.len(), c.plage);
+        println!(
+            "STA21 : {} voxels de comparaison, dynamique {:.0}",
+            c.voxels.len(),
+            c.plage
+        );
         ligne_qualite("init", &c, &init.image.mapv(f64::from), 0, 0.0, 0.0);
         for (nom, b) in ["axial", "coronal", "sagittal"].iter().zip(&c.bases) {
-            println!("stack {nom:8} : NCC {:.4}, PSNR {:6.2} dB", correlation(b, &c.verite), psnr(b, &c.verite, c.plage));
+            println!(
+                "stack {nom:8} : NCC {:.4}, PSNR {:6.2} dB",
+                correlation(b, &c.verite),
+                psnr(b, &c.verite, c.plage)
+            );
         }
         let mut meilleur = (f64::MIN, 0.0);
         for alpha in ALPHAS_REGLAGE {
@@ -1464,7 +1879,16 @@ mod tests {
                 meilleur = (q.1, alpha);
             }
         }
-        println!("α retenu (PSNR maximal) : {} ({:.2} dB){}", meilleur.1, meilleur.0, if meilleur.1 == ALPHAS_REGLAGE[0] || meilleur.1 == ALPHAS_REGLAGE[ALPHAS_REGLAGE.len() - 1] { " : AU BORD DE LA GRILLE, optimum non encadré" } else { "" });
+        println!(
+            "α retenu (PSNR maximal) : {} ({:.2} dB){}",
+            meilleur.1,
+            meilleur.0,
+            if meilleur.1 == ALPHAS_REGLAGE[0] || meilleur.1 == ALPHAS_REGLAGE[ALPHAS_REGLAGE.len() - 1] {
+                " : AU BORD DE LA GRILLE, optimum non encadré"
+            } else {
+                ""
+            }
+        );
     }
     /// α retenu par `tune_alpha_on_sta21` (bruit 5 %, grille de 0,0003 à 3) : PSNR maximal à 0,01 (28,93 dB ; 28,76 dB à 0,03), optimum encadré.
     const ALPHA_CHOISI: f64 = 0.01;
@@ -1480,7 +1904,12 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let init = normalized_adjoint(&grille, &stacks).unwrap();
         let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
-        println!("STA31 : grille {:?}, {} voxels de comparaison, dynamique {:.0}", grille.dims, c.voxels.len(), c.plage);
+        println!(
+            "STA31 : grille {:?}, {} voxels de comparaison, dynamique {:.0}",
+            grille.dims,
+            c.voxels.len(),
+            c.plage
+        );
         let q_init = ligne_qualite("init", &c, &init.image.mapv(f64::from), 0, 0.0, 0.0);
         let mut meilleur_stack = (f64::MIN, f64::MIN);
         for (nom, b) in ["axial", "coronal", "sagittal"].iter().zip(&c.bases) {
@@ -1498,19 +1927,36 @@ mod tests {
         println!("critères : NCC {:.4} ≥ 0,95 ; gain sur l'init {:.2} dB ≥ 2 ; meilleur stack seul NCC {:.4} / PSNR {:.2} dB ; durée {t:.0} s", q.0, q.1 - q_init.1, meilleur_stack.0, meilleur_stack.1);
         assert!(q.0 >= 0.95, "NCC {}", q.0);
         assert!(q.1 - q_init.1 >= 2.0, "gain {}", q.1 - q_init.1);
-        assert!(q.0 > meilleur_stack.0 && q.1 > meilleur_stack.1, "doit battre le meilleur stack seul");
+        assert!(
+            q.0 > meilleur_stack.0 && q.1 > meilleur_stack.1,
+            "doit battre le meilleur stack seul"
+        );
         assert!(t < 300.0, "durée {t}");
     }
     /// Copie d'un stack dont l'affine est composée d'un mouvement rigide `T` : rotation de `angle_deg` autour de `axe` (par l'origine, qui est
     /// le centre de l'atlas), puis translation `decalage` (mm). Les voxels et le masque sont inchangés : la géométrie annoncée est fausse.
-    fn stack_perturbe(t: &Temp, nom: &str, stack: &Stack, angle_deg: f64, axe: Vector3<f64>, decalage: Vector3<f64>) -> Stack {
+    fn stack_perturbe(
+        t: &Temp,
+        nom: &str,
+        stack: &Stack,
+        angle_deg: f64,
+        axe: Vector3<f64>,
+        decalage: Vector3<f64>,
+    ) -> Stack {
         let r = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axe), angle_deg.to_radians());
         let mut mouvement = Matrix4::identity();
         mouvement.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
         mouvement.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
         let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
         let sp = stack.spacing();
-        stack_avec_masque(t, nom, stack.data(), &masque, &(mouvement * stack.affine()), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+        stack_avec_masque(
+            t,
+            nom,
+            stack.data(),
+            &masque,
+            &(mouvement * stack.affine()),
+            [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+        )
     }
 
     /// Sensibilité (descriptive, rien n'est forcé) sur STA31 avec `ALPHA_CHOISI` : résolution de la grille (1,0, 0,8 et 0,5 mm), puis stacks
@@ -1526,10 +1972,22 @@ mod tests {
             let init = normalized_adjoint(&grille, &stacks).unwrap();
             let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
             let (x, it, res, t) = reconstruire(&grille, &stacks, ALPHA_CHOISI);
-            println!("résolution {resolution} mm : grille {:?} ({:.1} M voxels), {} voxels de comparaison", grille.dims, (grille.dims.0 * grille.dims.1 * grille.dims.2) as f64 / 1e6, c.voxels.len());
+            println!(
+                "résolution {resolution} mm : grille {:?} ({:.1} M voxels), {} voxels de comparaison",
+                grille.dims,
+                (grille.dims.0 * grille.dims.1 * grille.dims.2) as f64 / 1e6,
+                c.voxels.len()
+            );
             ligne_qualite(&format!("  CG {resolution} mm"), &c, &x, it, res, t);
-            let meilleur = c.bases.iter().map(|b| psnr(b, &c.verite, c.plage)).fold(f64::MIN, f64::max);
-            println!("  meilleur stack seul : PSNR {meilleur:.2} dB ; init : PSNR {:.2} dB", qualite(&c, &init.image.mapv(f64::from)).1);
+            let meilleur = c
+                .bases
+                .iter()
+                .map(|b| psnr(b, &c.verite, c.plage))
+                .fold(f64::MIN, f64::max);
+            println!(
+                "  meilleur stack seul : PSNR {meilleur:.2} dB ; init : PSNR {:.2} dB",
+                qualite(&c, &init.image.mapv(f64::from)).1
+            );
         }
         // poses perturbées, à 0,8 mm
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
@@ -1553,9 +2011,23 @@ mod tests {
                     if cibles.contains(&n) {
                         // un sens différent par stack, pour que les erreurs ne se compensent pas
                         let signe = if n % 2 == 0 { 1.0 } else { -1.0 };
-                        stack_perturbe(&t, &format!("{nom}_{n}").replace([' ', '/', '°', '±'], "_"), s, signe * angle, axe, signe * mm * dec)
+                        stack_perturbe(
+                            &t,
+                            &format!("{nom}_{n}").replace([' ', '/', '°', '±'], "_"),
+                            s,
+                            signe * angle,
+                            axe,
+                            signe * mm * dec,
+                        )
                     } else {
-                        stack_perturbe(&t, &format!("{nom}_{n}_id").replace([' ', '/', '°', '±'], "_"), s, 0.0, axe, Vector3::zeros())
+                        stack_perturbe(
+                            &t,
+                            &format!("{nom}_{n}_id").replace([' ', '/', '°', '±'], "_"),
+                            s,
+                            0.0,
+                            axe,
+                            Vector3::zeros(),
+                        )
                     }
                 })
                 .collect();
@@ -1580,12 +2052,27 @@ mod tests {
         let points = [4, 8, 12];
         let device = burn::tensor::Device::flex().autodiff();
         let traces: Vec<(&str, optimizers::Trace)> = vec![
-            ("gradient conjugué", optimizers::conjugate_gradient(&probleme, &x0, budget, &points)),
-            ("plus forte pente", optimizers::steepest_descent(&probleme, &x0, budget, &points)),
-            ("Barzilai-Borwein", optimizers::barzilai_borwein(&probleme, &x0, budget, &points)),
+            (
+                "gradient conjugué",
+                optimizers::conjugate_gradient(&probleme, &x0, budget, &points),
+            ),
+            (
+                "plus forte pente",
+                optimizers::steepest_descent(&probleme, &x0, budget, &points),
+            ),
+            (
+                "Barzilai-Borwein",
+                optimizers::barzilai_borwein(&probleme, &x0, budget, &points),
+            ),
             ("Jacobi", optimizers::jacobi(&probleme, &x0, 1.0, budget, &points)),
-            ("Adam (Burn)", optimizers::adam(&probleme, &x0, 0.3, budget, &points, &device)),
-            ("L-BFGS (Burn)", optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, budget, &points, &device)),
+            (
+                "Adam (Burn)",
+                optimizers::adam(&probleme, &x0, 0.3, budget, &points, &device),
+            ),
+            (
+                "L-BFGS (Burn)",
+                optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, budget, &points, &device),
+            ),
         ];
         for (nom, tr) in &traces {
             let f_fin = *tr.objective.last().unwrap();
@@ -1596,19 +2083,38 @@ mod tests {
             for (passes, x) in &tr.snapshots {
                 // la valeur de l'itéré disponible après `passes` passes : objective[passes - 2] pour le gradient conjugué (2 passes de départ),
                 // objective[passes - 1] pour les autres
-                let indice = if *nom == "gradient conjugué" { passes - 2 } else { passes - 1 };
+                let indice = if *nom == "gradient conjugué" {
+                    passes - 2
+                } else {
+                    passes - 1
+                };
                 let reel = probleme.evaluate(x).value();
                 let suivi = tr.objective[indice];
-                assert!((suivi - reel).abs() / reel.abs() < 1e-5, "{nom}, {passes} passes : suivi {suivi} contre recalculé {reel}");
+                assert!(
+                    (suivi - reel).abs() / reel.abs() < 1e-5,
+                    "{nom}, {passes} passes : suivi {suivi} contre recalculé {reel}"
+                );
             }
         }
         // monotones : gradient conjugué et plus forte pente à pas exact
         for nom in ["gradient conjugué", "plus forte pente"] {
             let tr = &traces.iter().find(|(n, _)| *n == nom).unwrap().1;
-            assert!(tr.objective.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()), "{nom} doit être monotone");
+            assert!(
+                tr.objective.windows(2).all(|w| w[1] <= w[0] + 1e-9 * w[0].abs()),
+                "{nom} doit être monotone"
+            );
         }
         // à budget égal, le gradient conjugué n'est pas pire que la plus forte pente (hypothèse de la théorie, vérifiée ici)
-        let f = |nom: &str| *traces.iter().find(|(n, _)| *n == nom).unwrap().1.objective.last().unwrap();
+        let f = |nom: &str| {
+            *traces
+                .iter()
+                .find(|(n, _)| *n == nom)
+                .unwrap()
+                .1
+                .objective
+                .last()
+                .unwrap()
+        };
         assert!(f("gradient conjugué") <= f("plus forte pente") * (1.0 + 1e-9) + 1e-9);
     }
 
@@ -1625,7 +2131,10 @@ mod tests {
         let tr = optimizers::adam(&probleme, &x0, 0.1, 1, &[1], &device);
         for (idx, &v) in tr.snapshots[0].1.indexed_iter() {
             let attendu = if probleme.domain()[idx] { x0[idx] } else { 0.0 };
-            assert!((v - attendu).abs() <= 1e-6 * attendu.abs().max(1.0), "{idx:?} : {v} contre {attendu}");
+            assert!(
+                (v - attendu).abs() <= 1e-6 * attendu.abs().max(1.0),
+                "{idx:?} : {v} contre {attendu}"
+            );
         }
         let _ = a;
     }
@@ -1645,23 +2154,72 @@ mod tests {
         let reference = optimizers::conjugate_gradient(&probleme, &x0, 202, &[]);
         let f_etoile = probleme.evaluate(&reference.x).value();
         let q_etoile = qualite(&c, &reference.x);
-        println!("f₀ = {f0:.6e}, f* = {f_etoile:.6e} (CG, 200 itérations), qualité du minimum : NCC {:.4}, PSNR {:.2} dB", q_etoile.0, q_etoile.1);
+        println!(
+            "f₀ = {f0:.6e}, f* = {f_etoile:.6e} (CG, 200 itérations), qualité du minimum : NCC {:.4}, PSNR {:.2} dB",
+            q_etoile.0, q_etoile.1
+        );
         let points = [10, 25, 50, 100];
         let device = burn::tensor::Device::flex().autodiff();
         let essais: Vec<(String, Box<dyn Fn() -> (optimizers::Trace, usize)>)> = vec![
-            ("gradient conjugué".into(), Box::new(|| (optimizers::conjugate_gradient(&probleme, &x0, 100, &points), 2))),
-            ("plus forte pente".into(), Box::new(|| (optimizers::steepest_descent(&probleme, &x0, 100, &points), 1))),
-            ("Barzilai-Borwein".into(), Box::new(|| (optimizers::barzilai_borwein(&probleme, &x0, 100, &points), 1))),
-            ("Jacobi ω = 0,5".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 0.5, 100, &points), 1))),
-            ("Jacobi ω = 1".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.0, 100, &points), 1))),
-            ("Jacobi ω = 1,5".into(), Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.5, 100, &points), 1))),
-            ("Adam lr = 2".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 2.0, 100, &points, &device), 1))),
-            ("Adam lr = 10".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 10.0, 100, &points, &device), 1))),
-            ("Adam lr = 50".into(), Box::new(|| (optimizers::adam(&probleme, &x0, 50.0, 100, &points, &device), 1))),
-            ("L-BFGS (pas fixe)".into(), Box::new(|| (optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, 100, &points, &device), 1))),
-            ("L-BFGS (Wolfe)".into(), Box::new(|| (optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, 1.0, 100, &points, &device), 1))),
+            (
+                "gradient conjugué".into(),
+                Box::new(|| (optimizers::conjugate_gradient(&probleme, &x0, 100, &points), 2)),
+            ),
+            (
+                "plus forte pente".into(),
+                Box::new(|| (optimizers::steepest_descent(&probleme, &x0, 100, &points), 1)),
+            ),
+            (
+                "Barzilai-Borwein".into(),
+                Box::new(|| (optimizers::barzilai_borwein(&probleme, &x0, 100, &points), 1)),
+            ),
+            (
+                "Jacobi ω = 0,5".into(),
+                Box::new(|| (optimizers::jacobi(&probleme, &x0, 0.5, 100, &points), 1)),
+            ),
+            (
+                "Jacobi ω = 1".into(),
+                Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.0, 100, &points), 1)),
+            ),
+            (
+                "Jacobi ω = 1,5".into(),
+                Box::new(|| (optimizers::jacobi(&probleme, &x0, 1.5, 100, &points), 1)),
+            ),
+            (
+                "Adam lr = 2".into(),
+                Box::new(|| (optimizers::adam(&probleme, &x0, 2.0, 100, &points, &device), 1)),
+            ),
+            (
+                "Adam lr = 10".into(),
+                Box::new(|| (optimizers::adam(&probleme, &x0, 10.0, 100, &points, &device), 1)),
+            ),
+            (
+                "Adam lr = 50".into(),
+                Box::new(|| (optimizers::adam(&probleme, &x0, 50.0, 100, &points, &device), 1)),
+            ),
+            (
+                "L-BFGS (pas fixe)".into(),
+                Box::new(|| {
+                    (
+                        optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, 1.0, 100, &points, &device),
+                        1,
+                    )
+                }),
+            ),
+            (
+                "L-BFGS (Wolfe)".into(),
+                Box::new(|| {
+                    (
+                        optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, 1.0, 100, &points, &device),
+                        1,
+                    )
+                }),
+            ),
         ];
-        println!("{:20} | {:^27} | {:^45} | durée", "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100");
+        println!(
+            "{:20} | {:^27} | {:^45} | durée",
+            "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100"
+        );
         for (nom, lancer) in &essais {
             let debut = std::time::Instant::now();
             let (tr, decalage) = lancer();
@@ -1691,26 +2249,56 @@ mod tests {
         let c = construire_comparaison(&grille, probleme.support(), &atlas, &stacks);
         let x0 = probleme.initial_guess();
         let f0 = probleme.evaluate(&x0).value();
-        let f_etoile = probleme.evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x).value();
+        let f_etoile = probleme
+            .evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x)
+            .value();
         let points = [10, 25, 50, 100];
         let device = burn::tensor::Device::flex().autodiff();
         let essais: Vec<(String, Box<dyn Fn() -> optimizers::Trace>)> = vec![
-            ("Adam lr = 100".into(), Box::new(|| optimizers::adam(&probleme, &x0, 100.0, 100, &points, &device))),
-            ("Adam lr = 200".into(), Box::new(|| optimizers::adam(&probleme, &x0, 200.0, 100, &points, &device))),
-            ("Adam lr = 400".into(), Box::new(|| optimizers::adam(&probleme, &x0, 400.0, 100, &points, &device))),
-            ("L-BFGS échelle f₀".into(), Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, f0, 100, &points, &device))),
-            ("L-BFGS Wolfe échelle f₀".into(), Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, f0, 100, &points, &device))),
+            (
+                "Adam lr = 100".into(),
+                Box::new(|| optimizers::adam(&probleme, &x0, 100.0, 100, &points, &device)),
+            ),
+            (
+                "Adam lr = 200".into(),
+                Box::new(|| optimizers::adam(&probleme, &x0, 200.0, 100, &points, &device)),
+            ),
+            (
+                "Adam lr = 400".into(),
+                Box::new(|| optimizers::adam(&probleme, &x0, 400.0, 100, &points, &device)),
+            ),
+            (
+                "L-BFGS échelle f₀".into(),
+                Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, false, f0, 100, &points, &device)),
+            ),
+            (
+                "L-BFGS Wolfe échelle f₀".into(),
+                Box::new(|| optimizers::lbfgs(&probleme, &x0, 1.0, 10, true, f0, 100, &points, &device)),
+            ),
         ];
-        println!("{:24} | {:^27} | {:^28}", "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100");
+        println!(
+            "{:24} | {:^27} | {:^28}",
+            "optimiseur", "sous-optimalité à 10/25/50/100", "PSNR (dB) à 10/25/50/100"
+        );
         for (nom, lancer) in &essais {
             let tr = lancer();
             let mut sous = Vec::new();
             let mut psnrs = Vec::new();
             for &k in &points {
-                sous.push(((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12));
-                psnrs.push(tr.snapshots.iter().find(|(p, _)| *p == k).map_or(f64::NAN, |(_, x)| qualite(&c, x).1));
+                sous.push(
+                    ((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12),
+                );
+                psnrs.push(
+                    tr.snapshots
+                        .iter()
+                        .find(|(p, _)| *p == k)
+                        .map_or(f64::NAN, |(_, x)| qualite(&c, x).1),
+                );
             }
-            println!("{nom:24} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)", sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes);
+            println!(
+                "{nom:24} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)",
+                sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes
+            );
         }
     }
     /// Sonde de l'explication de l'échec de L-BFGS de Burn (Wolfe, ou mise à l'échelle) : le premier pas vaut `min(1/‖g‖₁, 1) · lr` ; si ce pas est
@@ -1726,15 +2314,38 @@ mod tests {
         let x0 = probleme.initial_guess();
         let e0 = probleme.evaluate(&x0);
         let (f0, g1) = (e0.value(), e0.gradient.iter().map(|v| v.abs()).sum::<f64>());
-        let f_etoile = probleme.evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x).value();
-        println!("‖g₀‖₁ = {g1:.3e}, |g₀|max = {:.3e}", e0.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
+        let f_etoile = probleme
+            .evaluate(&optimizers::conjugate_gradient(&probleme, &x0, 202, &[]).x)
+            .value();
+        println!(
+            "‖g₀‖₁ = {g1:.3e}, |g₀|max = {:.3e}",
+            e0.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+        );
         let points = [10, 25, 50, 100];
         let device = burn::tensor::Device::flex().autodiff();
-        for (nom, wolfe, facteur) in [("sans Wolfe, premier pas 0,1", false, 0.1), ("Wolfe, premier pas 0,1", true, 0.1), ("Wolfe, premier pas 1", true, 1.0)] {
+        for (nom, wolfe, facteur) in [
+            ("sans Wolfe, premier pas 0,1", false, 0.1),
+            ("Wolfe, premier pas 0,1", true, 0.1),
+            ("Wolfe, premier pas 1", true, 1.0),
+        ] {
             let tr = optimizers::lbfgs(&probleme, &x0, facteur * g1, 10, wolfe, 1.0, 100, &points, &device);
-            let sous: Vec<f64> = points.iter().map(|&k| ((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12)).collect();
-            let psnrs: Vec<f64> = points.iter().map(|&k| tr.snapshots.iter().find(|(p, _)| *p == k).map_or(f64::NAN, |(_, x)| qualite(&c, x).1)).collect();
-            println!("{nom:30} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)", sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes);
+            let sous: Vec<f64> = points
+                .iter()
+                .map(|&k| ((tr.objective[(k - 1).min(tr.objective.len() - 1)] - f_etoile) / (f0 - f_etoile)).max(1e-12))
+                .collect();
+            let psnrs: Vec<f64> = points
+                .iter()
+                .map(|&k| {
+                    tr.snapshots
+                        .iter()
+                        .find(|(p, _)| *p == k)
+                        .map_or(f64::NAN, |(_, x)| qualite(&c, x).1)
+                })
+                .collect();
+            println!(
+                "{nom:30} | {:7.1e} {:7.1e} {:7.1e} {:7.1e} | {:6.2} {:6.2} {:6.2} {:6.2} ({} passes)",
+                sous[0], sous[1], sous[2], sous[3], psnrs[0], psnrs[1], psnrs[2], psnrs[3], tr.passes
+            );
         }
     }
     /// Si toutes les coupes d'un stack ont le même mouvement `M`, le problème est identique à celui d'un stack dont l'affine est `M · A` (même
@@ -1744,8 +2355,16 @@ mod tests {
         let t = Temp::new("pose_stack");
         let (grille, stacks) = petit_probleme(&t);
         let mouvements = [
-            mouvement_rigide(&Vector3::new(0.05, -0.03, 0.04), &Vector3::new(1.2, -0.8, 0.5), &Vector3::new(2.0, 1.0, -1.0)),
-            mouvement_rigide(&Vector3::new(-0.04, 0.06, -0.02), &Vector3::new(-0.9, 1.1, 0.3), &Vector3::new(-1.0, 2.0, 0.5)),
+            mouvement_rigide(
+                &Vector3::new(0.05, -0.03, 0.04),
+                &Vector3::new(1.2, -0.8, 0.5),
+                &Vector3::new(2.0, 1.0, -1.0),
+            ),
+            mouvement_rigide(
+                &Vector3::new(-0.04, 0.06, -0.02),
+                &Vector3::new(-0.9, 1.1, 0.3),
+                &Vector3::new(-1.0, 2.0, 0.5),
+            ),
         ];
         let mut poses = SlicePoses::identity(&stacks);
         let mut deplaces = Vec::new();
@@ -1755,23 +2374,51 @@ mod tests {
             }
             let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
             let sp = stack.spacing();
-            deplaces.push(stack_avec_masque(&t, &format!("deplace{si}"), stack.data(), &masque, &(mouvements[si] * stack.affine()), [sp[0] as f32, sp[1] as f32, sp[2] as f32]));
+            deplaces.push(stack_avec_masque(
+                &t,
+                &format!("deplace{si}"),
+                stack.data(),
+                &masque,
+                &(mouvements[si] * stack.affine()),
+                [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+            ));
         }
-        let (a, b) = (ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap(), ReconstructionProblem::new(&grille, &deplaces, 0.7).unwrap());
-        assert_eq!(a.domain().iter().filter(|&&d| d).count(), b.domain().iter().filter(|&&d| d).count(), "même domaine");
+        let (a, b) = (
+            ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap(),
+            ReconstructionProblem::new(&grille, &deplaces, 0.7).unwrap(),
+        );
+        assert_eq!(
+            a.domain().iter().filter(|&&d| d).count(),
+            b.domain().iter().filter(|&&d| d).count(),
+            "même domaine"
+        );
         let mut alea = Alea(4242);
         let x = Array3::from_shape_fn(grille.dims, |_| alea.suivant() * 10.0);
         let (ea, eb) = (a.evaluate(&x), b.evaluate(&x));
         let relatif = |p: f64, q: f64| (p - q).abs() / q.abs().max(1e-12);
-        println!("attache {:.6} / {:.6} ; régularisation {:.6} / {:.6}", ea.data, eb.data, ea.regularization, eb.regularization);
+        println!(
+            "attache {:.6} / {:.6} ; régularisation {:.6} / {:.6}",
+            ea.data, eb.data, ea.regularization, eb.regularization
+        );
         assert!(relatif(ea.data, eb.data) < 1e-5 && relatif(ea.regularization, eb.regularization) < 1e-9);
         let norme = eb.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        let pire = ea.gradient.iter().zip(eb.gradient.iter()).map(|(p, q)| (p - q).abs()).fold(0.0, f64::max) / norme;
+        let pire = ea
+            .gradient
+            .iter()
+            .zip(eb.gradient.iter())
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max)
+            / norme;
         println!("gradient : écart max relatif {pire:.1e}");
         assert!(pire < 1e-5, "{pire:.2e}");
         // et ce n'est pas trivial : sans les poses, le problème est bien différent
         let sans = ReconstructionProblem::new(&grille, &stacks, 0.7).unwrap().evaluate(&x);
-        assert!(relatif(sans.data, eb.data) > 1e-3, "les poses doivent changer le problème : {} contre {}", sans.data, eb.data);
+        assert!(
+            relatif(sans.data, eb.data) > 1e-3,
+            "les poses doivent changer le problème : {} contre {}",
+            sans.data,
+            eb.data
+        );
     }
 
     #[test]
@@ -1779,8 +2426,14 @@ mod tests {
         let t = Temp::new("poses_forme");
         let (grille, stacks) = petit_probleme(&t);
         let autre = SlicePoses::identity(&stacks[..1]);
-        assert!(matches!(ReconstructionProblem::with_poses(&grille, &stacks, &autre, 0.7), Err(SvrError::PoseMismatch)));
-        assert!(matches!(normalized_adjoint_with_poses(&grille, &stacks, &autre), Err(SvrError::PoseMismatch)));
+        assert!(matches!(
+            ReconstructionProblem::with_poses(&grille, &stacks, &autre, 0.7),
+            Err(SvrError::PoseMismatch)
+        ));
+        assert!(matches!(
+            normalized_adjoint_with_poses(&grille, &stacks, &autre),
+            Err(SvrError::PoseMismatch)
+        ));
         assert!(SlicePoses::identity(&stacks).matches(&stacks));
         assert!(!autre.matches(&stacks));
     }
@@ -1789,13 +2442,25 @@ mod tests {
     /// coupe, la coupe est simulée par l'opérateur **à sa position réelle** (PSF orientée avec elle), puis on ajoute `bruit_pct` % de bruit gaussien.
     /// Les stacks gardent leur affine d'en-tête : le mouvement est la quantité inconnue que le recalage devra retrouver. Mis en cache dans
     /// `data/atlas/sim/<atlas>_mvt<amplitude>_b<bruit>/` (les poses vraies dans `poses.tsv`).
-    fn stacks_atlas_avec_mouvement(nom_atlas: &str, amplitude: u32, bruit_pct: u32) -> (Volume, Vec<Stack>, SlicePoses) {
+    fn stacks_atlas_avec_mouvement(
+        nom_atlas: &str,
+        amplitude: u32,
+        bruit_pct: u32,
+    ) -> (Volume, Vec<Stack>, SlicePoses) {
         let (atlas, modeles) = stacks_atlas_sans_bruit(nom_atlas);
-        let dossier = PathBuf::from(format!("{}/data/atlas/sim/{nom_atlas}_mvt{amplitude}_b{bruit_pct}", racine()));
+        let dossier = PathBuf::from(format!(
+            "{}/data/atlas/sim/{nom_atlas}_mvt{amplitude}_b{bruit_pct}",
+            racine()
+        ));
         std::fs::create_dir_all(&dossier).unwrap();
         let fichier_poses = dossier.join("poses.tsv");
         if !fichier_poses.exists() {
-            let vraies = poses_aleatoires(&modeles, f64::from(amplitude), f64::from(amplitude), 1000 + u64::from(amplitude));
+            let vraies = poses_aleatoires(
+                &modeles,
+                f64::from(amplitude),
+                f64::from(amplitude),
+                1000 + u64::from(amplitude),
+            );
             let mut lignes = Vec::new();
             for (n, modele) in modeles.iter().enumerate() {
                 let dims = modele.dim();
@@ -1808,10 +2473,18 @@ mod tests {
                         masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0);
                     }
                     let m = vraies.get(n, coupe.index());
-                    lignes.push(format!("{n}\t{}\t{}", coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+                    lignes.push(format!(
+                        "{n}\t{}\t{}",
+                        coupe.index(),
+                        m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")
+                    ));
                 }
                 if bruit_pct > 0 {
-                    let (somme, n_m) = data.iter().zip(masque.iter()).filter(|(_, &m)| m > 0).fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
+                    let (somme, n_m) = data
+                        .iter()
+                        .zip(masque.iter())
+                        .filter(|(_, &m)| m > 0)
+                        .fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
                     let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
                     let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919 ^ u64::from(amplitude));
                     data.mapv_inplace(|v| {
@@ -1821,15 +2494,23 @@ mod tests {
                 }
                 let sp = modele.spacing();
                 let h = en_tete(modele.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32]);
-                WriterOptions::new(dossier.join(format!("stack{n}.nii.gz"))).reference_header(&h).write_nifti(&data).unwrap();
-                WriterOptions::new(dossier.join(format!("stack{n}_mask.nii.gz"))).reference_header(&h).write_nifti(&masque).unwrap();
+                WriterOptions::new(dossier.join(format!("stack{n}.nii.gz")))
+                    .reference_header(&h)
+                    .write_nifti(&data)
+                    .unwrap();
+                WriterOptions::new(dossier.join(format!("stack{n}_mask.nii.gz")))
+                    .reference_header(&h)
+                    .write_nifti(&masque)
+                    .unwrap();
             }
             std::fs::write(&fichier_poses, lignes.join("\n")).unwrap();
         }
         let stacks: Vec<Stack> = (0..modeles.len())
             .map(|n| {
                 let mut stack = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).unwrap();
-                stack.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                stack
+                    .set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz")))
+                    .unwrap();
                 stack
             })
             .collect();
@@ -1837,7 +2518,11 @@ mod tests {
         for ligne in std::fs::read_to_string(&fichier_poses).unwrap().lines() {
             let c: Vec<&str> = ligne.split('\t').collect();
             let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
-            vraies.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+            vraies.set(
+                c[0].parse().unwrap(),
+                c[1].parse().unwrap(),
+                Matrix4::from_iterator(valeurs.iter().copied()),
+            );
         }
         (atlas, stacks, vraies)
     }
@@ -1853,7 +2538,10 @@ mod tests {
             let (atlas, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", amplitude, 5);
             let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
             let identite = SlicePoses::identity(&stacks);
-            let (haute, basse) = (ReconstructionProblem::with_poses(&grille, &stacks, &vraies, 0.01).unwrap(), ReconstructionProblem::with_poses(&grille, &stacks, &identite, 0.01).unwrap());
+            let (haute, basse) = (
+                ReconstructionProblem::with_poses(&grille, &stacks, &vraies, 0.01).unwrap(),
+                ReconstructionProblem::with_poses(&grille, &stacks, &identite, 0.01).unwrap(),
+            );
             let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
             let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
             // erreur de départ : déplacement entre pose d'en-tête et vraie pose, sur les pixels de masque
@@ -1872,10 +2560,20 @@ mod tests {
                 }
             }
             println!("--- mouvement ±{amplitude}°/±{amplitude} mm : erreur de départ (déplacement quadratique moyen) {:.2} mm", (somme / n as f64).sqrt());
-            for (nom, probleme) in [("vraies poses (borne haute)", &haute), ("sans correction (borne basse)", &basse)] {
+            for (nom, probleme) in [
+                ("vraies poses (borne haute)", &haute),
+                ("sans correction (borne basse)", &basse),
+            ] {
                 let debut = std::time::Instant::now();
                 let r = probleme.conjugate_gradient(&probleme.initial_guess(), 300, 1e-4);
-                ligne_qualite(nom, &c, &r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64());
+                ligne_qualite(
+                    nom,
+                    &c,
+                    &r.x,
+                    r.iterations,
+                    *r.residual_history.last().unwrap(),
+                    debut.elapsed().as_secs_f64(),
+                );
             }
         }
     }
@@ -1936,13 +2634,26 @@ mod tests {
 
     /// Les deux stacks (axial et coronal, 3 coupes de 28 × 28 pixels de 1 mm, épaisseur 3 mm) dont on fixe la géométrie d'en-tête (sans données).
     fn modeles_de_blobs(t: &Temp) -> Vec<Stack> {
-        [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2, 0.0, 0.0))]
-            .iter()
-            .map(|(nom, r)| {
-                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 1.0], [0.0, 0.0, 0.0]);
-                stack_avec_masque(t, &format!("{nom}_modele"), &Array3::zeros((28, 28, 3)), &Array3::from_elem((28, 28, 3), 1u8), &affine, [1.0, 1.0, 3.0])
-            })
-            .collect()
+        [
+            ("ax", Rotation3::identity()),
+            (
+                "cor",
+                Rotation3::from_euler_angles(std::f64::consts::FRAC_PI_2, 0.0, 0.0),
+            ),
+        ]
+        .iter()
+        .map(|(nom, r)| {
+            let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 1.0], [0.0, 0.0, 0.0]);
+            stack_avec_masque(
+                t,
+                &format!("{nom}_modele"),
+                &Array3::zeros((28, 28, 3)),
+                &Array3::from_elem((28, 28, 3), 1u8),
+                &affine,
+                [1.0, 1.0, 3.0],
+            )
+        })
+        .collect()
     }
 
     /// Simule depuis `volume` les stacks de `modeles` avec le mouvement vrai `vraies` (par coupe) ; les stacks gardent leur affine d'en-tête.
@@ -1952,7 +2663,13 @@ mod tests {
     }
 
     /// Comme [`simuler_blobs`], avec en plus un champ de biais multiplicatif `exp(champ(stack, position nominale))`, fixe dans le repère du scanner (position d'en-tête du pixel).
-    fn simuler_blobs_avec_champ(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses, champ: Option<&dyn Fn(usize, &Vector3<f64>) -> f64>) -> Vec<Stack> {
+    fn simuler_blobs_avec_champ(
+        t: &Temp,
+        volume: &Volume,
+        modeles: &[Stack],
+        vraies: &SlicePoses,
+        champ: Option<&dyn Fn(usize, &Vector3<f64>) -> f64>,
+    ) -> Vec<Stack> {
         let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
         modeles
             .iter()
@@ -1963,12 +2680,27 @@ mod tests {
                     let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
                     let sim = volume.simulate_slice(&posee, &posee.psf());
                     for ((i, j), &v) in sim.values.indexed_iter() {
-                        let gain = champ.map_or(1.0, |f| f(n, &(modele.affine() * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0)).xyz()).exp());
+                        let gain = champ.map_or(1.0, |f| {
+                            f(
+                                n,
+                                &(modele.affine()
+                                    * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0))
+                                .xyz(),
+                            )
+                            .exp()
+                        });
                         data[[i, j, coupe.index()]] = (f64::from(v) * gain) as f32;
                         masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
                     }
                 }
-                stack_avec_masque(t, &format!("blobs{n}"), &data, &masque, modele.affine(), [1.0, 1.0, 3.0])
+                stack_avec_masque(
+                    t,
+                    &format!("blobs{n}"),
+                    &data,
+                    &masque,
+                    modele.affine(),
+                    [1.0, 1.0, 3.0],
+                )
             })
             .collect()
     }
@@ -1993,9 +2725,22 @@ mod tests {
         let depart = erreurs_de_pose(&stacks, &identite, &vraies);
         let rapport = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
         let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
-        println!("erreur de départ par coupe {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
-        println!("erreur après recalage      {:?}", apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
-        println!("NCC finales : {:?}", rapport.slices.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+        println!(
+            "erreur de départ par coupe {:?}",
+            depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>()
+        );
+        println!(
+            "erreur après recalage      {:?}",
+            apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>()
+        );
+        println!(
+            "NCC finales : {:?}",
+            rapport
+                .slices
+                .iter()
+                .map(|r| (r.ncc_final * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(rapport.slices.len(), 6);
         assert!(rapport.slices.iter().all(|r| r.registered && r.runs >= 1));
         for (d, a) in depart.iter().zip(&apres) {
@@ -2004,7 +2749,11 @@ mod tests {
         }
         // la correction rapportée est cohérente avec l'amélioration : partant de l'identité, elle vaut à peu près l'erreur de départ
         for (r, d) in rapport.slices.iter().zip(&depart) {
-            assert!((r.correction_rms_mm - d).abs() < 1.0, "correction {} contre erreur de départ {d}", r.correction_rms_mm);
+            assert!(
+                (r.correction_rms_mm - d).abs() < 1.0,
+                "correction {} contre erreur de départ {d}",
+                r.correction_rms_mm
+            );
         }
     }
 
@@ -2029,35 +2778,87 @@ mod tests {
             pire
         };
         // σ = 0 : un seul passage net
-        let direct = align::register_slices(&stacks, &identite, &VolumeTensors::new(&volume, &device), config, &device).unwrap();
+        let direct = align::register_slices(
+            &stacks,
+            &identite,
+            &VolumeTensors::new(&volume, &device),
+            config,
+            &device,
+        )
+        .unwrap();
         let zero = align::register_slices_coarse_to_fine(&stacks, &identite, &volume, 0.0, config, &device).unwrap();
         assert!(ecart(&direct.poses, &zero.poses) < 1e-12);
         // σ > 0 : suite manuelle
         let sigma = 1.5;
         let floue = volume.blurred(sigma).unwrap();
-        let premier = align::register_slices(&stacks, &identite, &VolumeTensors::new(&floue, &device), config, &device).unwrap();
-        let manuel = align::register_slices(&stacks, &premier.poses, &VolumeTensors::new(&volume, &device), config, &device).unwrap();
+        let premier = align::register_slices(
+            &stacks,
+            &identite,
+            &VolumeTensors::new(&floue, &device),
+            config,
+            &device,
+        )
+        .unwrap();
+        let manuel = align::register_slices(
+            &stacks,
+            &premier.poses,
+            &VolumeTensors::new(&volume, &device),
+            config,
+            &device,
+        )
+        .unwrap();
         let c2f = align::register_slices_coarse_to_fine(&stacks, &identite, &volume, sigma, config, &device).unwrap();
-        assert!(ecart(&manuel.poses, &c2f.poses) < 1e-12, "écart à la suite manuelle : {}", ecart(&manuel.poses, &c2f.poses));
+        assert!(
+            ecart(&manuel.poses, &c2f.poses) < 1e-12,
+            "écart à la suite manuelle : {}",
+            ecart(&manuel.poses, &c2f.poses)
+        );
         // la seconde passe compte : sans elle (poses du premier passage seules), le résultat diffère
-        assert!(ecart(&premier.poses, &c2f.poses) > 1e-6, "la passe nette ne change rien : test non discriminant");
-        let (depart, apres) = (erreurs_de_pose(&stacks, &identite, &vraies), erreurs_de_pose(&stacks, &c2f.poses, &vraies));
-        println!("erreur de départ {:?} ; après gros-vers-fin {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
-        assert!(apres.iter().all(|&e| e <= 1.0), "erreurs après gros-vers-fin : {apres:?}");
-        assert!(matches!(align::register_slices_coarse_to_fine(&stacks, &identite, &volume, -1.0, config, &device), Err(SvrError::InvalidBlur)));
+        assert!(
+            ecart(&premier.poses, &c2f.poses) > 1e-6,
+            "la passe nette ne change rien : test non discriminant"
+        );
+        let (depart, apres) = (
+            erreurs_de_pose(&stacks, &identite, &vraies),
+            erreurs_de_pose(&stacks, &c2f.poses, &vraies),
+        );
+        println!(
+            "erreur de départ {:?} ; après gros-vers-fin {:?}",
+            depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(),
+            apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>()
+        );
+        assert!(
+            apres.iter().all(|&e| e <= 1.0),
+            "erreurs après gros-vers-fin : {apres:?}"
+        );
+        assert!(matches!(
+            align::register_slices_coarse_to_fine(&stacks, &identite, &volume, -1.0, config, &device),
+            Err(SvrError::InvalidBlur)
+        ));
     }
 
     /// Trois stacks de blobs plus grands (axial, coronal, sagittal ; 12 coupes de 28 × 28 pixels de 1 mm, épaisseur 3 mm, centrés sur l'origine) : assez de coupes pour que chaque
     /// stack couvre le volume et serve de référence aux deux autres. Géométrie d'en-tête seulement (sans données).
     fn modeles_de_blobs_larges(t: &Temp) -> Vec<Stack> {
         let quart = std::f64::consts::FRAC_PI_2;
-        [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)), ("sag", Rotation3::from_euler_angles(0.0, quart, 0.0))]
-            .iter()
-            .map(|(nom, r)| {
-                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
-                stack_avec_masque(t, &format!("{nom}_large"), &Array3::zeros((28, 28, 12)), &Array3::from_elem((28, 28, 12), 1u8), &affine, [1.0, 1.0, 3.0])
-            })
-            .collect()
+        [
+            ("ax", Rotation3::identity()),
+            ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)),
+            ("sag", Rotation3::from_euler_angles(0.0, quart, 0.0)),
+        ]
+        .iter()
+        .map(|(nom, r)| {
+            let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
+            stack_avec_masque(
+                t,
+                &format!("{nom}_large"),
+                &Array3::zeros((28, 28, 12)),
+                &Array3::from_elem((28, 28, 12), 1u8),
+                &affine,
+                [1.0, 1.0, 3.0],
+            )
+        })
+        .collect()
     }
 
     /// Un mouvement rigide **par stack** (le même pour toutes ses coupes), autour de l'origine, tiré dans ± `degres` et ± `mm`.
@@ -2094,7 +2895,8 @@ mod tests {
             let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
             let identite = SlicePoses::identity(&stacks);
             let avant = erreurs_apres_mouvement_commun(&stacks, &identite, &vraies, false);
-            let resultat = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            let resultat =
+                align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
             let apres = erreurs_apres_mouvement_commun(&stacks, &resultat.poses, &vraies, false);
             let desalignement = desalignement_entre_stacks(&stacks, &resultat.poses, &vraies);
             let max = |v: &Vec<f64>| v.iter().cloned().fold(0.0_f64, f64::max);
@@ -2102,22 +2904,63 @@ mod tests {
                 max(&avant), max(&apres), desalignement_entre_stacks(&stacks, &identite, &vraies).iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>(),
                 desalignement.iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>(), resultat.stacks.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
             assert!(max(&avant) > 2.0, "le départ doit être non trivial : {}", max(&avant));
-            assert!(max(&apres) <= 1.0, "graine {graine} : erreur après alignement {}", max(&apres));
+            assert!(
+                max(&apres) <= 1.0,
+                "graine {graine} : erreur après alignement {}",
+                max(&apres)
+            );
             assert!(desalignement.iter().all(|&d| d < 1.0), "{desalignement:?}");
             for (si, stack) in stacks.iter().enumerate() {
                 let premiere = *resultat.poses.get(si, 0);
-                assert!(stack.slices().all(|c| (resultat.poses.get(si, c.index()) - premiere).abs().max() < 1e-12), "poses non uniformes dans le stack {si}");
+                assert!(
+                    stack
+                        .slices()
+                        .all(|c| (resultat.poses.get(si, c.index()) - premiere).abs().max() < 1e-12),
+                    "poses non uniformes dans le stack {si}"
+                );
             }
             assert!(!resultat.stacks[0].registered && resultat.stacks[1].registered && resultat.stacks[2].registered);
-            assert_eq!(*resultat.poses.get(0, 0), Matrix4::identity(), "l'ancre doit rester à l'identité");
+            assert_eq!(
+                *resultat.poses.get(0, 0),
+                Matrix4::identity(),
+                "l'ancre doit rester à l'identité"
+            );
         }
         // un seul stack : rien à aligner ; erreurs d'entrée
         let vraies = poses_par_stack(&modeles, 4.0, 4.0, 5);
         let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
-        let seul = align::register_stacks(&grille, &stacks[..1], &SlicePoses::identity(&stacks[..1]), 2, RobustConfig::new(0.9), &device).unwrap();
+        let seul = align::register_stacks(
+            &grille,
+            &stacks[..1],
+            &SlicePoses::identity(&stacks[..1]),
+            2,
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
         assert_eq!(*seul.poses.get(0, 0), Matrix4::identity());
-        assert!(matches!(align::register_stacks(&grille, &stacks, &SlicePoses::identity(&stacks[..1]), 2, RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
-        assert!(matches!(align::register_stacks(&grille, &modeles[..2], &SlicePoses::identity(&modeles[..2]), 2, RobustConfig::new(0.9), &device), Ok(_) | Err(SvrError::NoMask(_))));
+        assert!(matches!(
+            align::register_stacks(
+                &grille,
+                &stacks,
+                &SlicePoses::identity(&stacks[..1]),
+                2,
+                RobustConfig::new(0.9),
+                &device
+            ),
+            Err(SvrError::PoseMismatch)
+        ));
+        assert!(matches!(
+            align::register_stacks(
+                &grille,
+                &modeles[..2],
+                &SlicePoses::identity(&modeles[..2]),
+                2,
+                RobustConfig::new(0.9),
+                &device
+            ),
+            Ok(_) | Err(SvrError::NoMask(_))
+        ));
     }
 
     /// Recalage de stacks, composition à gauche (comme `register_slices_composes_on_the_left_when_the_current_pose_is_large`) : poses courantes `M₀` grosses (±20°/±3 mm par stack),
@@ -2162,7 +3005,14 @@ mod tests {
         let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
         let propres = simuler_blobs(&t, &volume, &modeles, &vraies);
         let injectes_facteurs = facteurs_injectes(&propres, 0.15, 4242);
-        let injectes: Vec<Stack> = propres.iter().zip(&injectes_facteurs).map(|(s, f)| s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap()).collect();
+        let injectes: Vec<Stack> = propres
+            .iter()
+            .zip(&injectes_facteurs)
+            .map(|(s, f)| {
+                s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>())
+                    .unwrap()
+            })
+            .collect();
         let estimes = estimate_slice_scales(&injectes, &vraies, &volume).unwrap();
         let brutes = raw_slice_scales(&injectes, &vraies, &volume).unwrap();
         let mut valeurs_vraies: Vec<f64> = Vec::new();
@@ -2194,12 +3044,29 @@ mod tests {
         assert!(n_est >= 30 && n_un >= 1, "{n_est} / {n_un}");
         assert!(pire < 1e-3, "erreur relative maximale {pire}");
         // correction : redonne les pixels de départ à un facteur global près (la médiane vraie)
-        let corriges: Vec<Stack> = injectes.iter().zip(&estimes).map(|(s, f)| s.divided_by_slice_scales(f).unwrap()).collect();
+        let corriges: Vec<Stack> = injectes
+            .iter()
+            .zip(&estimes)
+            .map(|(s, f)| s.divided_by_slice_scales(f).unwrap())
+            .collect();
         let (si, k) = (1usize, 5usize);
-        let (a, b) = (corriges[si].data().index_axis(Axis(2), k), propres[si].data().index_axis(Axis(2), k));
-        let ecart = a.iter().zip(b.iter()).map(|(x, y)| (f64::from(*x) * mediane_vraie - f64::from(*y)).abs()).fold(0.0_f64, f64::max);
-        assert!(ecart < 1e-2 * f64::from(propres[si].data().iter().cloned().fold(0.0_f32, f32::max)), "la correction ne redonne pas les pixels : {ecart}");
-        assert!(matches!(raw_slice_scales(&injectes, &SlicePoses::identity(&injectes[..1]), &volume), Err(SvrError::PoseMismatch)));
+        let (a, b) = (
+            corriges[si].data().index_axis(Axis(2), k),
+            propres[si].data().index_axis(Axis(2), k),
+        );
+        let ecart = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (f64::from(*x) * mediane_vraie - f64::from(*y)).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            ecart < 1e-2 * f64::from(propres[si].data().iter().cloned().fold(0.0_f32, f32::max)),
+            "la correction ne redonne pas les pixels : {ecart}"
+        );
+        assert!(matches!(
+            raw_slice_scales(&injectes, &SlicePoses::identity(&injectes[..1]), &volume),
+            Err(SvrError::PoseMismatch)
+        ));
     }
 
     /// Pose de la coupe de centre `c` qui déplace ce centre de `d` et tourne de `rotvec` (vecteur de rotation, radians) autour de lui.
@@ -2225,7 +3092,13 @@ mod tests {
         let centre = |si: usize, k: usize| modeles[si].slices().nth(k).unwrap().geometric_center();
         let lisse = |si: usize, k: usize| {
             let facteur = k as f64 + 1.0;
-            pose_autour_du_centre(&centre(si, k), &(axe * (3.0_f64 * facteur).to_radians()), &Vector3::new(1.0, -0.6, 0.4).normalize().scale(0.3 * facteur + si as f64))
+            pose_autour_du_centre(
+                &centre(si, k),
+                &(axe * (3.0_f64 * facteur).to_radians()),
+                &Vector3::new(1.0, -0.6, 0.4)
+                    .normalize()
+                    .scale(0.3 * facteur + si as f64),
+            )
         };
         for si in 0..3 {
             for k in 0..12 {
@@ -2237,21 +3110,68 @@ mod tests {
         }
         let mut entree = vraies.clone();
         // la coupe 10 du stack 0 : toutes ses voisines (8, 9, 11) sont non recalées ; son déplacement de 12 mm l'aurait fait remplacer si on les comptait comme voisines
-        entree.set(0, 10, pose_autour_du_centre(&centre(0, 10), &(axe * 33.0_f64.to_radians()), &Vector3::new(12.0, 0.0, 0.0)));
-        entree.set(0, 5, pose_autour_du_centre(&centre(0, 5), &(axe * 6.0_f64.to_radians()), &Vector3::new(30.0, 0.0, 0.0)));
-        entree.set(1, 3, pose_autour_du_centre(&centre(1, 3), &(axe * 40.0_f64.to_radians()), &Vector3::new(1.0, 0.0, 0.0)));
+        entree.set(
+            0,
+            10,
+            pose_autour_du_centre(
+                &centre(0, 10),
+                &(axe * 33.0_f64.to_radians()),
+                &Vector3::new(12.0, 0.0, 0.0),
+            ),
+        );
+        entree.set(
+            0,
+            5,
+            pose_autour_du_centre(
+                &centre(0, 5),
+                &(axe * 6.0_f64.to_radians()),
+                &Vector3::new(30.0, 0.0, 0.0),
+            ),
+        );
+        entree.set(
+            1,
+            3,
+            pose_autour_du_centre(
+                &centre(1, 3),
+                &(axe * 40.0_f64.to_radians()),
+                &Vector3::new(1.0, 0.0, 0.0),
+            ),
+        );
         // rotation lisse de la coupe k : 3 (k + 1)° ; la médiane locale de ses 4 voisines est celle de la coupe k + 1, soit 3 (k + 2)° ; écart = |rotation injectée − 3 (k + 2)°|
-        entree.set(2, 7, pose_autour_du_centre(&centre(2, 7), &(axe * 39.0_f64.to_radians()), &Vector3::new(2.4, 0.0, 0.0))); // médiane locale 27° : 39 − 27 = 12° au-dessus du seuil
-        entree.set(2, 4, pose_autour_du_centre(&centre(2, 4), &(axe * 25.0_f64.to_radians()), &Vector3::new(2.5, 0.0, 0.0))); // médiane locale 18° : 25 − 18 = 7° < 10° : conservée
+        entree.set(
+            2,
+            7,
+            pose_autour_du_centre(
+                &centre(2, 7),
+                &(axe * 39.0_f64.to_radians()),
+                &Vector3::new(2.4, 0.0, 0.0),
+            ),
+        ); // médiane locale 27° : 39 − 27 = 12° au-dessus du seuil
+        entree.set(
+            2,
+            4,
+            pose_autour_du_centre(
+                &centre(2, 4),
+                &(axe * 25.0_f64.to_radians()),
+                &Vector3::new(2.5, 0.0, 0.0),
+            ),
+        ); // médiane locale 18° : 25 − 18 = 7° < 10° : conservée
         let r = align::regularize_poses(&modeles, &entree, 2, 5.0, 10.0).unwrap();
         let mut remplacees = r.replaced.clone();
         remplacees.sort();
-        assert_eq!(remplacees, vec![(0, 5), (1, 3), (2, 7)], "coupes remplacées : {remplacees:?}");
+        assert_eq!(
+            remplacees,
+            vec![(0, 5), (1, 3), (2, 7)],
+            "coupes remplacées : {remplacees:?}"
+        );
         for &(si, k) in &remplacees {
             let (nouvelle, vraie) = (r.poses.get(si, k), vraies.get(si, k));
             let c = centre(si, k);
             let d_mm = ((nouvelle * c.push(1.0)).xyz() - (vraie * c.push(1.0)).xyz()).norm();
-            let rot = (Rotation3::from_matrix(&nouvelle.fixed_view::<3, 3>(0, 0).into_owned()) * Rotation3::from_matrix(&vraie.fixed_view::<3, 3>(0, 0).into_owned()).inverse()).angle().to_degrees();
+            let rot = (Rotation3::from_matrix(&nouvelle.fixed_view::<3, 3>(0, 0).into_owned())
+                * Rotation3::from_matrix(&vraie.fixed_view::<3, 3>(0, 0).into_owned()).inverse())
+            .angle()
+            .to_degrees();
             println!("({si},{k}) : remplacée à {d_mm:.2} mm et {rot:.2}° de la pose lisse vraie");
             assert!(d_mm < 1.0 && rot < 4.0, "({si},{k}) : {d_mm} mm, {rot}°");
             // le déplacement du centre ET la rotation sont ceux de la médiane : mesure aux deux extrémités de la coupe, pour qu'une rotation mal placée se voie
@@ -2266,13 +3186,26 @@ mod tests {
         for si in 0..3 {
             for k in 0..12 {
                 if !remplacees.contains(&(si, k)) {
-                    assert_eq!(r.poses.get(si, k), entree.get(si, k), "la pose ({si},{k}) devait rester identique");
+                    assert_eq!(
+                        r.poses.get(si, k),
+                        entree.get(si, k),
+                        "la pose ({si},{k}) devait rester identique"
+                    );
                 }
             }
         }
-        assert!(align::regularize_poses(&modeles, &entree, 2, 100.0, 100.0).unwrap().replaced.is_empty());
-        assert!(align::regularize_poses(&modeles, &entree, 0, 5.0, 10.0).unwrap().replaced.is_empty());
-        assert!(matches!(align::regularize_poses(&modeles, &SlicePoses::identity(&modeles[..1]), 2, 5.0, 10.0), Err(SvrError::PoseMismatch)));
+        assert!(align::regularize_poses(&modeles, &entree, 2, 100.0, 100.0)
+            .unwrap()
+            .replaced
+            .is_empty());
+        assert!(align::regularize_poses(&modeles, &entree, 0, 5.0, 10.0)
+            .unwrap()
+            .replaced
+            .is_empty());
+        assert!(matches!(
+            align::regularize_poses(&modeles, &SlicePoses::identity(&modeles[..1]), 2, 5.0, 10.0),
+            Err(SvrError::PoseMismatch)
+        ));
     }
 
     /// Câblage du rejet des poses aberrantes dans la boucle : trois stacks de blobs de 12 coupes (mouvement par coupe ±2°/±2 mm), 1 cycle. (1) Avec `pose_outlier_window = 0` le résultat n'a aucun
@@ -2288,23 +3221,70 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let identite = SlicePoses::identity(&stacks);
-        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false,
-            cycles: 1, alpha: 0.01, cg_max_iterations: 30, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: 0,
-            leave_slice_out_window: 0, pose_outlier_window: fenetre, pose_outlier_max_mm: mm, pose_outlier_max_deg: deg,
+        let config = |fenetre: usize, mm: f64, deg: f64| align::LoopConfig {
+            min_stack_coverage: 1,
+            skip_unused_reconstructions: false,
+            cycles: 1,
+            alpha: 0.01,
+            cg_max_iterations: 30,
+            cg_tolerance: 1e-4,
+            robust: RobustConfig::new(0.9),
+            leave_one_stack_out_cycles: 0,
+            coarse_sigma_voxels: 0.0,
+            leave_one_slice_out_cycles: 0,
+            leave_slice_out_window: 0,
+            pose_outlier_window: fenetre,
+            pose_outlier_max_mm: mm,
+            pose_outlier_max_deg: deg,
         };
-        let sans = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(0, 5.0, 10.0), &device, |_, _, _| {}).unwrap();
-        let strict = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(2, 0.0, 0.0), &device, |_, _, _| {}).unwrap();
-        let large = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config(2, 100.0, 100.0), &device, |_, _, _| {}).unwrap();
+        let sans = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &identite,
+            config(0, 5.0, 10.0),
+            &device,
+            |_, _, _| {},
+        )
+        .unwrap();
+        let strict = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &identite,
+            config(2, 0.0, 0.0),
+            &device,
+            |_, _, _| {},
+        )
+        .unwrap();
+        let large = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &identite,
+            config(2, 100.0, 100.0),
+            &device,
+            |_, _, _| {},
+        )
+        .unwrap();
         let ecart = |a: &SlicePoses, b: &SlicePoses| {
-            stacks.iter().enumerate().flat_map(|(si, s)| s.slices().map(move |c| (si, c.index()))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max)
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| s.slices().map(move |c| (si, c.index())))
+                .map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
         };
         println!("remplacements par cycle : sans {:?}, seuils nuls {:?}, seuils larges {:?} ; écart des poses finales : nuls {:.3}, larges {:.1e}", sans.pose_replacements, strict.pose_replacements, large.pose_replacements, ecart(&sans.poses, &strict.poses), ecart(&sans.poses, &large.poses));
         assert!(sans.pose_replacements.is_empty());
         assert_eq!(strict.pose_replacements.len(), 1);
         assert!(strict.pose_replacements.iter().sum::<usize>() >= 1);
-        assert!(ecart(&sans.poses, &strict.poses) > 1e-6, "la régularisation n'est pas réinjectée dans la boucle");
+        assert!(
+            ecart(&sans.poses, &strict.poses) > 1e-6,
+            "la régularisation n'est pas réinjectée dans la boucle"
+        );
         assert_eq!(large.pose_replacements, vec![0]);
-        assert!(ecart(&sans.poses, &large.poses) < 1e-12, "des seuils très larges ne doivent rien changer");
+        assert!(
+            ecart(&sans.poses, &large.poses) < 1e-12,
+            "des seuils très larges ne doivent rien changer"
+        );
     }
 
     /// Gros vers fin dans la référence « sans la coupe » (critères fixés avant) : trois stacks de blobs, poses de départ = identité, σ = 1,5 voxel. (1) Pour des coupes du stack coronal, la pose obtenue est EXACTEMENT
@@ -2323,34 +3303,77 @@ mod tests {
         let config = RobustConfig::new(0.9);
         let identite = SlicePoses::identity(&stacks);
         let sigma = 1.5;
-        let flou = align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, sigma, config, &device).unwrap();
-        let net = align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, 0.0, config, &device).unwrap();
-        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| s.slices().map(move |c| (si, c.index()))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        assert!(ecart(&flou.poses, &net.poses) > 1e-6, "le flou ne change rien : réglage ignoré ?");
+        let flou =
+            align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, sigma, config, &device).unwrap();
+        let net =
+            align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, 0.0, config, &device).unwrap();
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| s.slices().map(move |c| (si, c.index())))
+                .map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        assert!(
+            ecart(&flou.poses, &net.poses) > 1e-6,
+            "le flou ne change rien : réglage ignoré ?"
+        );
         let direct = align::register_slices_leave_slice_out(&grille, &stacks, &identite, config, &device).unwrap();
-        assert!(ecart(&direct.poses, &net.poses) < 1e-12, "σ = 0 doit redonner `register_slices_leave_slice_out`");
+        assert!(
+            ecart(&direct.poses, &net.poses) < 1e-12,
+            "σ = 0 doit redonner `register_slices_leave_slice_out`"
+        );
         // calcul manuel en deux passes pour des coupes du stack coronal
         let si = 1usize;
         let (num, den) = adjoint_sums(&grille, &stacks, &identite).unwrap();
         let mut references = std::collections::HashMap::new();
-        align::parcourir_references_sans_fenetre(&grille, &stacks[si], si, &identite, 0, &num, &den, &|_| true, |k, image| {
-            references.insert(k, image.unwrap());
-        });
+        align::parcourir_references_sans_fenetre(
+            &grille,
+            &stacks[si],
+            si,
+            &identite,
+            0,
+            &num,
+            &den,
+            &|_| true,
+            |k, image| {
+                references.insert(k, image.unwrap());
+            },
+        );
         let seul = std::slice::from_ref(&stacks[si]);
         let depart = identite.select(&[si]);
         for k in [4usize, 6] {
             let nette = Volume::new(references[&k].clone(), grille.affine).unwrap();
             let floue = nette.blurred(sigma).unwrap();
-            let p1 = *align::register_slices(seul, &depart, &VolumeTensors::new(&floue, &device), config, &device).unwrap().poses.get(0, k);
+            let p1 = *align::register_slices(seul, &depart, &VolumeTensors::new(&floue, &device), config, &device)
+                .unwrap()
+                .poses
+                .get(0, k);
             let mut apres_premiere = depart.clone();
             apres_premiere.set(0, k, p1);
-            let p2 = *align::register_slices(seul, &apres_premiere, &VolumeTensors::new(&nette, &device), config, &device).unwrap().poses.get(0, k);
+            let p2 = *align::register_slices(
+                seul,
+                &apres_premiere,
+                &VolumeTensors::new(&nette, &device),
+                config,
+                &device,
+            )
+            .unwrap()
+            .poses
+            .get(0, k);
             let ecart_k = (flou.poses.get(si, k) - p2).abs().max();
             println!("coupe {k} : écart à la suite manuelle {ecart_k:.1e}");
             assert!(ecart_k < 1e-9, "coupe {k} : écart à la suite manuelle {ecart_k}");
         }
         for mauvais in [-1.0, f64::NAN, f64::INFINITY] {
-            assert!(matches!(align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, mauvais, config, &device), Err(SvrError::InvalidBlur)), "{mauvais}");
+            assert!(
+                matches!(
+                    align::register_slices_leave_window_out(&grille, &stacks, &identite, 0, mauvais, config, &device),
+                    Err(SvrError::InvalidBlur)
+                ),
+                "{mauvais}"
+            );
         }
     }
 
@@ -2364,12 +3387,23 @@ mod tests {
         let (i1, j1) = ((i0 + 1).min(nx - 1), (j0 + 1).min(ny - 1));
         let (ti, tj) = (i - i0 as f64, j - j0 as f64);
         let p = |a: usize, b: usize| f64::from(image[[a, b]]);
-        Some((1.0 - ti) * (1.0 - tj) * p(i0, j0) + (1.0 - ti) * tj * p(i0, j1) + ti * (1.0 - tj) * p(i1, j0) + ti * tj * p(i1, j1))
+        Some(
+            (1.0 - ti) * (1.0 - tj) * p(i0, j0)
+                + (1.0 - ti) * tj * p(i0, j1)
+                + ti * (1.0 - tj) * p(i1, j0)
+                + ti * tj * p(i1, j1),
+        )
     }
 
     /// RÉFÉRENCE en `f64` de la concordance moyenne de la coupe `k` du stack `si` aux poses `poses` avec toutes les coupes des autres stacks, ou avec les seuls `partenaires` imposés (même définition que `IntersectionProblem::cost` et que la mesure
     /// Python validée, mais calculée par une autre voie : plans tirés des matrices de pose 4×4 complètes, masque interpolé > 0,5 comme dans le coût). Rend (NCC moyenne sur les paires valides, nombre de paires valides).
-    fn concordance_de_reference(stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, partenaires: Option<&[(usize, usize)]>) -> (f64, usize) {
+    fn concordance_de_reference(
+        stacks: &[Stack],
+        poses: &SlicePoses,
+        si: usize,
+        k: usize,
+        partenaires: Option<&[(usize, usize)]>,
+    ) -> (f64, usize) {
         let plan = |s: usize, j: usize| {
             let ma = poses.get(s, j) * stacks[s].affine();
             let (nx, ny, _) = stacks[s].dim();
@@ -2379,7 +3413,12 @@ mod tests {
         };
         let (inv1, c1, n1) = plan(si, k);
         let image1 = stacks[si].data().index_axis(Axis(2), k);
-        let masque1 = stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k).mapv(|m| if m { 1.0_f32 } else { 0.0 });
+        let masque1 = stacks[si]
+            .brain_mask()
+            .unwrap()
+            .voxels()
+            .index_axis(Axis(2), k)
+            .mapv(|m| if m { 1.0_f32 } else { 0.0 });
         let (mut somme, mut n_paires) = (0.0, 0usize);
         for (sj, stack) in stacks.iter().enumerate() {
             if sj == si {
@@ -2397,7 +3436,13 @@ mod tests {
                 let x0 = (n1.dot(&c1) * n2.cross(&d) + n2.dot(&c2) * d.cross(&n1)) / d.norm_squared();
                 let dh = d / d.norm();
                 let image2 = stack.data().index_axis(Axis(2), j);
-                let masque2 = stack.brain_mask().unwrap().voxels().index_axis(Axis(2), j).mapv(|m| if m { 1.0_f32 } else { 0.0 });
+                let masque2 =
+                    stack
+                        .brain_mask()
+                        .unwrap()
+                        .voxels()
+                        .index_axis(Axis(2), j)
+                        .mapv(|m| if m { 1.0_f32 } else { 0.0 });
                 let (mut a, mut b) = (Vec::new(), Vec::new());
                 let mut t = -150.0;
                 while t <= 150.0 + 1e-9 {
@@ -2405,7 +3450,9 @@ mod tests {
                     let (u, v) = (inv1 * p, inv2 * p);
                     if let (Some(va), Some(vb)) = (bilineaire_2d(image1, u.x, u.y), bilineaire_2d(image2, v.x, v.y)) {
                         // règle du coût : un point est dans le masque si le masque interpolé (bilinéaire) y dépasse 0,5
-                        if bilineaire_2d(masque1.view(), u.x, u.y).unwrap_or(0.0) > 0.5 && bilineaire_2d(masque2.view(), v.x, v.y).unwrap_or(0.0) > 0.5 {
+                        if bilineaire_2d(masque1.view(), u.x, u.y).unwrap_or(0.0) > 0.5
+                            && bilineaire_2d(masque2.view(), v.x, v.y).unwrap_or(0.0) > 0.5
+                        {
                             a.push(va);
                             b.push(vb);
                         }
@@ -2416,7 +3463,10 @@ mod tests {
                     let n = a.len() as f64;
                     let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
                     let cov: f64 = a.iter().zip(&b).map(|(x, y)| (x - ma) * (y - mb)).sum();
-                    let (va, vb): (f64, f64) = (a.iter().map(|x| (x - ma).powi(2)).sum(), b.iter().map(|y| (y - mb).powi(2)).sum());
+                    let (va, vb): (f64, f64) = (
+                        a.iter().map(|x| (x - ma).powi(2)).sum(),
+                        b.iter().map(|y| (y - mb).powi(2)).sum(),
+                    );
                     if va > 1e-12 && vb > 1e-12 {
                         somme += cov / (va * vb).sqrt();
                         n_paires += 1;
@@ -2428,7 +3478,13 @@ mod tests {
     }
 
     /// Pose de la coupe `k` du stack `si` après une correction `params` autour du pivot P3 (même convention que le recalage) : `D(params) · M`.
-    fn poses_corrigees(stacks: &[Stack], poses: &SlicePoses, si: usize, k: usize, params: &[f64; 6]) -> (SlicePoses, Vector3<f64>, f64) {
+    fn poses_corrigees(
+        stacks: &[Stack],
+        poses: &SlicePoses,
+        si: usize,
+        k: usize,
+        params: &[f64; 6],
+    ) -> (SlicePoses, Vector3<f64>, f64) {
         let preparee = align::preparer_coupe(&stacks[si], k, *poses.get(si, k)).expect("coupe recalable");
         let delta = crate::diff::pose_to_matrix(params, &preparee.pivot, preparee.echelle);
         let mut p = poses.clone();
@@ -2455,21 +3511,25 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
         let config = crate::s2s::IntersectionConfig::default();
-        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let tenseur = |v: &[f64]| {
+            burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device)
+        };
         let coupes = [(0usize, 4usize), (0, 6), (1, 5), (1, 7), (2, 4), (2, 6)];
         let valeur = |v: burn::prelude::Tensor<1>| f64::from(v.into_data().try_to_vec::<f32>().unwrap()[0]);
         let direction = [1.0, 0.5, -0.5, 1.0, -0.5, 0.7];
         let (mut moyennes, mut pire) = (vec![0.0_f64; 5], 0.0_f64);
         let echelles = [0.0, 0.5, 1.0, 2.0, 4.0];
         for &(si, k) in &coupes {
-            let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device).expect("la coupe doit avoir des partenaires");
+            let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device)
+                .expect("la coupe doit avoir des partenaires");
             for (n, &e) in echelles.iter().enumerate() {
                 let params: [f64; 6] = std::array::from_fn(|c| e * direction[c]);
                 let (corrigees, pivot, scale) = poses_corrigees(&stacks, &vraies, si, k, &params);
                 let tensoriel = valeur(probleme.cost(tenseur(&params), tenseur(&[pivot.x, pivot.y, pivot.z]), scale));
                 let (reference, n_ref) = concordance_de_reference(&stacks, &corrigees, si, k, None);
                 // à pose corrigée, la référence recalcule ses partenaires ; le problème, lui, les gèle : on compare aussi à la référence restreinte aux mêmes partenaires
-                let (reference_gelee, _) = concordance_de_reference(&stacks, &corrigees, si, k, Some(&probleme.partners));
+                let (reference_gelee, _) =
+                    concordance_de_reference(&stacks, &corrigees, si, k, Some(&probleme.partners));
                 moyennes[n] += tensoriel / coupes.len() as f64;
                 if e <= 0.5 {
                     pire = pire.max((tensoriel - reference_gelee).abs());
@@ -2480,19 +3540,34 @@ mod tests {
                 }
             }
         }
-        println!("écart maximal à la référence : {pire:.2e} ; coût moyen selon la perturbation {echelles:?} : {:?}", moyennes.iter().map(|m| (m * 1e4).round() / 1e4).collect::<Vec<_>>());
+        println!(
+            "écart maximal à la référence : {pire:.2e} ; coût moyen selon la perturbation {echelles:?} : {:?}",
+            moyennes.iter().map(|m| (m * 1e4).round() / 1e4).collect::<Vec<_>>()
+        );
         assert!(pire < 5e-3, "écart à la référence : {pire}");
-        assert!(moyennes.windows(2).all(|w| w[1] < w[0]), "la concordance doit baisser quand la perturbation augmente : {moyennes:?}");
+        assert!(
+            moyennes.windows(2).all(|w| w[1] < w[0]),
+            "la concordance doit baisser quand la perturbation augmente : {moyennes:?}"
+        );
         assert!(moyennes[0] - moyennes[4] > 0.1, "dynamique trop faible : {moyennes:?}");
         // gradient contre différences finies de la référence
         for &(si, k) in &coupes[..4] {
-            let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device).unwrap();
+            let probleme =
+                crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device).unwrap();
             let p0 = [0.8, -0.6, 0.4, 0.7, -0.5, 0.9];
             let (_, pivot, scale) = poses_corrigees(&stacks, &vraies, si, k, &p0);
             let params = tenseur(&p0).require_grad();
             let cout = probleme.cost(params.clone(), tenseur(&[pivot.x, pivot.y, pivot.z]), scale);
             let grads = cout.sum().backward();
-            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+            let g_auto: Vec<f64> = params
+                .grad(&grads)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .map(|&v| f64::from(v))
+                .collect();
             let h = 1e-3;
             let g_diff: Vec<f64> = (0..6)
                 .map(|c| {
@@ -2501,14 +3576,24 @@ mod tests {
                     moins[c] -= h;
                     let (pp, _, _) = poses_corrigees(&stacks, &vraies, si, k, &plus);
                     let (pm, _, _) = poses_corrigees(&stacks, &vraies, si, k, &moins);
-                    (concordance_de_reference(&stacks, &pp, si, k, Some(&probleme.partners)).0 - concordance_de_reference(&stacks, &pm, si, k, Some(&probleme.partners)).0) / (2.0 * h)
+                    (concordance_de_reference(&stacks, &pp, si, k, Some(&probleme.partners)).0
+                        - concordance_de_reference(&stacks, &pm, si, k, Some(&probleme.partners)).0)
+                        / (2.0 * h)
                 })
                 .collect();
-            let (na, nd) = (g_auto.iter().map(|v| v * v).sum::<f64>().sqrt(), g_diff.iter().map(|v| v * v).sum::<f64>().sqrt());
+            let (na, nd) = (
+                g_auto.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                g_diff.iter().map(|v| v * v).sum::<f64>().sqrt(),
+            );
             let cosinus = g_auto.iter().zip(&g_diff).map(|(a, b)| a * b).sum::<f64>() / (na * nd);
-            println!("({si},{k}) gradient : norme automatique {na:.4}, différences finies {nd:.4}, cosinus {cosinus:.4}");
+            println!(
+                "({si},{k}) gradient : norme automatique {na:.4}, différences finies {nd:.4}, cosinus {cosinus:.4}"
+            );
             assert!(g_auto.iter().all(|v| v.is_finite()), "gradient non fini : {g_auto:?}");
-            assert!((na - nd).abs() / nd < 5e-2 && cosinus > 0.99, "({si},{k}) : normes {na} / {nd}, cosinus {cosinus}");
+            assert!(
+                (na - nd).abs() / nd < 5e-2 && cosinus > 0.99,
+                "({si},{k}) : normes {na} / {nd}, cosinus {cosinus}"
+            );
         }
     }
 
@@ -2517,13 +3602,24 @@ mod tests {
     fn jeu_oblique_et_masque_partiel_pour_s2s(t: &Temp) -> (Vec<Stack>, Vec<Stack>, SlicePoses) {
         let volume = volume_de_blobs();
         let quart = std::f64::consts::FRAC_PI_2;
-        let modeles: Vec<Stack> = [("ax", Rotation3::identity()), ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)), ("obl", Rotation3::from_euler_angles(0.0, 0.6, 0.0))]
-            .iter()
-            .map(|(nom, r)| {
-                let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
-                stack_avec_masque(t, &format!("{nom}_obl"), &Array3::zeros((28, 28, 12)), &Array3::from_elem((28, 28, 12), 1u8), &affine, [1.0, 1.0, 3.0])
-            })
-            .collect();
+        let modeles: Vec<Stack> = [
+            ("ax", Rotation3::identity()),
+            ("cor", Rotation3::from_euler_angles(quart, 0.0, 0.0)),
+            ("obl", Rotation3::from_euler_angles(0.0, 0.6, 0.0)),
+        ]
+        .iter()
+        .map(|(nom, r)| {
+            let affine = affine_centree(r, [1.0, 1.0, 3.0], [13.5, 13.5, 5.5], [0.0, 0.0, 0.0]);
+            stack_avec_masque(
+                t,
+                &format!("{nom}_obl"),
+                &Array3::zeros((28, 28, 12)),
+                &Array3::from_elem((28, 28, 12), 1u8),
+                &affine,
+                [1.0, 1.0, 3.0],
+            )
+        })
+        .collect();
         let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
         let complets = simuler_blobs(t, &volume, &modeles, &vraies);
         let stacks = complets
@@ -2544,7 +3640,14 @@ mod tests {
                     }
                 }
                 let sp = s.spacing();
-                stack_avec_masque(t, &format!("partiel{n}"), &data, &masque, s.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+                stack_avec_masque(
+                    t,
+                    &format!("partiel{n}"),
+                    &data,
+                    &masque,
+                    s.affine(),
+                    [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+                )
             })
             .collect();
         (stacks, complets, vraies)
@@ -2560,17 +3663,24 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
         let config = crate::s2s::IntersectionConfig::default();
-        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let tenseur = |v: &[f64]| {
+            burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device)
+        };
         let valeur = |v: burn::prelude::Tensor<1>| f64::from(v.into_data().try_to_vec::<f32>().unwrap()[0]);
         let direction = [1.0, 0.5, -0.5, 1.0, -0.5, 0.7];
         let (mut testees, mut pire) = (0usize, 0.0_f64);
         for si in 0..3 {
             for k in 3..9 {
-                let Some(probleme) = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device) else { continue };
+                let Some(probleme) =
+                    crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device)
+                else {
+                    continue;
+                };
                 for e in [0.0, 0.5] {
                     let params: [f64; 6] = std::array::from_fn(|c| e * direction[c]);
                     let (corrigees, pivot, scale) = poses_corrigees(&complets, &vraies, si, k, &params);
-                    let tensoriel = valeur(probleme.cost(tenseur(&params), tenseur(&[pivot.x, pivot.y, pivot.z]), scale));
+                    let tensoriel =
+                        valeur(probleme.cost(tenseur(&params), tenseur(&[pivot.x, pivot.y, pivot.z]), scale));
                     let (gelee, _) = concordance_de_reference(&stacks, &corrigees, si, k, Some(&probleme.partners));
                     pire = pire.max((tensoriel - gelee).abs());
                     if e == 0.0 {
@@ -2600,8 +3710,18 @@ mod tests {
         let (mut somme, mut paires, mut coupes) = (0.0_f64, 0usize, 0usize);
         for (si, stack) in stacks.iter().enumerate() {
             for k in 0..stack.dim().2 {
-                let Some(probleme) = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device) else { continue };
-                let c = f64::from(probleme.cost(zeros(6), zeros(3), 1.0).into_data().try_to_vec::<f32>().unwrap()[0]);
+                let Some(probleme) =
+                    crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &config, &device)
+                else {
+                    continue;
+                };
+                let c = f64::from(
+                    probleme
+                        .cost(zeros(6), zeros(3), 1.0)
+                        .into_data()
+                        .try_to_vec::<f32>()
+                        .unwrap()[0],
+                );
                 somme += c * probleme.n_pairs() as f64;
                 paires += probleme.n_pairs();
                 coupes += 1;
@@ -2610,7 +3730,10 @@ mod tests {
         let moyenne = somme / paires as f64;
         println!("{coupes} coupes avec partenaires ; {paires} paires (Python : 2 × 1449) ; concordance moyenne {moyenne:.4} (Python : 0.9315)");
         assert!((moyenne - 0.9315).abs() < 0.01, "concordance moyenne {moyenne}");
-        assert!((paires as f64 - 2898.0).abs() / 2898.0 < 0.02, "nombre de paires {paires}");
+        assert!(
+            (paires as f64 - 2898.0).abs() / 2898.0 < 0.02,
+            "nombre de paires {paires}"
+        );
     }
 
     /// Recalage d'UNE coupe par concordance aux intersections (critères fixés avant) : sur les blobs, la pose d'une seule coupe est perturbée (6 paramètres tirés dans ±2 mm équivalents autour de son pivot, 6 coupes ×
@@ -2623,8 +3746,15 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
         let config = crate::s2s::IntersectionConfig::default();
-        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
-        let reglages = crate::diff::RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] };
+        let tenseur = |v: &[f64]| {
+            burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device)
+        };
+        let reglages = crate::diff::RegistrationConfig {
+            learning_rate: 0.3,
+            iterations: 120,
+            lr_decay: 0.97,
+            initial: [0.0; 6],
+        };
         let (mut departs, mut finales, mut ameliorations) = (Vec::new(), Vec::new(), 0usize);
         for &(si, k) in &[(0usize, 4usize), (0, 6), (1, 5), (1, 7), (2, 4), (2, 6)] {
             for graine in 1..=3u64 {
@@ -2632,8 +3762,15 @@ mod tests {
                 let p0: [f64; 6] = std::array::from_fn(|_| (alea.suivant() * 2.0 - 1.0) * 2.0);
                 let (perturbees, _, _) = poses_corrigees(&stacks, &vraies, si, k, &p0);
                 let preparee = align::preparer_coupe(&stacks[si], k, *perturbees.get(si, k)).expect("coupe recalable");
-                let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &perturbees, si, k, &config, &device).expect("partenaires");
-                let resultat = crate::s2s::register_slice_s2s(&probleme, tenseur(&[preparee.pivot.x, preparee.pivot.y, preparee.pivot.z]), preparee.echelle, reglages);
+                let probleme =
+                    crate::s2s::IntersectionProblem::build(&atlas, &stacks, &perturbees, si, k, &config, &device)
+                        .expect("partenaires");
+                let resultat = crate::s2s::register_slice_s2s(
+                    &probleme,
+                    tenseur(&[preparee.pivot.x, preparee.pivot.y, preparee.pivot.z]),
+                    preparee.echelle,
+                    reglages,
+                );
                 let delta = crate::diff::pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle);
                 let mut recalees = perturbees.clone();
                 recalees.set(si, k, delta * perturbees.get(si, k));
@@ -2641,17 +3778,29 @@ mod tests {
                 let (e0, e1) = (erreur(&perturbees), erreur(&recalees));
                 let (c0, c1) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
                 println!("({si},{k}) graine {graine} : erreur {e0:.2} → {e1:.2} mm, concordance {c0:.4} → {c1:.4}");
-                assert!(e1 <= e0 + 1e-9, "({si},{k}) graine {graine} : l'erreur augmente ({e0} → {e1})");
-                assert!(c1 >= c0 - 1e-6, "({si},{k}) graine {graine} : la concordance baisse ({c0} → {c1})");
+                assert!(
+                    e1 <= e0 + 1e-9,
+                    "({si},{k}) graine {graine} : l'erreur augmente ({e0} → {e1})"
+                );
+                assert!(
+                    c1 >= c0 - 1e-6,
+                    "({si},{k}) graine {graine} : la concordance baisse ({c0} → {c1})"
+                );
                 ameliorations += usize::from(e1 <= 1.0);
                 departs.push(e0);
                 finales.push(e1);
             }
         }
         departs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("erreur de départ médiane {:.2} mm ; {ameliorations}/18 cas à ≤ 1 mm", departs[9]);
+        println!(
+            "erreur de départ médiane {:.2} mm ; {ameliorations}/18 cas à ≤ 1 mm",
+            departs[9]
+        );
         assert!(departs[9] > 1.5, "perturbation trop faible : {}", departs[9]);
-        assert!(ameliorations as f64 >= 0.9 * 18.0, "seulement {ameliorations}/18 cas à ≤ 1 mm : {finales:?}");
+        assert!(
+            ameliorations as f64 >= 0.9 * 18.0,
+            "seulement {ameliorations}/18 cas à ≤ 1 mm : {finales:?}"
+        );
     }
 
     /// Stack d'ancrage (critères fixés avant, sur les trois stacks de blobs aux vraies poses) : (1) avec `anchor_stack = Some(0)`, tout partenaire d'une coupe est dans le stack 0 ou la coupe est elle-même
@@ -2665,14 +3814,25 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
         let libre = crate::s2s::IntersectionConfig::default();
-        let ancre = crate::s2s::IntersectionConfig { anchor_stack: Some(0), ..libre };
+        let ancre = crate::s2s::IntersectionConfig {
+            anchor_stack: Some(0),
+            ..libre
+        };
         let mut effet = false;
         for (si, stack) in stacks.iter().enumerate() {
             for k in 0..stack.dim().2 {
-                let avec = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &ancre, &device).map(|p| p.partners).unwrap_or_default();
-                let sans = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &libre, &device).map(|p| p.partners).unwrap_or_default();
-                assert!(avec.iter().all(|&(sj, _)| si == 0 || sj == 0), "paire hors ancrage pour ({si}, {k})");
-                let attendue: Vec<(usize, usize)> = sans.iter().copied().filter(|&(sj, _)| si == 0 || sj == 0).collect();
+                let avec = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &ancre, &device)
+                    .map(|p| p.partners)
+                    .unwrap_or_default();
+                let sans = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, si, k, &libre, &device)
+                    .map(|p| p.partners)
+                    .unwrap_or_default();
+                assert!(
+                    avec.iter().all(|&(sj, _)| si == 0 || sj == 0),
+                    "paire hors ancrage pour ({si}, {k})"
+                );
+                let attendue: Vec<(usize, usize)> =
+                    sans.iter().copied().filter(|&(sj, _)| si == 0 || sj == 0).collect();
                 assert_eq!(avec, attendue, "partenaires de ({si}, {k})");
                 effet |= si != 0 && sans.iter().any(|&(sj, _)| sj != 0);
             }
@@ -2689,26 +3849,64 @@ mod tests {
         let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
-        let probleme = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &vraies, 0, 4, &crate::s2s::IntersectionConfig::default(), &device).unwrap();
+        let probleme = crate::s2s::IntersectionProblem::build(
+            &atlas,
+            &stacks,
+            &vraies,
+            0,
+            4,
+            &crate::s2s::IntersectionConfig::default(),
+            &device,
+        )
+        .unwrap();
         let preparee = align::preparer_coupe(&stacks[0], 4, *vraies.get(0, 4)).unwrap();
-        let tenseur = |v: &[f64]| burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device);
+        let tenseur = |v: &[f64]| {
+            burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), &device)
+        };
         let pivot = || tenseur(&[preparee.pivot.x, preparee.pivot.y, preparee.pivot.z]);
-        let cout = |p: &[f64; 6]| f64::from(probleme.cost(tenseur(p), pivot(), preparee.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let cout = |p: &[f64; 6]| {
+            f64::from(
+                probleme
+                    .cost(tenseur(p), pivot(), preparee.echelle)
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()[0],
+            )
+        };
         let depart = [0.4, -0.3, 0.2, 0.5, -0.6, 0.3];
-        let reglages = |iterations, lr, decay| crate::diff::RegistrationConfig { learning_rate: lr, iterations, lr_decay: decay, initial: depart };
+        let reglages = |iterations, lr, decay| crate::diff::RegistrationConfig {
+            learning_rate: lr,
+            iterations,
+            lr_decay: decay,
+            initial: depart,
+        };
         // (1)
         let zero = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(0, 0.3, 0.97));
-        assert!(zero.params.iter().zip(&depart).all(|(a, b)| (a - b).abs() < 1e-6), "départ non respecté : {:?}", zero.params);
+        assert!(
+            zero.params.iter().zip(&depart).all(|(a, b)| (a - b).abs() < 1e-6),
+            "départ non respecté : {:?}",
+            zero.params
+        );
         assert_eq!(zero.ncc_history.len(), 1);
         assert!((zero.ncc_history[0] - cout(&depart)).abs() < 1e-6);
         // (2)
         let vingt = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(20, 0.3, 0.97));
         assert_eq!(vingt.ncc_history.len(), 21);
-        assert!((vingt.ncc_history[20] - cout(&vingt.params)).abs() < 1e-6, "{} contre {}", vingt.ncc_history[20], cout(&vingt.params));
+        assert!(
+            (vingt.ncc_history[20] - cout(&vingt.params)).abs() < 1e-6,
+            "{} contre {}",
+            vingt.ncc_history[20],
+            cout(&vingt.params)
+        );
         // (3)
         let constant = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(2, 1.0, 1.0));
         let decroissant = crate::s2s::register_slice_s2s(&probleme, pivot(), preparee.echelle, reglages(2, 1.0, 0.5));
-        let ecart = constant.params.iter().zip(&decroissant.params).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+        let ecart = constant
+            .params
+            .iter()
+            .zip(&decroissant.params)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
         assert!(ecart >= 0.1, "la décroissance du pas n'a pas d'effet : {ecart}");
     }
 
@@ -2732,16 +3930,30 @@ mod tests {
         }
         let tous: Vec<&(Vector3<f64>, Vector3<f64>)> = paires.iter().flat_map(|(p, _)| p.iter()).collect();
         let n = tous.len() as f64;
-        let (ca, cb) = (tous.iter().map(|p| p.0).sum::<Vector3<f64>>() / n, tous.iter().map(|p| p.1).sum::<Vector3<f64>>() / n);
+        let (ca, cb) = (
+            tous.iter().map(|p| p.0).sum::<Vector3<f64>>() / n,
+            tous.iter().map(|p| p.1).sum::<Vector3<f64>>() / n,
+        );
         let h: nalgebra::Matrix3<f64> = tous.iter().map(|p| (p.0 - ca) * (p.1 - cb).transpose()).sum();
         let svd = h.svd(true, true);
         let (u, v) = (svd.u.unwrap(), svd.v_t.unwrap().transpose());
-        let signe = if (v * u.transpose()).determinant() < 0.0 { -1.0 } else { 1.0 };
+        let signe = if (v * u.transpose()).determinant() < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         let r = v * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, signe)) * u.transpose();
         let t = cb - r * ca;
         paires
             .iter()
-            .map(|(points, _)| if points.is_empty() { f64::NAN } else { (points.iter().map(|(a, b)| (r * a + t - b).norm_squared()).sum::<f64>() / points.len() as f64).sqrt() })
+            .map(|(points, _)| {
+                if points.is_empty() {
+                    f64::NAN
+                } else {
+                    (points.iter().map(|(a, b)| (r * a + t - b).norm_squared()).sum::<f64>() / points.len() as f64)
+                        .sqrt()
+                }
+            })
             .collect()
     }
 
@@ -2757,7 +3969,11 @@ mod tests {
     fn common_motion_removal_is_exact_for_a_common_rigid_motion() {
         let t = Temp::new("s2s_kabsch");
         let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
-        let g = mouvement_rigide(&Vector3::new(0.05, -0.03, 0.04), &Vector3::new(3.0, -2.0, 1.0), &Vector3::new(5.0, 5.0, 5.0));
+        let g = mouvement_rigide(
+            &Vector3::new(0.05, -0.03, 0.04),
+            &Vector3::new(3.0, -2.0, 1.0),
+            &Vector3::new(5.0, 5.0, 5.0),
+        );
         let mut decalees = vraies.clone();
         for (si, stack) in stacks.iter().enumerate() {
             for k in 0..stack.dim().2 {
@@ -2766,12 +3982,20 @@ mod tests {
         }
         let e = erreurs_de_pose_sans_mouvement_commun(&stacks, &decalees, &vraies);
         let finies: Vec<f64> = e.iter().cloned().filter(|v| v.is_finite()).collect(); // une coupe sans pixel de masque sur la grille de 4 en 4 n'a pas d'erreur
-        assert!(finies.len() > 20 && finies.iter().all(|v| *v < 1e-6), "erreurs : {:?}", &e[..5]);
+        assert!(
+            finies.len() > 20 && finies.iter().all(|v| *v < 1e-6),
+            "erreurs : {:?}",
+            &e[..5]
+        );
         // et ce n'est pas trivial : sans le retrait l'erreur est de l'ordre du décalage
         assert!(erreurs_de_pose(&stacks, &decalees, &vraies)[4] > 2.0);
         // une coupe déplacée seule garde une erreur visible
         let mut une = vraies.clone();
-        une.set(0, 4, mouvement_rigide(&Vector3::zeros(), &Vector3::new(4.0, 0.0, 0.0), &Vector3::zeros()) * vraies.get(0, 4));
+        une.set(
+            0,
+            4,
+            mouvement_rigide(&Vector3::zeros(), &Vector3::new(4.0, 0.0, 0.0), &Vector3::zeros()) * vraies.get(0, 4),
+        );
         let e = erreurs_de_pose_sans_mouvement_commun(&stacks, &une, &vraies);
         assert!(e[4] > 3.0, "{}", e[4]);
     }
@@ -2787,21 +4011,68 @@ mod tests {
         let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
-        let (e0, e1) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &rapport.poses, &vraies));
+        let rapport =
+            crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
+        let (e0, e1) = (
+            erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies),
+            erreurs_de_pose_sans_mouvement_commun(&stacks, &rapport.poses, &vraies),
+        );
         let recalees = rapport.slices.iter().filter(|s| s.registered).count();
         let part = |v: &[f64], seuil: f64| 100.0 * v.iter().filter(|&&x| x <= seuil).count() as f64 / v.len() as f64;
         println!("{recalees}/{} coupes recalées ; erreur médiane {:.2} → {:.2} mm, p90 {:.2} → {:.2} ; ≤ 1 mm : {:.0} % → {:.0} %, ≤ 2 mm : {:.0} % → {:.0} %", rapport.slices.len(), quantile(&e0, 0.5), quantile(&e1, 0.5), quantile(&e0, 0.9), quantile(&e1, 0.9), part(&e0, 1.0), part(&e1, 1.0), part(&e0, 2.0), part(&e1, 2.0));
-        let non_recalees: Vec<(usize, usize, f64, f64)> = rapport.slices.iter().enumerate().filter(|(_, s)| !s.registered).map(|(n, s)| (s.stack, s.slice, e0[n], e1[n])).collect();
+        let non_recalees: Vec<(usize, usize, f64, f64)> = rapport
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.registered)
+            .map(|(n, s)| (s.stack, s.slice, e0[n], e1[n]))
+            .collect();
         println!("non recalées (stack, coupe, erreur départ, erreur finale) : {non_recalees:?}");
-        let recal: Vec<usize> = rapport.slices.iter().enumerate().filter(|(_, s)| s.registered).map(|(n, _)| n).collect();
+        let recal: Vec<usize> = rapport
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.registered)
+            .map(|(n, _)| n)
+            .collect();
         let (r0, r1): (Vec<f64>, Vec<f64>) = recal.iter().map(|&n| (e0[n], e1[n])).unzip();
-        println!("sur les {} coupes recalées : erreur médiane {:.2} → {:.2} mm, max {:.2} ; ≤ 2 mm : {:.0} %", recal.len(), quantile(&r0, 0.5), quantile(&r1, 0.5), quantile(&r1, 1.0), part(&r1, 2.0));
-        assert!(rapport.slices.iter().filter(|s| s.registered).all(|s| s.ncc_final >= s.ncc_first), "une concordance a baissé");
-        assert!(quantile(&r1, 0.5) <= 1.0, "erreur médiane (coupes recalées) {}", quantile(&r1, 0.5));
-        assert!(part(&r1, 2.0) >= 90.0, "part ≤ 2 mm (coupes recalées) : {}", part(&r1, 2.0));
-        assert!(quantile(&r1, 0.5) <= 0.5 * quantile(&r0, 0.5), "médiane {} → {}", quantile(&r0, 0.5), quantile(&r1, 0.5));
-        assert!(non_recalees.len() * 4 <= rapport.slices.len(), "trop de coupes non recalées : {}", non_recalees.len());
+        println!(
+            "sur les {} coupes recalées : erreur médiane {:.2} → {:.2} mm, max {:.2} ; ≤ 2 mm : {:.0} %",
+            recal.len(),
+            quantile(&r0, 0.5),
+            quantile(&r1, 0.5),
+            quantile(&r1, 1.0),
+            part(&r1, 2.0)
+        );
+        assert!(
+            rapport
+                .slices
+                .iter()
+                .filter(|s| s.registered)
+                .all(|s| s.ncc_final >= s.ncc_first),
+            "une concordance a baissé"
+        );
+        assert!(
+            quantile(&r1, 0.5) <= 1.0,
+            "erreur médiane (coupes recalées) {}",
+            quantile(&r1, 0.5)
+        );
+        assert!(
+            part(&r1, 2.0) >= 90.0,
+            "part ≤ 2 mm (coupes recalées) : {}",
+            part(&r1, 2.0)
+        );
+        assert!(
+            quantile(&r1, 0.5) <= 0.5 * quantile(&r0, 0.5),
+            "médiane {} → {}",
+            quantile(&r0, 0.5),
+            quantile(&r1, 0.5)
+        );
+        assert!(
+            non_recalees.len() * 4 <= rapport.slices.len(),
+            "trop de coupes non recalées : {}",
+            non_recalees.len()
+        );
     }
 
     /// Correspondance des réglages de `pipeline::loop_config` (critère fixé avant) : chaque champ de `ReconstructionConfig` d'une valeur non défaut se retrouve dans le `LoopConfig` (comparaison de la
@@ -2809,16 +4080,49 @@ mod tests {
     /// relancées : le test de câblage de bout en bout (sans relance, pour la durée) ne les couvre pas, celui-ci si.
     #[test]
     fn the_pipeline_maps_every_setting_to_the_loop_config() {
-        let base = crate::pipeline::ReconstructionConfig { alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3, s2v_cycles: 4, s2v_extra_starts: 2, s2v_start_amplitude_mm: 3.5, s2v_suspect_ncc: 0.7, s2v_skip_unused_reconstructions: true, min_stack_coverage: 3, ..Default::default() };
+        let base = crate::pipeline::ReconstructionConfig {
+            alpha: 0.03,
+            cg_max_iterations: 11,
+            cg_tolerance: 2e-3,
+            s2v_cycles: 4,
+            s2v_extra_starts: 2,
+            s2v_start_amplitude_mm: 3.5,
+            s2v_suspect_ncc: 0.7,
+            s2v_skip_unused_reconstructions: true,
+            min_stack_coverage: 3,
+            ..Default::default()
+        };
         for (sans_la_coupe, par_lots) in [(true, false), (false, true), (true, true)] {
-            let config = crate::pipeline::ReconstructionConfig { s2v_leave_slice_out: sans_la_coupe, s2v_batched: par_lots, ..base.clone() };
-            let attendu = align::LoopConfig { min_stack_coverage: 3, skip_unused_reconstructions: sans_la_coupe,
-                cycles: 4, alpha: 0.03, cg_max_iterations: 11, cg_tolerance: 2e-3,
-                robust: RobustConfig { extra_starts: 2, start_amplitude_mm: 3.5, batched: par_lots, ..RobustConfig::new(0.7) },
-                leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
-                leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
+            let config = crate::pipeline::ReconstructionConfig {
+                s2v_leave_slice_out: sans_la_coupe,
+                s2v_batched: par_lots,
+                ..base.clone()
             };
-            assert_eq!(format!("{:?}", crate::pipeline::loop_config(&config)), format!("{attendu:?}"));
+            let attendu = align::LoopConfig {
+                min_stack_coverage: 3,
+                skip_unused_reconstructions: sans_la_coupe,
+                cycles: 4,
+                alpha: 0.03,
+                cg_max_iterations: 11,
+                cg_tolerance: 2e-3,
+                robust: RobustConfig {
+                    extra_starts: 2,
+                    start_amplitude_mm: 3.5,
+                    batched: par_lots,
+                    ..RobustConfig::new(0.7)
+                },
+                leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 },
+                coarse_sigma_voxels: 0.0,
+                leave_one_slice_out_cycles: if sans_la_coupe { 4 } else { 0 },
+                leave_slice_out_window: 0,
+                pose_outlier_window: 0,
+                pose_outlier_max_mm: 5.0,
+                pose_outlier_max_deg: 10.0,
+            };
+            assert_eq!(
+                format!("{:?}", crate::pipeline::loop_config(&config)),
+                format!("{attendu:?}")
+            );
         }
     }
 
@@ -2836,16 +4140,31 @@ mod tests {
             let p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, alpha).unwrap();
             p.conjugate_gradient(&p.initial_guess(), max, tol).x
         };
-        let relatif = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let relatif = |a: &Array3<f64>, b: &Array3<f64>| {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+                / b.iter().map(|v| v * v).sum::<f64>().sqrt()
+        };
         let mut volumes = Vec::new();
         for (alpha, max, tol) in [(0.02, 2, 1e-12), (0.02, 300, 0.5)] {
-            let config = ReconstructionConfig { alpha, cg_max_iterations: max, cg_tolerance: tol, min_stack_coverage: 1, ..Default::default() };
+            let config = ReconstructionConfig {
+                alpha,
+                cg_max_iterations: max,
+                cg_tolerance: tol,
+                min_stack_coverage: 1,
+                ..Default::default()
+            };
             let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
             let ecart = relatif(&obtenu, &direct(alpha, max, tol));
-            assert!(ecart < 1e-9, "(alpha {alpha}, max {max}, tol {tol}) : écart relatif {ecart:.2e}");
+            assert!(
+                ecart < 1e-9,
+                "(alpha {alpha}, max {max}, tol {tol}) : écart relatif {ecart:.2e}"
+            );
             volumes.push(obtenu);
         }
-        assert!(relatif(&volumes[0], &volumes[1]) > 1e-4, "les deux réglages donnent le même volume : ils n'agissent pas");
+        assert!(
+            relatif(&volumes[0], &volumes[1]) > 1e-4,
+            "les deux réglages donnent le même volume : ils n'agissent pas"
+        );
         assert!(relatif(&volumes[0], &direct(0.01, 2, 1e-12)) > 1e-4, "alpha n'agit pas");
     }
 
@@ -2859,34 +4178,75 @@ mod tests {
         let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
         let grid = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         let (nx, ny, nz) = grid.dims;
-        let volume = Array3::from_shape_fn(grid.dims, |(i, j, k)| (i + 3 * j + 7 * k) as f64 * 0.37 + if i == nx - 1 && j == ny - 1 && k == nz - 1 { 1000.5 } else { 0.0 });
+        let volume = Array3::from_shape_fn(grid.dims, |(i, j, k)| {
+            (i + 3 * j + 7 * k) as f64 * 0.37
+                + if i == nx - 1 && j == ny - 1 && k == nz - 1 {
+                    1000.5
+                } else {
+                    0.0
+                }
+        });
         let rapports: Vec<align::SliceReport> = stacks
             .iter()
             .enumerate()
             .flat_map(|(si, st)| (0..st.dim().2).map(move |k| (si, k)))
-            .map(|(si, k)| align::SliceReport { stack: si, slice: k, registered: (si + k) % 3 != 0, ncc_first: 0.1 * si as f64 + 0.01 * k as f64, ncc_final: 0.5 + 0.013 * k as f64 - 0.07 * si as f64, runs: 1 + k % 4, correction_rms_mm: 0.25 * k as f64 + 0.003 })
+            .map(|(si, k)| align::SliceReport {
+                stack: si,
+                slice: k,
+                registered: (si + k) % 3 != 0,
+                ncc_first: 0.1 * si as f64 + 0.01 * k as f64,
+                ncc_final: 0.5 + 0.013 * k as f64 - 0.07 * si as f64,
+                runs: 1 + k % 4,
+                correction_rms_mm: 0.25 * k as f64 + 0.003,
+            })
             .collect();
-        let sortie = ReconstructionOutput { grid: grid.clone(), volume: volume.clone(), poses: vraies.clone(), slices: rapports.clone() };
+        let sortie = ReconstructionOutput {
+            grid: grid.clone(),
+            volume: volume.clone(),
+            poses: vraies.clone(),
+            slices: rapports.clone(),
+        };
         // (a) volume
         let chemin = t.fichier("volume.nii.gz");
         sortie.write_volume(&chemin).unwrap();
         let relu = Stack::read(&chemin).unwrap();
         assert_eq!(relu.dim(), grid.dims);
-        assert!((relu.affine() - grid.affine).abs().max() < 1e-4, "affine relue : {:?}", relu.affine());
-        assert!(relu.spacing().iter().all(|s| (s - 2.0).abs() < 1e-6), "espacement {:?}", relu.spacing());
+        assert!(
+            (relu.affine() - grid.affine).abs().max() < 1e-4,
+            "affine relue : {:?}",
+            relu.affine()
+        );
+        assert!(
+            relu.spacing().iter().all(|s| (s - 2.0).abs() < 1e-6),
+            "espacement {:?}",
+            relu.spacing()
+        );
         // sform et qform cohérents : le qform relu seul donne la même affine que la grille (régression : un qform sans origine faisait placer le volume à l'origine par MIRTK)
         let mut en_tete = nifti::NiftiHeader::from_file(&chemin).unwrap();
-        assert!(en_tete.sform_code > 0 && en_tete.qform_code > 0, "codes sform {} qform {}", en_tete.sform_code, en_tete.qform_code);
+        assert!(
+            en_tete.sform_code > 0 && en_tete.qform_code > 0,
+            "codes sform {} qform {}",
+            en_tete.sform_code,
+            en_tete.qform_code
+        );
         en_tete.sform_code = 0;
         let par_qform = medoxide_core::affine_depuis_en_tete(&en_tete).unwrap();
         assert_eq!(par_qform.source, medoxide_core::SourceAffine::Qform);
         for l in 0..4 {
             for c in 0..4 {
-                assert!((par_qform.matrice[l][c] - grid.affine[(l, c)]).abs() < 1e-4, "qform relu seul : ({l},{c}) {} contre {}", par_qform.matrice[l][c], grid.affine[(l, c)]);
+                assert!(
+                    (par_qform.matrice[l][c] - grid.affine[(l, c)]).abs() < 1e-4,
+                    "qform relu seul : ({l},{c}) {} contre {}",
+                    par_qform.matrice[l][c],
+                    grid.affine[(l, c)]
+                );
             }
         }
         let valeurs = medoxide_core::read_volume(&chemin).unwrap();
-        assert!(valeurs.iter().zip(volume.iter()).all(|(a, b)| *a == *b as f32), "valeurs différentes");
+        assert!(
+            valeurs.iter().zip(volume.iter()).all(|(a, b)| *a == *b as f32),
+            "valeurs différentes"
+        );
         // (b) poses
         let tsv = t.fichier("poses.tsv");
         sortie.write_poses(&stacks, &tsv).unwrap();
@@ -2896,26 +4256,56 @@ mod tests {
                 assert_eq!(relues.get(si, k), vraies.get(si, k), "pose ({si},{k})");
             }
         }
-        assert!(vraies.get(0, 4) != &vraies.get(0, 4).transpose(), "les poses de test sont symétriques : le test ne voit pas un ordre inversé");
+        assert!(
+            vraies.get(0, 4) != &vraies.get(0, 4).transpose(),
+            "les poses de test sont symétriques : le test ne voit pas un ordre inversé"
+        );
         // (c) dossier inexistant
         let absent = t.fichier("absent/volume.nii.gz");
         assert!(matches!(sortie.write_volume(&absent), Err(SvrError::Write { .. })));
-        assert!(matches!(sortie.write_poses(&stacks, &t.fichier("absent/poses.tsv")), Err(SvrError::Write { .. })));
+        assert!(matches!(
+            sortie.write_poses(&stacks, &t.fichier("absent/poses.tsv")),
+            Err(SvrError::Write { .. })
+        ));
         // (e) indicateur de qualité : une ligne par coupe dans l'ordre, valeurs relues EXACTEMENT
         let tsv_qualite = t.fichier("qualite.tsv");
         sortie.write_quality(&tsv_qualite).unwrap();
         let texte = std::fs::read_to_string(&tsv_qualite).unwrap();
         let lignes: Vec<&str> = texte.lines().collect();
-        assert_eq!(lignes[0], "stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm");
+        assert_eq!(
+            lignes[0],
+            "stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm"
+        );
         assert_eq!(lignes.len(), rapports.len() + 1);
         for (ligne, r) in lignes[1..].iter().zip(&rapports) {
             let c: Vec<&str> = ligne.split('\t').collect();
-            assert_eq!((c[0].parse::<usize>().unwrap(), c[1].parse::<usize>().unwrap(), c[2] == "1", c[5].parse::<usize>().unwrap()), (r.stack, r.slice, r.registered, r.runs));
-            assert_eq!((c[3].parse::<f64>().unwrap(), c[4].parse::<f64>().unwrap(), c[6].parse::<f64>().unwrap()), (r.ncc_first, r.ncc_final, r.correction_rms_mm));
+            assert_eq!(
+                (
+                    c[0].parse::<usize>().unwrap(),
+                    c[1].parse::<usize>().unwrap(),
+                    c[2] == "1",
+                    c[5].parse::<usize>().unwrap()
+                ),
+                (r.stack, r.slice, r.registered, r.runs)
+            );
+            assert_eq!(
+                (
+                    c[3].parse::<f64>().unwrap(),
+                    c[4].parse::<f64>().unwrap(),
+                    c[6].parse::<f64>().unwrap()
+                ),
+                (r.ncc_first, r.ncc_final, r.correction_rms_mm)
+            );
         }
-        assert!(matches!(sortie.write_quality(&t.fichier("absent/q.tsv")), Err(SvrError::Write { .. })));
+        assert!(matches!(
+            sortie.write_quality(&t.fichier("absent/q.tsv")),
+            Err(SvrError::Write { .. })
+        ));
         // (d) forme des stacks
-        assert!(matches!(sortie.write_poses(&stacks[..2], &tsv), Err(SvrError::PoseMismatch)));
+        assert!(matches!(
+            sortie.write_poses(&stacks[..2], &tsv),
+            Err(SvrError::PoseMismatch)
+        ));
     }
 
     /// Reconstruction préservant les contours dans la chaîne (critère fixé avant, blobs, 2 stacks) : `reconstruct_with_poses` avec `edge_kappa > 0` égale EXACTEMENT l'appel direct de `conjugate_gradient_edge_preserving` (mêmes α, κ, nombre de
@@ -2928,13 +4318,30 @@ mod tests {
         let stacks: Vec<Stack> = stacks[..2].to_vec();
         let poses = vraies.select(&[0, 1]);
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
-        let config = ReconstructionConfig { alpha: 0.7, edge_kappa: 1.5, edge_outer: 2, cg_max_iterations: 25, cg_tolerance: 1e-6, min_stack_coverage: 1, ..Default::default() };
+        let config = ReconstructionConfig {
+            alpha: 0.7,
+            edge_kappa: 1.5,
+            edge_outer: 2,
+            cg_max_iterations: 25,
+            cg_tolerance: 1e-6,
+            min_stack_coverage: 1,
+            ..Default::default()
+        };
         let obtenu = reconstruct_with_poses(&grille, &stacks, &poses, &config).unwrap();
         let mut p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap();
         let x0 = p.initial_guess();
         let direct = p.conjugate_gradient_edge_preserving(&x0, 25, 1e-6, 2, 1.5).x;
         assert_eq!(obtenu, direct, "pipeline et appel direct différents");
-        let tikhonov = reconstruct_with_poses(&grille, &stacks, &poses, &ReconstructionConfig { edge_kappa: 0.0, ..config.clone() }).unwrap();
+        let tikhonov = reconstruct_with_poses(
+            &grille,
+            &stacks,
+            &poses,
+            &ReconstructionConfig {
+                edge_kappa: 0.0,
+                ..config.clone()
+            },
+        )
+        .unwrap();
         let q = ReconstructionProblem::with_poses(&grille, &stacks, &poses, 0.7).unwrap();
         let tik_direct = q.conjugate_gradient(&q.initial_guess(), 25, 1e-6).x;
         assert_eq!(tikhonov, tik_direct);
@@ -2946,9 +4353,18 @@ mod tests {
     #[test]
     fn the_device_kind_selects_the_backend() {
         use crate::pipeline::{autodiff_device, DeviceKind};
-        let (cpu, gpu) = (format!("{:?}", autodiff_device(DeviceKind::Cpu)), format!("{:?}", autodiff_device(DeviceKind::Wgpu)));
-        assert!(cpu.contains("Flex") && cpu.contains("Autodiff") && !cpu.contains("Wgpu"), "{cpu}");
-        assert!(gpu.contains("Wgpu") && gpu.contains("Autodiff") && !gpu.contains("Flex"), "{gpu}");
+        let (cpu, gpu) = (
+            format!("{:?}", autodiff_device(DeviceKind::Cpu)),
+            format!("{:?}", autodiff_device(DeviceKind::Wgpu)),
+        );
+        assert!(
+            cpu.contains("Flex") && cpu.contains("Autodiff") && !cpu.contains("Wgpu"),
+            "{cpu}"
+        );
+        assert!(
+            gpu.contains("Wgpu") && gpu.contains("Autodiff") && !gpu.contains("Flex"),
+            "{gpu}"
+        );
     }
 
     /// Device par défaut par algorithme (critère fixé avant) : le CPU pour le coupe-coupe comme pour le coupe-volume (décision de conception après les mesures wgpu : plus lent, mêmes poses).
@@ -2969,46 +4385,147 @@ mod tests {
         let t = Temp::new("pipeline");
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
         // (a) coupe-coupe
         // tous les réglages sont NON défaut : un réglage ignoré par `reconstruct` ferait différer la sortie de l'appel direct
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 2, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, s2v_extra_starts: 0, s2v_start_amplitude_mm: 3.0, s2v_suspect_ncc: 0.8, ..Default::default() };
+        let config = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 2,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 0,
+            s2s_temporal_weight: 0.0,
+            s2v_extra_starts: 0,
+            s2v_start_amplitude_mm: 3.0,
+            s2v_suspect_ncc: 0.8,
+            ..Default::default()
+        };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
         let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
         assert_eq!(sortie.grid, grille);
-        let rapport_direct = crate::s2s::register_slices_s2s(&stacks, &SlicePoses::identity(&stacks), &crate::s2s::S2sConfig { sweeps: config.s2s_sweeps, block_levels: config.s2s_block_levels, block_sweeps: config.s2s_block_sweeps, block_search_mm: config.s2s_block_search_mm, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() }, &device).unwrap();
-        assert_eq!(sortie.slices, rapport_direct.slices, "rapports par coupe (s2s) différents de l'appel direct");
+        let rapport_direct = crate::s2s::register_slices_s2s(
+            &stacks,
+            &SlicePoses::identity(&stacks),
+            &crate::s2s::S2sConfig {
+                sweeps: config.s2s_sweeps,
+                block_levels: config.s2s_block_levels,
+                block_sweeps: config.s2s_block_sweeps,
+                block_search_mm: config.s2s_block_search_mm,
+                intersection: crate::s2s::IntersectionConfig {
+                    highpass_sigma_mm: config.s2s_highpass_mm,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        )
+        .unwrap();
+        assert_eq!(
+            sortie.slices, rapport_direct.slices,
+            "rapports par coupe (s2s) différents de l'appel direct"
+        );
         let directes = rapport_direct.poses;
-        assert_eq!(ecart_poses(&sortie.poses, &directes), 0.0, "poses coupe-coupe différentes de l'appel direct");
-        let probleme = ReconstructionProblem::with_poses_covered(&grille, &stacks, &directes, config.alpha, config.min_stack_coverage).unwrap();
-        let attendu = probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x;
+        assert_eq!(
+            ecart_poses(&sortie.poses, &directes),
+            0.0,
+            "poses coupe-coupe différentes de l'appel direct"
+        );
+        let probleme = ReconstructionProblem::with_poses_covered(
+            &grille,
+            &stacks,
+            &directes,
+            config.alpha,
+            config.min_stack_coverage,
+        )
+        .unwrap();
+        let attendu = probleme
+            .conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance)
+            .x;
         let norme = attendu.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let ecart = sortie.volume.iter().zip(attendu.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+        let ecart = sortie
+            .volume
+            .iter()
+            .zip(attendu.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / norme;
         assert!(ecart < 1e-9, "volume coupe-coupe : écart relatif {ecart:.2e}");
         // (b) coupe-volume
-        let config_v = ReconstructionConfig { motion: Motion::SliceToVolume, s2v_cycles: 1, ..config.clone() };
+        let config_v = ReconstructionConfig {
+            motion: Motion::SliceToVolume,
+            s2v_cycles: 1,
+            ..config.clone()
+        };
         let sortie_v = reconstruct(&stacks, &config_v, &device).unwrap();
-        let boucle = |sans_la_coupe: bool| align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false,
-            cycles: 1, alpha: config.alpha, cg_max_iterations: config.cg_max_iterations, cg_tolerance: config.cg_tolerance,
-            robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, ..RobustConfig::new(config.s2v_suspect_ncc) },
-            leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 1 }, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: if sans_la_coupe { 1 } else { 0 },
-            leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0,
+        let boucle = |sans_la_coupe: bool| align::LoopConfig {
+            min_stack_coverage: 1,
+            skip_unused_reconstructions: false,
+            cycles: 1,
+            alpha: config.alpha,
+            cg_max_iterations: config.cg_max_iterations,
+            cg_tolerance: config.cg_tolerance,
+            robust: RobustConfig {
+                extra_starts: config.s2v_extra_starts,
+                start_amplitude_mm: config.s2v_start_amplitude_mm,
+                ..RobustConfig::new(config.s2v_suspect_ncc)
+            },
+            leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 1 },
+            coarse_sigma_voxels: 0.0,
+            leave_one_slice_out_cycles: if sans_la_coupe { 1 } else { 0 },
+            leave_slice_out_window: 0,
+            pose_outlier_window: 0,
+            pose_outlier_max_mm: 5.0,
+            pose_outlier_max_deg: 10.0,
         };
         let identite = SlicePoses::identity(&stacks);
-        let direct_v = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, boucle(true), &device, |_, _, _| {}).unwrap();
+        let direct_v =
+            align::reconstruct_with_motion_correction(&grille, &stacks, &identite, boucle(true), &device, |_, _, _| {})
+                .unwrap();
         assert_eq!(sortie_v.slices.len(), direct_v.cycles.last().unwrap().slices.len());
         for (a, b) in sortie_v.slices.iter().zip(&direct_v.cycles.last().unwrap().slices) {
-            assert_eq!((a.stack, a.slice, a.registered, a.runs), (b.stack, b.slice, b.registered, b.runs));
-            assert!((a.ncc_final - b.ncc_final).abs() < 1e-6, "score final (s2v) : {} contre {}", a.ncc_final, b.ncc_final);
+            assert_eq!(
+                (a.stack, a.slice, a.registered, a.runs),
+                (b.stack, b.slice, b.registered, b.runs)
+            );
+            assert!(
+                (a.ncc_final - b.ncc_final).abs() < 1e-6,
+                "score final (s2v) : {} contre {}",
+                a.ncc_final,
+                b.ncc_final
+            );
         }
         let directes_v = direct_v.poses;
         let ecart_v = ecart_poses(&sortie_v.poses, &directes_v);
-        assert!(ecart_v < 1e-6, "poses coupe-volume différentes de l'appel direct : {ecart_v:.2e}");
-        let config_pile = ReconstructionConfig { s2v_leave_slice_out: false, ..config_v };
+        assert!(
+            ecart_v < 1e-6,
+            "poses coupe-volume différentes de l'appel direct : {ecart_v:.2e}"
+        );
+        let config_pile = ReconstructionConfig {
+            s2v_leave_slice_out: false,
+            ..config_v
+        };
         let sortie_pile = reconstruct(&stacks, &config_pile, &device).unwrap();
-        assert!(ecart_poses(&sortie_pile.poses, &sortie_v.poses) > 1e-3, "l'option s2v_leave_slice_out n'a aucun effet");
+        assert!(
+            ecart_poses(&sortie_pile.poses, &sortie_v.poses) > 1e-3,
+            "l'option s2v_leave_slice_out n'a aucun effet"
+        );
         // (c) un seul stack
-        assert!(matches!(reconstruct(&stacks[..1], &config, &device), Err(SvrError::NotEnoughStacks)));
+        assert!(matches!(
+            reconstruct(&stacks[..1], &config, &device),
+            Err(SvrError::NotEnoughStacks)
+        ));
     }
 
     /// SONDE du backend wgpu (critères fixés avant ; blobs, 3 stacks, coupe-coupe) : sur le device par défaut de Burn avec autodiff (Metal sur le Mac), (a) le nom du device est affiché ; (b) les critères du test sur
@@ -3023,21 +4540,44 @@ mod tests {
         let gpu = burn::tensor::Device::default().autodiff();
         println!("device par défaut : {gpu:?}");
         let cpu = burn::tensor::Device::flex().autodiff();
-        let (t0, sur_cpu) = (std::time::Instant::now(), crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &cpu).unwrap());
+        let (t0, sur_cpu) = (
+            std::time::Instant::now(),
+            crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &cpu).unwrap(),
+        );
         let duree_cpu = t0.elapsed().as_secs_f64();
-        let (t1, sur_gpu) = (std::time::Instant::now(), crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &gpu).unwrap());
+        let (t1, sur_gpu) = (
+            std::time::Instant::now(),
+            crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &gpu).unwrap(),
+        );
         let duree_gpu = t1.elapsed().as_secs_f64();
-        let (e_cpu, e_gpu) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_cpu.poses, &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_gpu.poses, &vraies));
-        let recalees: Vec<usize> = sur_gpu.slices.iter().enumerate().filter(|(n, s)| s.registered && e_gpu[*n].is_finite()).map(|(n, _)| n).collect();
+        let (e_cpu, e_gpu) = (
+            erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_cpu.poses, &vraies),
+            erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_gpu.poses, &vraies),
+        );
+        let recalees: Vec<usize> = sur_gpu
+            .slices
+            .iter()
+            .enumerate()
+            .filter(|(n, s)| s.registered && e_gpu[*n].is_finite())
+            .map(|(n, _)| n)
+            .collect();
         let r_gpu: Vec<f64> = recalees.iter().map(|&n| e_gpu[n]).collect();
         let r_cpu: Vec<f64> = recalees.iter().map(|&n| e_cpu[n]).collect();
         let part = |v: &[f64], seuil: f64| 100.0 * v.iter().filter(|&&x| x <= seuil).count() as f64 / v.len() as f64;
         let entre = erreurs_de_pose_sans_mouvement_commun(&stacks, &sur_gpu.poses, &sur_cpu.poses);
         let entre_recalees: Vec<f64> = recalees.iter().map(|&n| entre[n]).collect();
         println!("flex : {duree_cpu:.1} s, médiane {:.2} mm, ≤ 2 mm {:.0} % ; wgpu : {duree_gpu:.1} s, médiane {:.2} mm, ≤ 2 mm {:.0} % ; écart wgpu/flex : médiane {:.3} mm, max {:.2} mm ({} coupes recalées)", quantile(&r_cpu, 0.5), part(&r_cpu, 2.0), quantile(&r_gpu, 0.5), part(&r_gpu, 2.0), quantile(&entre_recalees, 0.5), quantile(&entre_recalees, 1.0), recalees.len());
-        assert!(quantile(&r_gpu, 0.5) <= 1.0, "erreur médiane wgpu {}", quantile(&r_gpu, 0.5));
+        assert!(
+            quantile(&r_gpu, 0.5) <= 1.0,
+            "erreur médiane wgpu {}",
+            quantile(&r_gpu, 0.5)
+        );
         assert!(part(&r_gpu, 2.0) >= 90.0, "part ≤ 2 mm wgpu : {}", part(&r_gpu, 2.0));
-        assert!(quantile(&entre_recalees, 0.5) < 0.2, "écart médian wgpu/flex {}", quantile(&entre_recalees, 0.5));
+        assert!(
+            quantile(&entre_recalees, 0.5) < 0.2,
+            "écart médian wgpu/flex {}",
+            quantile(&entre_recalees, 0.5)
+        );
     }
 
     /// Déterminisme (critère fixé avant) : deux exécutions de l'estimation coupe-coupe avec la même graine donnent des poses identiques au bit près ; une autre graine donne un ordre, donc des poses, différents.
@@ -3047,12 +4587,32 @@ mod tests {
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let config = crate::s2s::S2sConfig { sweeps: 1, ..Default::default() };
-        let executer = |graine: u64| crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig { seed: graine, ..config }, &device).unwrap().poses;
+        let config = crate::s2s::S2sConfig {
+            sweeps: 1,
+            ..Default::default()
+        };
+        let executer = |graine: u64| {
+            crate::s2s::register_slices_s2s(
+                &stacks,
+                &depart,
+                &crate::s2s::S2sConfig { seed: graine, ..config },
+                &device,
+            )
+            .unwrap()
+            .poses
+        };
         let (a, b, c) = (executer(1), executer(1), executer(2));
-        let egales = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().all(|(si, s)| (0..s.dim().2).all(|k| p.get(si, k) == q.get(si, k)));
+        let egales = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .all(|(si, s)| (0..s.dim().2).all(|k| p.get(si, k) == q.get(si, k)))
+        };
         assert!(egales(&a, &b), "mêmes graines, résultats différents");
-        assert!(!egales(&a, &c), "graines différentes, résultats identiques : l'ordre n'est pas utilisé");
+        assert!(
+            !egales(&a, &c),
+            "graines différentes, résultats identiques : l'ordre n'est pas utilisé"
+        );
     }
 
     /// Estimation coupe-coupe sur les jeux pyrecon (critères fixés avant, `STA31_lisse_mvt2` et `STA31_mvt2` indépendant par coupe) : au moins 90 % des coupes RECALÉES (voir la révision du test précédent : les coupes de bord ne le sont jamais) à ≤ 1,5 mm de la vraie pose après retrait du
@@ -3061,14 +4621,34 @@ mod tests {
     #[ignore = "jeux pyrecon sur disque (scripts/make_pyrecon_benchmark.py)"]
     fn slice_to_slice_motion_estimation_on_pyrecon_data() {
         let device = burn::tensor::Device::flex().autodiff();
-        for (modele, amplitude, critere) in [("lisse", 2u32, true), ("", 2, true), ("lisse", 4, false), ("", 4, false), ("lisse", 6, false), ("", 6, false)] {
+        for (modele, amplitude, critere) in [
+            ("lisse", 2u32, true),
+            ("", 2, true),
+            ("lisse", 4, false),
+            ("", 4, false),
+            ("lisse", 6, false),
+            ("", 6, false),
+        ] {
             let (_, stacks, vraies) = stacks_pyrecon_modele(modele, amplitude);
             let depart = SlicePoses::identity(&stacks);
             let debut = std::time::Instant::now();
-            let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
-            let (e0, e1) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &rapport.poses, &vraies));
-            let part = |v: &[f64], seuil: f64| 100.0 * v.iter().filter(|&&x| x <= seuil).count() as f64 / v.iter().filter(|x| x.is_finite()).count() as f64;
-            let recal: Vec<usize> = rapport.slices.iter().enumerate().filter(|(n, s)| s.registered && e1[*n].is_finite()).map(|(n, _)| n).collect();
+            let rapport =
+                crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
+            let (e0, e1) = (
+                erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies),
+                erreurs_de_pose_sans_mouvement_commun(&stacks, &rapport.poses, &vraies),
+            );
+            let part = |v: &[f64], seuil: f64| {
+                100.0 * v.iter().filter(|&&x| x <= seuil).count() as f64
+                    / v.iter().filter(|x| x.is_finite()).count() as f64
+            };
+            let recal: Vec<usize> = rapport
+                .slices
+                .iter()
+                .enumerate()
+                .filter(|(n, s)| s.registered && e1[*n].is_finite())
+                .map(|(n, _)| n)
+                .collect();
             let (r0, r1): (Vec<f64>, Vec<f64>) = recal.iter().map(|&n| (e0[n], e1[n])).unzip();
             println!(
                 "pyrecon {} ±{amplitude} : {}/{} coupes recalées en {:.0} s ; erreur médiane {:.2} → {:.2} mm, p90 {:.2} → {:.2} ; ≤ 1,5 mm : {:.0} % → {:.0} %",
@@ -3083,9 +4663,20 @@ mod tests {
                 part(&e0, 1.5),
                 part(&e1, 1.5)
             );
-            println!("    sur les {} coupes recalées : erreur médiane {:.2} → {:.2} mm, p90 {:.2} ; ≤ 1,5 mm : {:.0} %", recal.len(), quantile(&r0, 0.5), quantile(&r1, 0.5), quantile(&r1, 0.9), part(&r1, 1.5));
+            println!(
+                "    sur les {} coupes recalées : erreur médiane {:.2} → {:.2} mm, p90 {:.2} ; ≤ 1,5 mm : {:.0} %",
+                recal.len(),
+                quantile(&r0, 0.5),
+                quantile(&r1, 0.5),
+                quantile(&r1, 0.9),
+                part(&r1, 1.5)
+            );
             if critere {
-                assert!(part(&r1, 1.5) >= 90.0, "part ≤ 1,5 mm (coupes recalées) : {}", part(&r1, 1.5));
+                assert!(
+                    part(&r1, 1.5) >= 90.0,
+                    "part ≤ 1,5 mm (coupes recalées) : {}",
+                    part(&r1, 1.5)
+                );
             }
         }
     }
@@ -3097,7 +4688,11 @@ mod tests {
     fn diagnose_unregistered_slices_for_slice_to_slice() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
-        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(",")).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS")
+            .unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(","))
+            .split(',')
+            .map(|i| i.trim().parse().unwrap())
+            .collect();
         let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
         let poses = SlicePoses::identity(&stacks);
         let atlas = crate::s2s::SliceAtlas::new(&stacks, &device).unwrap();
@@ -3107,7 +4702,16 @@ mod tests {
             let masque = stack.brain_mask().unwrap().voxels();
             for k in 0..stack.dim().2 {
                 let pixels = masque.index_axis(Axis(2), k).iter().filter(|&&m| m).count();
-                let partenaires = crate::s2s::IntersectionProblem::build(&atlas, &stacks, &poses, si, k, &crate::s2s::IntersectionConfig::default(), &device).map_or(0, |p| p.n_pairs());
+                let partenaires = crate::s2s::IntersectionProblem::build(
+                    &atlas,
+                    &stacks,
+                    &poses,
+                    si,
+                    k,
+                    &crate::s2s::IntersectionConfig::default(),
+                    &device,
+                )
+                .map_or(0, |p| p.n_pairs());
                 match (pixels >= align::MIN_MASK_PIXELS, partenaires > 0) {
                     (false, _) => peu_de_masque += 1,
                     (true, false) => sans_partenaire += 1,
@@ -3118,8 +4722,14 @@ mod tests {
         }
         println!("{} coupes : {recalables} recalables, {peu_de_masque} avec moins de {} pixels de masque, {sans_partenaire} sans partenaire (masque suffisant)", details.len(), align::MIN_MASK_PIXELS);
         let petites: Vec<_> = details.iter().filter(|d| d.2 < align::MIN_MASK_PIXELS).collect();
-        println!("pixels de masque des coupes sous le seuil (stack, coupe, pixels, partenaires) : {:?}", petites);
-        let sans: Vec<_> = details.iter().filter(|d| d.2 >= align::MIN_MASK_PIXELS && d.3 == 0).collect();
+        println!(
+            "pixels de masque des coupes sous le seuil (stack, coupe, pixels, partenaires) : {:?}",
+            petites
+        );
+        let sans: Vec<_> = details
+            .iter()
+            .filter(|d| d.2 >= align::MIN_MASK_PIXELS && d.3 == 0)
+            .collect();
         println!("coupes à masque suffisant sans partenaire : {:?}", sans);
     }
 
@@ -3129,7 +4739,14 @@ mod tests {
         data.index_axis_mut(Axis(2), k).mapv_inplace(|v| v + ajout);
         let masque = stack.brain_mask().unwrap().voxels().mapv(u8::from);
         let sp = stack.spacing();
-        stack_avec_masque(t, nom, &data, &masque, stack.affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32])
+        stack_avec_masque(
+            t,
+            nom,
+            &data,
+            &masque,
+            stack.affine(),
+            [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+        )
     }
 
     /// Référence « sans la coupe » : (1) égale à l'adjoint normalisé de toutes les AUTRES coupes calculé directement (somme sur les autres coupes seulement, à 1e-4 de la dynamique) ;
@@ -3149,7 +4766,11 @@ mod tests {
         let reference_de = |stacks: &[Stack], si: usize, k: usize| {
             let (num, den) = adjoint_sums(&grille, stacks, &poses).unwrap();
             let coupe = stacks[si].slices().nth(k).unwrap().with_motion(*poses.get(si, k));
-            let (nk, dk) = align::contribution_de_la_coupe(&geometrie, &coupe, stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k));
+            let (nk, dk) = align::contribution_de_la_coupe(
+                &geometrie,
+                &coupe,
+                stacks[si].brain_mask().unwrap().voxels().index_axis(Axis(2), k),
+            );
             align::reference_sans_la_coupe(&num, &den, &nk, &dk)
         };
         let dynamique = stacks[0].data().iter().cloned().fold(0.0_f32, f32::max);
@@ -3161,7 +4782,14 @@ mod tests {
                 for coupe in stack.slices() {
                     if (sj, coupe.index()) != (si, k) {
                         let posee = coupe.with_motion(*poses.get(sj, coupe.index()));
-                        geometrie.back_project_with_weight(&posee, &posee.psf(), posee.data(), masque.index_axis(Axis(2), coupe.index()), &mut n_dir, &mut d_dir);
+                        geometrie.back_project_with_weight(
+                            &posee,
+                            &posee.psf(),
+                            posee.data(),
+                            masque.index_axis(Axis(2), coupe.index()),
+                            &mut n_dir,
+                            &mut d_dir,
+                        );
                     }
                 }
             }
@@ -3172,17 +4800,48 @@ mod tests {
                 }
             }
             let obtenue = reference_de(&stacks, si, k);
-            let ecart = obtenue.iter().zip(attendue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-            assert!(ecart < 1e-4 * dynamique, "stack {si} coupe {k} : écart à la somme directe {ecart}");
+            let ecart = obtenue
+                .iter()
+                .zip(attendue.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                ecart < 1e-4 * dynamique,
+                "stack {si} coupe {k} : écart à la somme directe {ecart}"
+            );
             // (2) aveugle à la coupe
-            let modifie: Vec<Stack> = stacks.iter().enumerate().map(|(sj, s)| if sj == si { stack_avec_coupe_modifiee(&t, s, k, 500.0, &format!("mod{sj}")) } else { s.clone() }).collect();
+            let modifie: Vec<Stack> = stacks
+                .iter()
+                .enumerate()
+                .map(|(sj, s)| {
+                    if sj == si {
+                        stack_avec_coupe_modifiee(&t, s, k, 500.0, &format!("mod{sj}"))
+                    } else {
+                        s.clone()
+                    }
+                })
+                .collect();
             let apres = reference_de(&modifie, si, k);
-            let diff_propre = apres.iter().zip(obtenue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-            assert!(diff_propre < 1e-9 * dynamique + 1e-6, "la référence de la coupe lit la coupe : {diff_propre}");
+            let diff_propre = apres
+                .iter()
+                .zip(obtenue.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                diff_propre < 1e-9 * dynamique + 1e-6,
+                "la référence de la coupe lit la coupe : {diff_propre}"
+            );
             let voisine = if k + 1 < stacks[si].dim().2 { k + 1 } else { k - 1 };
             let (v_avant, v_apres) = (reference_de(&stacks, si, voisine), reference_de(&modifie, si, voisine));
-            let diff_voisine = v_apres.iter().zip(v_avant.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-            assert!(diff_voisine > 0.01 * dynamique, "la modification n'atteint pas la coupe voisine : test non discriminant ({diff_voisine})");
+            let diff_voisine = v_apres
+                .iter()
+                .zip(v_avant.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                diff_voisine > 0.01 * dynamique,
+                "la modification n'atteint pas la coupe voisine : test non discriminant ({diff_voisine})"
+            );
             // (3) la référence complète est différente
             let mut complete = Array3::<f32>::zeros(grille.dims);
             for (idx, v) in complete.indexed_iter_mut() {
@@ -3190,8 +4849,15 @@ mod tests {
                     *v = (num[idx] / den[idx]) as f32;
                 }
             }
-            let diff_complete = complete.iter().zip(obtenue.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-            assert!(diff_complete > 0.01 * dynamique, "la référence complète ne diffère pas : {diff_complete}");
+            let diff_complete = complete
+                .iter()
+                .zip(obtenue.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                diff_complete > 0.01 * dynamique,
+                "la référence complète ne diffère pas : {diff_complete}"
+            );
             println!("stack {si} coupe {k} : écart à la somme directe {:.1e}, aveugle {:.1e}, voisine {:.2}, complète {:.2} (dynamique {dynamique:.0})", ecart / dynamique, diff_propre / dynamique, diff_voisine / dynamique, diff_complete / dynamique);
         }
     }
@@ -3214,12 +4880,27 @@ mod tests {
         let references = |stacks: &[Stack], si: usize, w: usize| {
             let (num, den) = adjoint_sums(&grille, stacks, &poses).unwrap();
             let mut sortie = std::collections::HashMap::new();
-            align::parcourir_references_sans_fenetre(&grille, &stacks[si], si, &poses, w, &num, &den, &|_| true, |k, image| {
-                sortie.insert(k, image.unwrap());
-            });
+            align::parcourir_references_sans_fenetre(
+                &grille,
+                &stacks[si],
+                si,
+                &poses,
+                w,
+                &num,
+                &den,
+                &|_| true,
+                |k, image| {
+                    sortie.insert(k, image.unwrap());
+                },
+            );
             sortie
         };
-        let ecart_max = |a: &Array3<f32>, b: &Array3<f32>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max);
+        let ecart_max = |a: &Array3<f32>, b: &Array3<f32>| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f32, f32::max)
+        };
         let si = 1usize; // stack coronal
         for w in [0usize, 3, nz] {
             let obtenues = references(&stacks, si, w);
@@ -3232,7 +4913,14 @@ mod tests {
                         let dans_la_fenetre = sj == si && j.abs_diff(k) <= w;
                         if !dans_la_fenetre {
                             let posee = coupe.with_motion(*poses.get(sj, j));
-                            geometrie.back_project_with_weight(&posee, &posee.psf(), posee.data(), masque.index_axis(Axis(2), j), &mut n_dir, &mut d_dir);
+                            geometrie.back_project_with_weight(
+                                &posee,
+                                &posee.psf(),
+                                posee.data(),
+                                masque.index_axis(Axis(2), j),
+                                &mut n_dir,
+                                &mut d_dir,
+                            );
                         }
                     }
                 }
@@ -3243,18 +4931,47 @@ mod tests {
                     }
                 }
                 let ecart = ecart_max(&obtenues[&k], &attendue);
-                assert!(ecart < 1e-4 * dynamique, "w = {w}, k = {k} : écart à la somme directe {ecart}");
+                assert!(
+                    ecart < 1e-4 * dynamique,
+                    "w = {w}, k = {k} : écart à la somme directe {ecart}"
+                );
             }
             // aveuglement : modifier la coupe k + w (dans la fenêtre de k) ne change pas la référence de k ; modifier k + w + 1 la change
             if w < nz {
                 let k = 2usize;
-                let modif = |j: usize| -> Vec<Stack> { stacks.iter().enumerate().map(|(sj, s)| if sj == si { stack_avec_coupe_modifiee(&t, s, j, 500.0, "fen") } else { s.clone() }).collect() };
+                let modif = |j: usize| -> Vec<Stack> {
+                    stacks
+                        .iter()
+                        .enumerate()
+                        .map(|(sj, s)| {
+                            if sj == si {
+                                stack_avec_coupe_modifiee(&t, s, j, 500.0, "fen")
+                            } else {
+                                s.clone()
+                            }
+                        })
+                        .collect()
+                };
                 let dedans = references(&modif(k + w), si, w);
                 let dehors = references(&modif(k + w + 1), si, w);
-                let (d_in, d_out) = (ecart_max(&dedans[&k], &obtenues[&k]), ecart_max(&dehors[&k], &obtenues[&k]));
-                assert!(d_in < 1e-6 * dynamique + 1e-6, "w = {w} : la référence lit la coupe {} de sa fenêtre : {d_in}", k + w);
-                assert!(d_out > 0.001 * dynamique, "w = {w} : la coupe {} hors fenêtre devrait compter : {d_out}", k + w + 1);
-                println!("w = {w} : exacte ; coupe de la fenêtre {d_in:.1e}, coupe hors fenêtre {:.3} de la dynamique", d_out / dynamique);
+                let (d_in, d_out) = (
+                    ecart_max(&dedans[&k], &obtenues[&k]),
+                    ecart_max(&dehors[&k], &obtenues[&k]),
+                );
+                assert!(
+                    d_in < 1e-6 * dynamique + 1e-6,
+                    "w = {w} : la référence lit la coupe {} de sa fenêtre : {d_in}",
+                    k + w
+                );
+                assert!(
+                    d_out > 0.001 * dynamique,
+                    "w = {w} : la coupe {} hors fenêtre devrait compter : {d_out}",
+                    k + w + 1
+                );
+                println!(
+                    "w = {w} : exacte ; coupe de la fenêtre {d_in:.1e}, coupe hors fenêtre {:.3} de la dynamique",
+                    d_out / dynamique
+                );
             }
         }
     }
@@ -3273,11 +4990,23 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let identite = SlicePoses::identity(&stacks);
-        let rapport = align::register_slices_leave_slice_out(&grille, &stacks, &identite, RobustConfig::new(0.9), &device).unwrap();
+        let rapport =
+            align::register_slices_leave_slice_out(&grille, &stacks, &identite, RobustConfig::new(0.9), &device)
+                .unwrap();
         // statistiques sur les coupes recalées (masque assez grand) : les coupes hors des blobs ont un masque vide
         let registered: Vec<bool> = rapport.slices.iter().map(|r| r.registered).collect();
-        let choisir = |v: Vec<f64>| -> Vec<f64> { v.into_iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| e).collect() };
-        let mediane = |v: &Vec<f64>| { let mut x = v.clone(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); x[x.len() / 2] };
+        let choisir = |v: Vec<f64>| -> Vec<f64> {
+            v.into_iter()
+                .zip(&registered)
+                .filter(|(_, r)| **r)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let mediane = |v: &Vec<f64>| {
+            let mut x = v.clone();
+            x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            x[x.len() / 2]
+        };
         let depart = choisir(erreurs_de_pose(&stacks, &identite, &vraies));
         let apres = choisir(erreurs_de_pose(&stacks, &rapport.poses, &vraies));
         let ameliorees = apres.iter().zip(&depart).filter(|(a, d)| a < d).count();
@@ -3285,15 +5014,40 @@ mod tests {
         assert!(depart.len() >= 20, "trop peu de coupes recalées : {}", depart.len());
         assert!(mediane(&depart) > 1.5, "départ non trivial : {}", mediane(&depart));
         assert!(mediane(&apres) <= 1.0, "médiane après recalage : {}", mediane(&apres));
-        assert!(ameliorees as f64 >= 0.9 * depart.len() as f64, "{ameliorees}/{}", depart.len());
+        assert!(
+            ameliorees as f64 >= 0.9 * depart.len() as f64,
+            "{ameliorees}/{}",
+            depart.len()
+        );
         // référence complète : auto-biais
         let complete = align::normalized_reference_volume(&grille, &stacks, &identite).unwrap();
-        let rapport_complet = align::register_slices(&stacks, &identite, &VolumeTensors::new(&complete, &device), RobustConfig::new(0.9), &device).unwrap();
+        let rapport_complet = align::register_slices(
+            &stacks,
+            &identite,
+            &VolumeTensors::new(&complete, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
         let apres_complet = choisir(erreurs_de_pose(&stacks, &rapport_complet.poses, &vraies));
         println!("référence complète : médiane {:.2} mm", mediane(&apres_complet));
-        assert!(mediane(&apres_complet) > mediane(&apres), "la référence complète ne devrait pas faire mieux : {} contre {}", mediane(&apres_complet), mediane(&apres));
+        assert!(
+            mediane(&apres_complet) > mediane(&apres),
+            "la référence complète ne devrait pas faire mieux : {} contre {}",
+            mediane(&apres_complet),
+            mediane(&apres)
+        );
         // entrées invalides
-        assert!(matches!(align::register_slices_leave_slice_out(&grille, &stacks, &SlicePoses::identity(&stacks[..1]), RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
+        assert!(matches!(
+            align::register_slices_leave_slice_out(
+                &grille,
+                &stacks,
+                &SlicePoses::identity(&stacks[..1]),
+                RobustConfig::new(0.9),
+                &device
+            ),
+            Err(SvrError::PoseMismatch)
+        ));
     }
 
     /// Recalage « sans la fenêtre » en parallèle (critères fixés avant, jeu de blobs, poses de départ perturbées, recalage court : l'égalité ne dépend pas de la convergence) : (a) pour (fenêtre, σ) = (0, 0), (2, 0), (0, 1) la
@@ -3309,28 +5063,67 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
-        let config = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 1, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
-        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let config = RobustConfig {
+            base: crate::diff::RegistrationConfig {
+                iterations: 12,
+                ..crate::diff::RegistrationConfig::DEFAULT
+            },
+            extra_starts: 1,
+            start_amplitude_mm: 2.0,
+            ..RobustConfig::new(0.99)
+        };
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
         for (fenetre, sigma) in [(0usize, 0.0), (2, 0.0), (0, 1.0)] {
-            let parallele = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
-            let serie = align::register_slices_leave_window_out_en_serie(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
+            let parallele =
+                align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device)
+                    .unwrap();
+            let serie = align::register_slices_leave_window_out_en_serie(
+                &grille, &stacks, &depart, fenetre, sigma, config, &device,
+            )
+            .unwrap();
             assert_eq!(parallele.slices.len(), serie.slices.len());
             for (p, q) in parallele.slices.iter().zip(&serie.slices) {
-                assert_eq!((p.stack, p.slice, p.registered, p.runs), (q.stack, q.slice, q.registered, q.runs), "(fenêtre {fenetre}, σ {sigma})");
-                assert!((p.ncc_first - q.ncc_first).abs() < 1e-6 && (p.ncc_final - q.ncc_final).abs() < 1e-6, "NCC différentes : {p:?} contre {q:?}");
+                assert_eq!(
+                    (p.stack, p.slice, p.registered, p.runs),
+                    (q.stack, q.slice, q.registered, q.runs),
+                    "(fenêtre {fenetre}, σ {sigma})"
+                );
+                assert!(
+                    (p.ncc_first - q.ncc_first).abs() < 1e-6 && (p.ncc_final - q.ncc_final).abs() < 1e-6,
+                    "NCC différentes : {p:?} contre {q:?}"
+                );
             }
             let e = ecart(&parallele.poses, &serie.poses);
-            println!("(fenêtre {fenetre}, σ {sigma}) : {} coupes recalées, écart de poses parallèle/série {e:.2e}", parallele.slices.iter().filter(|r| r.registered).count());
+            println!(
+                "(fenêtre {fenetre}, σ {sigma}) : {} coupes recalées, écart de poses parallèle/série {e:.2e}",
+                parallele.slices.iter().filter(|r| r.registered).count()
+            );
             assert!(e < 1e-6, "(fenêtre {fenetre}, σ {sigma}) : écart de poses {e}");
-            assert!(parallele.slices.iter().filter(|r| r.registered).count() >= 20, "trop peu de coupes recalées");
+            assert!(
+                parallele.slices.iter().filter(|r| r.registered).count() >= 20,
+                "trop peu de coupes recalées"
+            );
             // (c) coupes non recalées : pose inchangée
             for r in parallele.slices.iter().filter(|r| !r.registered) {
                 assert_eq!(parallele.poses.get(r.stack, r.slice), depart.get(r.stack, r.slice));
             }
             if fenetre == 0 && sigma == 0.0 {
                 // (b) déterminisme
-                let encore = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device).unwrap();
-                assert_eq!(ecart(&parallele.poses, &encore.poses), 0.0, "deux exécutions parallèles diffèrent");
+                let encore =
+                    align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, config, &device)
+                        .unwrap();
+                assert_eq!(
+                    ecart(&parallele.poses, &encore.poses),
+                    0.0,
+                    "deux exécutions parallèles diffèrent"
+                );
             }
         }
     }
@@ -3344,7 +5137,9 @@ mod tests {
         let domaine = Array3::from_shape_fn(dims, |(i, j, k)| !(i == 4 && j == 4 && k == 3));
         let mut alea = Alea(21);
         let x = Array3::from_shape_fn(dims, |_| alea.suivant() * 100.0);
-        let poids = EdgeWeights { by_axis: [0, 1, 2].map(|_| Array3::from_shape_fn(dims, |_| 0.1 + alea.suivant())) };
+        let poids = EdgeWeights {
+            by_axis: [0, 1, 2].map(|_| Array3::from_shape_fn(dims, |_| 0.1 + alea.suivant())),
+        };
         let (h, alpha) = (0.8, 0.07);
         // (a)
         let (mut g_none, mut g_un) = (Array3::<f64>::zeros(dims), Array3::<f64>::zeros(dims));
@@ -3353,7 +5148,9 @@ mod tests {
         assert_eq!(v_none, v_un);
         assert_eq!(g_none, g_un);
         // (a') poids nuls sur l'axe 1 seulement : la valeur est la somme des termes des axes 0 et 2 (calculée à la main)
-        let un_axe = EdgeWeights { by_axis: [Array3::ones(dims), Array3::zeros(dims), Array3::ones(dims)] };
+        let un_axe = EdgeWeights {
+            by_axis: [Array3::ones(dims), Array3::zeros(dims), Array3::ones(dims)],
+        };
         let mut g_axe = Array3::<f64>::zeros(dims);
         let v_axe = regularization(&x, &domaine, h, alpha, Some(&un_axe), &mut g_axe);
         let mut attendu_axe = 0.0;
@@ -3366,22 +5163,42 @@ mod tests {
                 }
             }
         }
-        assert!((v_axe - attendu_axe).abs() <= 1e-9 * attendu_axe, "poids par axe : {v_axe} contre {attendu_axe}");
+        assert!(
+            (v_axe - attendu_axe).abs() <= 1e-9 * attendu_axe,
+            "poids par axe : {v_axe} contre {attendu_axe}"
+        );
         // (b)
         let mut g = Array3::<f64>::zeros(dims);
         let _ = regularization(&x, &domaine, h, alpha, Some(&poids), &mut g);
-        for idx in [[0, 0, 0], [4, 4, 2], [3, 4, 3], [8, 7, 6], [5, 2, 4], [1, 6, 5], [4, 3, 3], [2, 2, 2]] {
+        for idx in [
+            [0, 0, 0],
+            [4, 4, 2],
+            [3, 4, 3],
+            [8, 7, 6],
+            [5, 2, 4],
+            [1, 6, 5],
+            [4, 3, 3],
+            [2, 2, 2],
+        ] {
             let eps = 1e-3;
             let (mut plus, mut moins) = (x.clone(), x.clone());
             plus[idx] += eps;
             moins[idx] -= eps;
             let (mut ga, mut gb) = (Array3::<f64>::zeros(dims), Array3::<f64>::zeros(dims));
-            let fd = (regularization(&plus, &domaine, h, alpha, Some(&poids), &mut ga) - regularization(&moins, &domaine, h, alpha, Some(&poids), &mut gb)) / (2.0 * eps);
+            let fd = (regularization(&plus, &domaine, h, alpha, Some(&poids), &mut ga)
+                - regularization(&moins, &domaine, h, alpha, Some(&poids), &mut gb))
+                / (2.0 * eps);
             let attendu = g[idx];
-            assert!((fd - attendu).abs() <= 1e-8 * attendu.abs().max(1.0), "voxel {idx:?} : différences finies {fd}, gradient {attendu}");
+            assert!(
+                (fd - attendu).abs() <= 1e-8 * attendu.abs().max(1.0),
+                "voxel {idx:?} : différences finies {fd}, gradient {attendu}"
+            );
         }
         // (c) poids de Huber : image en escalier (pas de 10 sur le plan i = 4) plus un petit bruit
-        let escalier = Array3::from_shape_fn(dims, |(i, j, k)| if i >= 5 { 100.0 } else { 0.0 } + 0.01 * ((i * 3 + j * 5 + k * 7) % 11) as f64);
+        let escalier = Array3::from_shape_fn(
+            dims,
+            |(i, j, k)| if i >= 5 { 100.0 } else { 0.0 } + 0.01 * ((i * 3 + j * 5 + k * 7) % 11) as f64,
+        );
         let tout = Array3::from_elem(dims, true);
         let w = EdgeWeights::huber(&escalier, &tout, 3.0);
         assert!(w.by_axis.iter().all(|a| a.iter().all(|&v| v > 0.0 && v <= 1.0)));
@@ -3392,13 +5209,25 @@ mod tests {
         let ligne = Array3::from_shape_vec((5, 1, 1), vec![0.0, 1.0, 4.0, 7.0, 17.0]).unwrap();
         let toute = Array3::from_elem((5, 1, 1), true);
         let exact = EdgeWeights::huber(&ligne, &toute, 1.0);
-        assert_eq!((0..4).map(|i| exact.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(), vec![1.0, 1.0, 1.0, 0.3]);
+        assert_eq!(
+            (0..4).map(|i| exact.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(),
+            vec![1.0, 1.0, 1.0, 0.3]
+        );
         let exact2 = EdgeWeights::huber(&ligne, &toute, 0.5); // δ = 1,5 : poids 1, 1,5/3, 1,5/3, 0,15
-        assert_eq!((0..4).map(|i| exact2.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(), vec![1.0, 0.5, 0.5, 0.15]);
+        assert_eq!(
+            (0..4).map(|i| exact2.by_axis[0][[i, 0, 0]]).collect::<Vec<f64>>(),
+            vec![1.0, 0.5, 0.5, 0.15]
+        );
         let sans_mediane = EdgeWeights::huber(&Array3::from_elem(dims, 5.0), &tout, 3.0);
-        assert!(sans_mediane.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)), "médiane nulle : poids à 1");
+        assert!(
+            sans_mediane.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)),
+            "médiane nulle : poids à 1"
+        );
         let vide = EdgeWeights::huber(&escalier, &Array3::from_elem(dims, false), 3.0);
-        assert!(vide.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)), "domaine vide : poids à 1");
+        assert!(
+            vide.by_axis.iter().all(|a| a.iter().all(|&v| v == 1.0)),
+            "domaine vide : poids à 1"
+        );
         // (d) κ immense = Tikhonov
         let t = Temp::new("huber_kappa");
         let volume = volume_de_blobs();
@@ -3408,20 +5237,40 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
         let mut probleme = ReconstructionProblem::with_poses(&grille, &stacks, &vraies.select(&[0, 1]), 1.0).unwrap();
         let tik = probleme.conjugate_gradient(&probleme.initial_guess(), 200, 1e-9).x;
-        let zero_tour = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 0, 3.0).x;
+        let zero_tour = probleme
+            .conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 0, 3.0)
+            .x;
         assert_eq!(tik, zero_tour, "outer = 0 doit redonner Tikhonov exactement");
-        let relatif = |a: &Array3<f64>, b: &Array3<f64>| (a - b).mapv(|v| v * v).sum().sqrt() / b.mapv(|v| v * v).sum().sqrt();
+        let relatif =
+            |a: &Array3<f64>, b: &Array3<f64>| (a - b).mapv(|v| v * v).sum().sqrt() / b.mapv(|v| v * v).sum().sqrt();
         // une repondération = Tikhonov, poids de Huber de CETTE solution, nouvelle résolution depuis elle (implémentation manuelle)
         probleme.set_edge_weights(None);
         let r0 = probleme.conjugate_gradient(&probleme.initial_guess(), 200, 1e-9);
         probleme.set_edge_weights(Some(EdgeWeights::huber(&r0.x, &probleme.domain, 0.5)));
         let manuel = probleme.conjugate_gradient(&r0.x, 200, 1e-9).x;
-        let une_fois = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 1, 0.5).x;
-        assert_eq!(manuel, une_fois, "une repondération doit égaler l'implémentation manuelle");
-        let gros_kappa = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 1e12).x;
-        assert!(relatif(&gros_kappa, &tik) < 1e-6, "κ immense doit redonner Tikhonov : {:.2e}", relatif(&gros_kappa, &tik));
-        let petit_kappa = probleme.conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 0.5).x;
-        assert!(relatif(&petit_kappa, &tik) > 1e-4, "un petit κ doit changer la solution : {:.2e}", relatif(&petit_kappa, &tik));
+        let une_fois = probleme
+            .conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 1, 0.5)
+            .x;
+        assert_eq!(
+            manuel, une_fois,
+            "une repondération doit égaler l'implémentation manuelle"
+        );
+        let gros_kappa = probleme
+            .conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 1e12)
+            .x;
+        assert!(
+            relatif(&gros_kappa, &tik) < 1e-6,
+            "κ immense doit redonner Tikhonov : {:.2e}",
+            relatif(&gros_kappa, &tik)
+        );
+        let petit_kappa = probleme
+            .conjugate_gradient_edge_preserving(&probleme.initial_guess(), 200, 1e-9, 2, 0.5)
+            .x;
+        assert!(
+            relatif(&petit_kappa, &tik) > 1e-4,
+            "un petit κ doit changer la solution : {:.2e}",
+            relatif(&petit_kappa, &tik)
+        );
     }
 
     /// RÉGULARISATION PRÉSERVANT LES CONTOURS sur l'atlas simulé (critère fixé avant : au PSNR réglé de chaque méthode, Huber dépasse Tikhonov d'au moins 0,5 dB sur le jeu d'ÉVALUATION). Réglage sur STA21 (bruit 5 %) : Tikhonov sur α ∈ {0,01 ; 0,03 ; 0,1 ; 0,3 ; 1},
@@ -3442,7 +5291,12 @@ mod tests {
             let mut p = ReconstructionProblem::new(grille, stacks, alpha).unwrap();
             let x0 = p.initial_guess();
             let r = p.conjugate_gradient_edge_preserving(&x0, 200, 1e-4, 3, kappa);
-            (r.x, r.iterations, *r.residual_history.last().unwrap(), t.elapsed().as_secs_f64())
+            (
+                r.x,
+                r.iterations,
+                *r.residual_history.last().unwrap(),
+                t.elapsed().as_secs_f64(),
+            )
         };
         let (stacks, grille, c) = preparer("STA21");
         println!("RÉGLAGE sur STA21 : {} voxels de comparaison", c.voxels.len());
@@ -3464,14 +5318,23 @@ mod tests {
                 }
             }
         }
-        println!("retenus sur STA21 : Tikhonov α = {} ({:.2} dB) ; Huber α = {}, κ = {} ({:.2} dB)", tik.1, tik.0, hub.1, hub.2, hub.0);
+        println!(
+            "retenus sur STA21 : Tikhonov α = {} ({:.2} dB) ; Huber α = {}, κ = {} ({:.2} dB)",
+            tik.1, tik.0, hub.1, hub.2, hub.0
+        );
         let (stacks, grille, c) = preparer("STA31");
         println!("ÉVALUATION sur STA31 : {} voxels de comparaison", c.voxels.len());
         let (x, it, res, t) = reconstruire(&grille, &stacks, tik.1);
         let q_tik = ligne_qualite("Tikhonov", &c, &x, it, res, t);
         let (x, it, res, t) = huber(&grille, &stacks, hub.1, hub.2);
         let q_hub = ligne_qualite("Huber", &c, &x, it, res, t);
-        println!("gain de Huber sur Tikhonov : PSNR {:+.2} dB (critère ≥ 0,5), NCC {:+.4}, netteté {:.3} contre {:.3}", q_hub.1 - q_tik.1, q_hub.0 - q_tik.0, q_hub.2, q_tik.2);
+        println!(
+            "gain de Huber sur Tikhonov : PSNR {:+.2} dB (critère ≥ 0,5), NCC {:+.4}, netteté {:.3} contre {:.3}",
+            q_hub.1 - q_tik.1,
+            q_hub.0 - q_tik.0,
+            q_hub.2,
+            q_tik.2
+        );
         assert!(q_hub.1 - q_tik.1 >= 0.5, "gain de PSNR {}", q_hub.1 - q_tik.1);
     }
 
@@ -3486,16 +5349,24 @@ mod tests {
                 if v.contains('=') {
                     let mut config = fin;
                     for jeton in v.split('+') {
-                        let Some((nom, valeurs)) = jeton.split_once('=') else { continue };
+                        let Some((nom, valeurs)) = jeton.split_once('=') else {
+                            continue;
+                        };
                         let x: Vec<f64> = valeurs.split(',').map(|y| y.parse().unwrap()).collect();
                         match nom {
-                            "c" => (config.coarse_sigma_pixels, config.coarse_sweeps, config.coarse_levels) = (x[0], x[1] as usize, x[2] as usize),
+                            "c" => {
+                                (config.coarse_sigma_pixels, config.coarse_sweeps, config.coarse_levels) =
+                                    (x[0], x[1] as usize, x[2] as usize)
+                            }
                             "b" => (config.block_levels, config.block_search_mm) = (x[0] as usize, x[1]),
                             "bs" => config.block_sweeps = x[0] as usize,
                             "m" => (config.block_multistart_deg, config.block_multistart_keep) = (x[0], x[1] as usize),
                             "t" => config.temporal_weight = x[0],
                             "i" => config.temporal_info_exponent = x[0],
-                            "r" => (config.temporal_robust_start_mm, config.temporal_robust_mm) = if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) },
+                            "r" => {
+                                (config.temporal_robust_start_mm, config.temporal_robust_mm) =
+                                    if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) }
+                            }
                             "bias" | "v" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
@@ -3510,12 +5381,24 @@ mod tests {
                     }
                     None => (v, (0.0, 0.0)),
                 };
-                let fin = S2sConfig { reliability_low: fiabilite.0, reliability_high: fiabilite.1, ..fin };
+                let fin = S2sConfig {
+                    reliability_low: fiabilite.0,
+                    reliability_high: fiabilite.1,
+                    ..fin
+                };
                 if base == "fin" {
                     (v.to_string(), fin)
                 } else {
                     let c: Vec<&str> = base.split(',').collect();
-                    (format!("gros({v})"), S2sConfig { coarse_sigma_pixels: c[0].parse().unwrap(), coarse_sweeps: c[1].parse().unwrap(), coarse_levels: c[2].parse().unwrap(), ..fin })
+                    (
+                        format!("gros({v})"),
+                        S2sConfig {
+                            coarse_sigma_pixels: c[0].parse().unwrap(),
+                            coarse_sweeps: c[1].parse().unwrap(),
+                            coarse_levels: c[2].parse().unwrap(),
+                            ..fin
+                        },
+                    )
                 }
             })
             .collect()
@@ -3533,10 +5416,19 @@ mod tests {
                     let amplitude = if p < 3 { degres } else { mm };
                     let (u, w) = (alea.suivant().max(1e-12), alea.suivant());
                     let gauss = (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * w).cos();
-                    *v = if saut { (alea.suivant() * 2.0 - 1.0) * amplitude } else { (rho * *v + (1.0 - rho * rho).sqrt() * amplitude / 3.0_f64.sqrt() * gauss).clamp(-amplitude, amplitude) };
+                    *v = if saut {
+                        (alea.suivant() * 2.0 - 1.0) * amplitude
+                    } else {
+                        (rho * *v + (1.0 - rho * rho).sqrt() * amplitude / 3.0_f64.sqrt() * gauss)
+                            .clamp(-amplitude, amplitude)
+                    };
                 }
                 let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
-                poses.set(si, coupe.index(), mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()));
+                poses.set(
+                    si,
+                    coupe.index(),
+                    mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()),
+                );
             }
         }
         poses
@@ -3554,10 +5446,22 @@ mod tests {
 
     /// **Stacks semi-synthétiques à contenu réel** : simule, depuis un volume RÉEL reconstruit, les coupes des stacks `modeles` (géométrie, résolution et épaisseur des vrais stacks) avec le mouvement vrai `vraies`, avec un bruit gaussien de `bruit_pct` % de l'intensité moyenne et, si `biais_pct > 0`, un champ de biais multiplicatif lisse
     /// par stack fixe dans le repère du scanner (4 ondes planes de 100 à 200 mm, plus un gain global, comme `make_pyrecon_benchmark.py`). Le masque d'un pixel : couvert et d'intensité > 3 % du maximum. La vérité est exacte (`vraies`) et le contenu est celui d'images réelles.
-    fn simuler_reel(t: &Temp, volume: &Volume, modeles: &[Stack], vraies: &SlicePoses, bruit_pct: f64, biais_pct: f64, graine: u64) -> Vec<Stack> {
+    fn simuler_reel(
+        t: &Temp,
+        volume: &Volume,
+        modeles: &[Stack],
+        vraies: &SlicePoses,
+        bruit_pct: f64,
+        biais_pct: f64,
+        graine: u64,
+    ) -> Vec<Stack> {
         let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
         let moyenne = {
-            let (somme, n) = volume.data().iter().filter(|&&v| v > 0.03 * maximum).fold((0.0_f64, 0usize), |(s, n), &v| (s + f64::from(v), n + 1));
+            let (somme, n) = volume
+                .data()
+                .iter()
+                .filter(|&&v| v > 0.03 * maximum)
+                .fold((0.0_f64, 0usize), |(s, n), &v| (s + f64::from(v), n + 1));
             somme / n.max(1) as f64
         };
         let mut alea = Alea(graine.wrapping_mul(0x9E37_79B9) | 1);
@@ -3579,7 +5483,13 @@ mod tests {
                 .collect();
             let gain = 1.0 + biais_pct / 100.0 * tire(-1.0, 1.0);
             let amplitude = biais_pct / 100.0 / 2.0;
-            Box::new(move |x| gain * (1.0 + ondes.iter().map(|(d, l, p)| amplitude * (2.0 * std::f64::consts::PI * x.dot(d) / l + p).cos()).sum::<f64>()))
+            Box::new(move |x| {
+                gain * (1.0
+                    + ondes
+                        .iter()
+                        .map(|(d, l, p)| amplitude * (2.0 * std::f64::consts::PI * x.dot(d) / l + p).cos())
+                        .sum::<f64>())
+            })
         };
         modeles
             .iter()
@@ -3591,13 +5501,23 @@ mod tests {
                     let posee = coupe.with_motion(*vraies.get(n, coupe.index()));
                     let sim = volume.simulate_slice(&posee, &posee.psf());
                     for ((i, j), &v) in sim.values.indexed_iter() {
-                        let nominale = (modele.affine() * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0)).xyz();
-                        data[[i, j, coupe.index()]] = ((f64::from(v) * champ(&nominale)) + bruit_pct / 100.0 * moyenne * gauss()) as f32;
+                        let nominale = (modele.affine()
+                            * nalgebra::Vector4::new(i as f64, j as f64, coupe.index() as f64, 1.0))
+                        .xyz();
+                        data[[i, j, coupe.index()]] =
+                            ((f64::from(v) * champ(&nominale)) + bruit_pct / 100.0 * moyenne * gauss()) as f32;
                         masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
                     }
                 }
                 let e = modele.spacing();
-                stack_avec_masque(t, &format!("reel{n}"), &data, &masque, modele.affine(), [e[0] as f32, e[1] as f32, e[2] as f32])
+                stack_avec_masque(
+                    t,
+                    &format!("reel{n}"),
+                    &data,
+                    &masque,
+                    modele.affine(),
+                    [e[0] as f32, e[1] as f32, e[2] as f32],
+                )
             })
             .collect()
     }
@@ -3613,12 +5533,33 @@ mod tests {
         use crate::s2s::{register_slices_s2s, S2sConfig};
         let modeles = stacks_reels();
         let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
-        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap());
+        let volume = Volume::from_stack(
+            &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap(),
+        );
         let modele = lire("MEDOXIDE_MODELE", "independante");
-        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "3").split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let graines: Vec<u64> = lire("MEDOXIDE_GRAINES", "7").split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let (bruit, biais): (f64, f64) = (lire("MEDOXIDE_BRUIT_PCT", "5").parse().unwrap(), lire("MEDOXIDE_BIAIS_PCT", "0").parse().unwrap());
-        let fin = S2sConfig { block_levels: 0, coarse_sigma_pixels: 1.0, coarse_sweeps: 3, coarse_levels: 2, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "3")
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let graines: Vec<u64> = lire("MEDOXIDE_GRAINES", "7")
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let (bruit, biais): (f64, f64) = (
+            lire("MEDOXIDE_BRUIT_PCT", "5").parse().unwrap(),
+            lire("MEDOXIDE_BIAIS_PCT", "0").parse().unwrap(),
+        );
+        let fin = S2sConfig {
+            block_levels: 0,
+            coarse_sigma_pixels: 1.0,
+            coarse_sweeps: 3,
+            coarse_levels: 2,
+            intersection: crate::s2s::IntersectionConfig {
+                highpass_sigma_mm: 25.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let variantes = variantes_s2s(&lire("MEDOXIDE_VARIANTES", "fin"), fin);
         let detail = std::env::var("MEDOXIDE_DETAIL").is_ok_and(|v| v == "1");
         let device = burn::tensor::Device::flex().autodiff();
@@ -3628,33 +5569,87 @@ mod tests {
                 let vraies = mouvement_vrai(&modeles, &modele, a, graine);
                 let stacks = simuler_reel(&t, &volume, &modeles, &vraies, bruit, biais, graine);
                 let part = |poses: &SlicePoses| {
-                    let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+                    let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies)
+                        .into_iter()
+                        .filter(|v| v.is_finite())
+                        .collect();
                     e.sort_by(|x, y| x.partial_cmp(y).unwrap());
-                    (e.iter().filter(|&&v| v <= 1.5).count() as f64 / e.len() as f64, e[e.len() / 2], e[(0.9 * (e.len() - 1) as f64) as usize])
+                    (
+                        e.iter().filter(|&&v| v <= 1.5).count() as f64 / e.len() as f64,
+                        e[e.len() / 2],
+                        e[(0.9 * (e.len() - 1) as f64) as usize],
+                    )
                 };
                 let (p, m, q) = part(&SlicePoses::identity(&stacks));
                 println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
                 for (nom, config) in &variantes {
-                    let travail = if nom.contains("bias=1") { correct_stacks(&stacks, &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default()).unwrap(), 0.1) } else { stacks.clone() };
-                    let rapport = register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap();
-                    let ncc_finale: std::collections::HashMap<(usize, usize), f64> = rapport.slices.iter().map(|s| ((s.stack, s.slice), s.ncc_final)).collect();
+                    let travail = if nom.contains("bias=1") {
+                        correct_stacks(
+                            &stacks,
+                            &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default())
+                                .unwrap(),
+                            0.1,
+                        )
+                    } else {
+                        stacks.clone()
+                    };
+                    let rapport =
+                        register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap();
+                    let ncc_finale: std::collections::HashMap<(usize, usize), f64> = rapport
+                        .slices
+                        .iter()
+                        .map(|s| ((s.stack, s.slice), s.ncc_final))
+                        .collect();
                     let mut poses = rapport.poses;
-                    if let Some(cycles) = nom.split('+').find_map(|j| j.strip_prefix("v=")).and_then(|v| v.parse::<usize>().ok()) {
+                    if let Some(cycles) = nom
+                        .split('+')
+                        .find_map(|j| j.strip_prefix("v="))
+                        .and_then(|v| v.parse::<usize>().ok())
+                    {
                         // chaînage : cycles coupe-volume partant des poses du coupe-coupe (reconstruction à 2 mm pour borner le temps)
-                        let reglages = crate::pipeline::ReconstructionConfig { s2v_cycles: cycles, resolution_mm: 2.0, margin_mm: 4.0, ..Default::default() };
+                        let reglages = crate::pipeline::ReconstructionConfig {
+                            s2v_cycles: cycles,
+                            resolution_mm: 2.0,
+                            margin_mm: 4.0,
+                            ..Default::default()
+                        };
                         let grille = reconstruction_grid(&travail, 2.0, 4.0).unwrap();
-                        poses = crate::align::reconstruct_with_motion_correction(&grille, &travail, &poses, crate::pipeline::loop_config(&reglages), &device, |_, _, _| {}).unwrap().poses;
+                        poses = crate::align::reconstruct_with_motion_correction(
+                            &grille,
+                            &travail,
+                            &poses,
+                            crate::pipeline::loop_config(&reglages),
+                            &device,
+                            |_, _, _| {},
+                        )
+                        .unwrap()
+                        .poses;
                     }
                     let (p, m, q) = part(&poses);
                     println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
                     if detail {
                         // une ligne par coupe : stack, coupe, déplacement vrai (écart de l'en-tête à la vérité) et erreur après recalage (mm)
-                        let (avant, apres) = (erreurs_de_pose_sans_mouvement_commun(&stacks, &SlicePoses::identity(&stacks), &vraies), erreurs_de_pose_sans_mouvement_commun(&stacks, &poses, &vraies));
+                        let (avant, apres) = (
+                            erreurs_de_pose_sans_mouvement_commun(&stacks, &SlicePoses::identity(&stacks), &vraies),
+                            erreurs_de_pose_sans_mouvement_commun(&stacks, &poses, &vraies),
+                        );
                         let mut i = 0;
                         for (si, s) in stacks.iter().enumerate() {
                             for k in 0..s.dim().2 {
-                                let surface = s.brain_mask().unwrap().voxels().index_axis(Axis(2), k).iter().filter(|&&m| m).count();
-                                println!("SLICE {modele} {a} {graine} {nom} {si} {k} {:.2} {:.2} {surface} {:.4}", avant[i], apres[i], ncc_finale.get(&(si, k)).copied().unwrap_or(f64::NAN));
+                                let surface = s
+                                    .brain_mask()
+                                    .unwrap()
+                                    .voxels()
+                                    .index_axis(Axis(2), k)
+                                    .iter()
+                                    .filter(|&&m| m)
+                                    .count();
+                                println!(
+                                    "SLICE {modele} {a} {graine} {nom} {si} {k} {:.2} {:.2} {surface} {:.4}",
+                                    avant[i],
+                                    apres[i],
+                                    ncc_finale.get(&(si, k)).copied().unwrap_or(f64::NAN)
+                                );
                                 i += 1;
                             }
                         }
@@ -3675,13 +5670,34 @@ mod tests {
         use crate::pipeline::correct_stacks;
         use crate::s2s::{register_slices_s2s, S2sConfig};
         let tous = stacks_reels();
-        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
-        let amplitudes: Vec<f64> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "0,4".into()).split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
+        let reference = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
+        let amplitudes: Vec<f64> = std::env::var("MEDOXIDE_AMPLITUDES")
+            .unwrap_or_else(|_| "0,4".into())
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let corriges = correct_stacks(
+            &tous,
+            &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(),
+            0.1,
+        );
         let device = burn::tensor::Device::flex().autodiff();
-        let fin = S2sConfig { block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
+        let fin = S2sConfig {
+            block_levels: 0,
+            intersection: crate::s2s::IntersectionConfig {
+                highpass_sigma_mm: 25.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         // MEDOXIDE_VARIANTES : réglages à comparer (voir `variantes_s2s`) ; défaut `fin;6,2,2`
-        let variantes = variantes_s2s(&std::env::var("MEDOXIDE_VARIANTES").unwrap_or_else(|_| "fin;6,2,2".into()), fin);
+        let variantes = variantes_s2s(
+            &std::env::var("MEDOXIDE_VARIANTES").unwrap_or_else(|_| "fin;6,2,2".into()),
+            fin,
+        );
         for a in amplitudes {
             let graine: u64 = std::env::var("MEDOXIDE_GRAINE").map_or(7, |v| v.trim().parse().unwrap());
             // MEDOXIDE_PERTURBATION : `independante` (défaut) ou `lisse` (marche autorégressive le long du stack, coefficient 0,9)
@@ -3697,15 +5713,29 @@ mod tests {
                 }
                 // amplitude de la perturbation de la coupe du milieu : angle de rotation (degrés) et norme de la translation (mm)
                 let m = perturbation.get(si, stack.dim().2 / 2);
-                let angle = ((m.fixed_view::<3, 3>(0, 0).trace() - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
-                println!("PERTURBATION stack {si} : rotation {angle:.1}° ; translation {:.1} mm", m.fixed_view::<3, 1>(0, 3).norm());
+                let angle = ((m.fixed_view::<3, 3>(0, 0).trace() - 1.0) / 2.0)
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees();
+                println!(
+                    "PERTURBATION stack {si} : rotation {angle:.1}° ; translation {:.1} mm",
+                    m.fixed_view::<3, 1>(0, 3).norm()
+                );
             }
             for (nom, config) in &variantes {
                 let rapport = register_slices_s2s(&corriges, &depart, config, &device).unwrap();
-                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&tous, &rapport.poses, &reference).into_iter().filter(|v| v.is_finite()).collect();
+                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&tous, &rapport.poses, &reference)
+                    .into_iter()
+                    .filter(|v| v.is_finite())
+                    .collect();
                 e.sort_by(|x, y| x.partial_cmp(y).unwrap());
                 let part = e.iter().filter(|&&v| v <= 1.5).count() as f64 / e.len() as f64;
-                println!("CAPTURE {a} {nom} {:.2} {:.2} {:.2}", part, e[e.len() / 2], e[(0.9 * (e.len() - 1) as f64) as usize]);
+                println!(
+                    "CAPTURE {a} {nom} {:.2} {:.2} {:.2}",
+                    part,
+                    e[e.len() / 2],
+                    e[(0.9 * (e.len() - 1) as f64) as usize]
+                );
             }
         }
     }
@@ -3721,25 +5751,69 @@ mod tests {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::diff::{pose_to_matrix, RegistrationConfig};
         use crate::pipeline::correct_stacks;
-        use crate::s2s::{grid_local_maxima, register_slice_s2s, rotation_grid_candidates, IntersectionConfig, IntersectionProblem, SliceAtlas};
+        use crate::s2s::{
+            grid_local_maxima, register_slice_s2s, rotation_grid_candidates, IntersectionConfig, IntersectionProblem,
+            SliceAtlas,
+        };
         let tous = stacks_reels();
-        let reference = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let reference = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
         let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
-        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "4").split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let angles: Vec<f64> = lire("MEDOXIDE_ANGLES", "-6,-3,0,3,6").split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let (pas, sigma): (usize, f64) = (lire("MEDOXIDE_PAS", "3").parse().unwrap(), lire("MEDOXIDE_SIGMA", "1").parse().unwrap());
-        let corriges = correct_stacks(&tous, &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(), 0.1);
+        let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "4")
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let angles: Vec<f64> = lire("MEDOXIDE_ANGLES", "-6,-3,0,3,6")
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        let (pas, sigma): (usize, f64) = (
+            lire("MEDOXIDE_PAS", "3").parse().unwrap(),
+            lire("MEDOXIDE_SIGMA", "1").parse().unwrap(),
+        );
+        let corriges = correct_stacks(
+            &tous,
+            &estimate_bias_fields(&tous, &reference, &BiasConfig::default()).unwrap(),
+            0.1,
+        );
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = SliceAtlas::new_blurred(&corriges, &device, sigma).unwrap();
-        let adam = RegistrationConfig { learning_rate: 0.3, iterations: 120, lr_decay: 0.97, initial: [0.0; 6] };
-        let translation = RegistrationConfig { learning_rate: 0.5, iterations: 20, lr_decay: 0.95, initial: [0.0; 6] };
+        let adam = RegistrationConfig {
+            learning_rate: 0.3,
+            iterations: 120,
+            lr_decay: 0.97,
+            initial: [0.0; 6],
+        };
+        let translation = RegistrationConfig {
+            learning_rate: 0.5,
+            iterations: 20,
+            lr_decay: 0.95,
+            initial: [0.0; 6],
+        };
         let erreur = |si: usize, k: usize, pose: &Matrix4<f64>| -> Option<f64> {
-            let (a, b) = (crate::align::preparer_coupe(&corriges[si], k, *pose)?, crate::align::preparer_coupe(&corriges[si], k, *reference.get(si, k))?);
-            Some((a.points.iter().zip(&b.points).map(|(p, q)| (p - q).norm_squared()).sum::<f64>() / a.points.len() as f64).sqrt())
+            let (a, b) = (
+                crate::align::preparer_coupe(&corriges[si], k, *pose)?,
+                crate::align::preparer_coupe(&corriges[si], k, *reference.get(si, k))?,
+            );
+            Some(
+                (a.points
+                    .iter()
+                    .zip(&b.points)
+                    .map(|(p, q)| (p - q).norm_squared())
+                    .sum::<f64>()
+                    / a.points.len() as f64)
+                    .sqrt(),
+            )
         };
         for a in amplitudes {
             let graine: u64 = lire("MEDOXIDE_GRAINE", "7").parse().unwrap();
-            let perturbation = if lire("MEDOXIDE_PERTURBATION", "independante") == "lisse" { poses_lisses(&tous, a, a, graine, 0.9) } else { poses_aleatoires(&tous, a, a, graine) };
+            let perturbation = if lire("MEDOXIDE_PERTURBATION", "independante") == "lisse" {
+                poses_lisses(&tous, a, a, graine, 0.9)
+            } else {
+                poses_aleatoires(&tous, a, a, graine)
+            };
             let mut depart = SlicePoses::identity(&tous);
             for (si, stack) in tous.iter().enumerate() {
                 for k in 0..stack.dim().2 {
@@ -3748,8 +5822,20 @@ mod tests {
             }
             // état « après » : le recalage coupe-coupe actuel (flou σ = 1, sans alignement par stack) lancé depuis le départ perturbé ; le multi-départ ne porte que sur les coupes qui y restent mal recalées (> 1,5 mm de la référence)
             let apres = {
-                let fin = crate::s2s::S2sConfig { block_levels: 0, coarse_sigma_pixels: 1.0, coarse_sweeps: 3, coarse_levels: 2, intersection: IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, ..Default::default() };
-                crate::s2s::register_slices_s2s(&corriges, &depart, &fin, &device).unwrap().poses
+                let fin = crate::s2s::S2sConfig {
+                    block_levels: 0,
+                    coarse_sigma_pixels: 1.0,
+                    coarse_sweeps: 3,
+                    coarse_levels: 2,
+                    intersection: IntersectionConfig {
+                        highpass_sigma_mm: 25.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                crate::s2s::register_slices_s2s(&corriges, &depart, &fin, &device)
+                    .unwrap()
+                    .poses
             };
             for partenaires in lire("MEDOXIDE_MODES", "perturbés,vrais,après").split(',') {
                 let base = match partenaires {
@@ -3761,7 +5847,12 @@ mod tests {
                         for (sj, stack_j) in tous.iter().enumerate() {
                             for kj in 0..stack_j.dim().2 {
                                 if erreur(sj, kj, apres.get(sj, kj)).map_or(false, |e| e > 1.5) {
-                                    p.set(sj, kj, Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0)) * apres.get(sj, kj));
+                                    p.set(
+                                        sj,
+                                        kj,
+                                        Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0))
+                                            * apres.get(sj, kj),
+                                    );
                                 }
                             }
                         }
@@ -3769,24 +5860,62 @@ mod tests {
                     }
                     _ => depart.clone(),
                 };
-                let depart = if partenaires == "après" || partenaires == "oracle" { &apres } else { &depart };
-                let (mut e0, mut e_adam, mut e_best, mut e_top, mut e_grid) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                let depart = if partenaires == "après" || partenaires == "oracle" {
+                    &apres
+                } else {
+                    &depart
+                };
+                let (mut e0, mut e_adam, mut e_best, mut e_top, mut e_grid) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
                 for (si, stack) in tous.iter().enumerate() {
                     for k in (0..stack.dim().2).step_by(pas) {
                         let s0 = *depart.get(si, k);
                         let mut poses = base.clone();
                         poses.set(si, k, s0);
-                        if (partenaires == "après" || partenaires == "oracle") && erreur(si, k, &s0).map_or(true, |e| e <= 1.5) {
+                        if (partenaires == "après" || partenaires == "oracle")
+                            && erreur(si, k, &s0).map_or(true, |e| e <= 1.5)
+                        {
                             continue; // déjà bien recalée : hors du périmètre du multi-départ
                         }
-                        let (Some(prep), Some(probleme)) = (crate::align::preparer_coupe(&corriges[si], k, s0), IntersectionProblem::build(&atlas, &corriges, &poses, si, k, &IntersectionConfig { highpass_sigma_mm: 25.0, ..Default::default() }, &device)) else { continue };
-                        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
+                        let (Some(prep), Some(probleme)) = (
+                            crate::align::preparer_coupe(&corriges[si], k, s0),
+                            IntersectionProblem::build(
+                                &atlas,
+                                &corriges,
+                                &poses,
+                                si,
+                                k,
+                                &IntersectionConfig {
+                                    highpass_sigma_mm: 25.0,
+                                    ..Default::default()
+                                },
+                                &device,
+                            ),
+                        ) else {
+                            continue;
+                        };
+                        let pivot = burn::tensor::Tensor::<1>::from_floats(
+                            [prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32],
+                            &device,
+                        );
                         let pose_de = |params: &[f64; 6]| pose_to_matrix(params, &prep.pivot, prep.echelle) * s0;
                         e0.push(erreur(si, k, &s0).unwrap());
-                        e_adam.push(erreur(si, k, &pose_de(&register_slice_s2s(&probleme, pivot.clone(), prep.echelle, adam).params)).unwrap());
+                        e_adam.push(
+                            erreur(
+                                si,
+                                k,
+                                &pose_de(&register_slice_s2s(&probleme, pivot.clone(), prep.echelle, adam).params),
+                            )
+                            .unwrap(),
+                        );
                         let candidats = rotation_grid_candidates(&probleme, pivot, prep.echelle, &angles, translation);
-                        let erreurs: Vec<f64> = candidats.iter().map(|c| erreur(si, k, &pose_de(&c.params)).unwrap()).collect();
-                        let meilleur = (0..candidats.len()).max_by(|&x, &y| candidats[x].concordance.partial_cmp(&candidats[y].concordance).unwrap()).unwrap();
+                        let erreurs: Vec<f64> = candidats
+                            .iter()
+                            .map(|c| erreur(si, k, &pose_de(&c.params)).unwrap())
+                            .collect();
+                        let meilleur = (0..candidats.len())
+                            .max_by(|&x, &y| candidats[x].concordance.partial_cmp(&candidats[y].concordance).unwrap())
+                            .unwrap();
                         e_best.push(erreurs[meilleur]);
                         let maxima = grid_local_maxima(&candidats, angles.len());
                         e_top.push(maxima.iter().take(5).map(|&i| erreurs[i]).fold(f64::INFINITY, f64::min));
@@ -3796,7 +5925,15 @@ mod tests {
                 let part = |v: &[f64]| v.iter().filter(|&&x| x <= 1.5).count() as f64 / v.len() as f64;
                 let mut tri = e0.clone();
                 tri.sort_by(|x, y| x.partial_cmp(y).unwrap());
-                println!("CANDIDATS {a} {partenaires} {} {:.2} {:.2} {:.2} {:.2} {:.2}", e0.len(), tri[tri.len() / 2], part(&e_adam), part(&e_best), part(&e_top), part(&e_grid));
+                println!(
+                    "CANDIDATS {a} {partenaires} {} {:.2} {:.2} {:.2} {:.2} {:.2}",
+                    e0.len(),
+                    tri[tri.len() / 2],
+                    part(&e_adam),
+                    part(&e_best),
+                    part(&e_top),
+                    part(&e_grid)
+                );
             }
         }
     }
@@ -3808,8 +5945,14 @@ mod tests {
     #[ignore = "données réelles locales"]
     fn diagnose_slice_residuals_on_real_data() {
         let tous = stacks_reels();
-        let poses = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
-        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).expect("volume illisible"));
+        let poses = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
+        let volume = Volume::from_stack(
+            &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME")))
+                .expect("volume illisible"),
+        );
         for (si, stack) in tous.iter().enumerate() {
             let masque = stack.brain_mask().expect("masque").voxels();
             for coupe in stack.slices() {
@@ -3828,7 +5971,8 @@ mod tests {
                 let corr = if a.len() >= 20 { correlation(&a, &b) } else { f64::NAN };
                 let rmse = if a.len() >= 20 {
                     let moy = a.iter().sum::<f64>() / a.len() as f64;
-                    ((a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt()) / moy.max(1e-9)
+                    ((a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt())
+                        / moy.max(1e-9)
                 } else {
                     f64::NAN
                 };
@@ -3854,13 +5998,18 @@ mod tests {
     #[ignore = "données réelles locales"]
     fn diagnose_stack_coverage_on_real_data() {
         let tous = stacks_reels();
-        let poses = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let poses = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
         let grille = reconstruction_grid(&tous, 0.8, 10.0).unwrap();
         let mut compte = Array3::<f64>::zeros(grille.dims);
         let mut total = Array3::<f64>::zeros(grille.dims);
         for si in 0..tous.len() {
             let un = std::slice::from_ref(&tous[si]);
-            let support = normalized_adjoint_with_poses(&grille, un, &poses.select(&[si])).unwrap().support;
+            let support = normalized_adjoint_with_poses(&grille, un, &poses.select(&[si]))
+                .unwrap()
+                .support;
             for (c, &v) in compte.iter_mut().zip(support.iter()) {
                 if v >= SUPPORT_MIN {
                     *c += 1.0;
@@ -3882,8 +6031,15 @@ mod tests {
                 }
             }
         }
-        println!("DOMAINE : {} voxels ; couverts par 1 stack : {n1} ; par 2 : {n2} ; par 3 : {n3} ; par 4 ou plus : {n4}", n1 + n2 + n3 + n4);
-        ecrire_image_grille(Path::new(&std::env::var("MEDOXIDE_SORTIE").expect("MEDOXIDE_SORTIE")), &(&compte * &total), &grille);
+        println!(
+            "DOMAINE : {} voxels ; couverts par 1 stack : {n1} ; par 2 : {n2} ; par 3 : {n3} ; par 4 ou plus : {n4}",
+            n1 + n2 + n3 + n4
+        );
+        ecrire_image_grille(
+            Path::new(&std::env::var("MEDOXIDE_SORTIE").expect("MEDOXIDE_SORTIE")),
+            &(&compte * &total),
+            &grille,
+        );
     }
 
     /// Couverture minimale par les stacks (critères fixés avant, blobs, 3 stacks, une coupe du stack 0 volontairement déplacée de 25 mm) : (a) `with_poses_covered(…, 1)` a EXACTEMENT le domaine de `with_poses` ; (b) pour `min_stacks` = 2 et 3, un voxel est dans le
@@ -3896,11 +6052,17 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
         let mut deplacees = vraies.clone();
         let k = 5;
-        deplacees.set(0, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(25.0, 0.0, 0.0), &Vector3::zeros()) * vraies.get(0, k));
+        deplacees.set(
+            0,
+            k,
+            mouvement_rigide(&Vector3::zeros(), &Vector3::new(25.0, 0.0, 0.0), &Vector3::zeros()) * vraies.get(0, k),
+        );
         let compte_independant = |poses: &SlicePoses| {
             let mut c = Array3::<usize>::zeros(grille.dims);
             for si in 0..stacks.len() {
-                let support = normalized_adjoint_with_poses(&grille, &stacks[si..si + 1], &poses.select(&[si])).unwrap().support;
+                let support = normalized_adjoint_with_poses(&grille, &stacks[si..si + 1], &poses.select(&[si]))
+                    .unwrap()
+                    .support;
                 for (n, &v) in c.iter_mut().zip(support.iter()) {
                     if v >= SUPPORT_MIN {
                         *n += 1;
@@ -3911,20 +6073,41 @@ mod tests {
         };
         let complet = ReconstructionProblem::with_poses(&grille, &stacks, &deplacees, 0.1).unwrap();
         // (a)
-        assert_eq!(ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 1).unwrap().domain(), complet.domain());
-        assert_eq!(ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 0).unwrap().domain(), complet.domain());
+        assert_eq!(
+            ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 1)
+                .unwrap()
+                .domain(),
+            complet.domain()
+        );
+        assert_eq!(
+            ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 0)
+                .unwrap()
+                .domain(),
+            complet.domain()
+        );
         // (b)
         let compte = compte_independant(&deplacees);
         for requis in [2usize, 3] {
             let p = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, requis).unwrap();
             for (idx, &d) in p.domain().indexed_iter() {
-                assert_eq!(d, complet.domain()[idx] && compte[idx] >= requis, "voxel {idx:?} : couverture {} pour min_stacks = {requis}", compte[idx]);
+                assert_eq!(
+                    d,
+                    complet.domain()[idx] && compte[idx] >= requis,
+                    "voxel {idx:?} : couverture {} pour min_stacks = {requis}",
+                    compte[idx]
+                );
             }
         }
         // (c) la coupe déplacée donne des voxels à un seul stack
         let deux = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 2).unwrap();
-        let (n_complet, n_deux) = (complet.domain().iter().filter(|&&v| v).count(), deux.domain().iter().filter(|&&v| v).count());
-        assert!(n_complet > n_deux + 20, "la coupe déplacée devrait ajouter des voxels à un seul stack : {n_complet} contre {n_deux}");
+        let (n_complet, n_deux) = (
+            complet.domain().iter().filter(|&&v| v).count(),
+            deux.domain().iter().filter(|&&v| v).count(),
+        );
+        assert!(
+            n_complet > n_deux + 20,
+            "la coupe déplacée devrait ajouter des voxels à un seul stack : {n_complet} contre {n_deux}"
+        );
         // (d)
         let beaucoup = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 99).unwrap();
         let trois = ReconstructionProblem::with_poses_covered(&grille, &stacks, &deplacees, 0.1, 3).unwrap();
@@ -3941,7 +6124,11 @@ mod tests {
                 den += xa[idx].powi(2);
             }
         }
-        assert!((num / den).sqrt() < 5e-2, "la solution sur le domaine commun change trop : {:.2e}", (num / den).sqrt());
+        assert!(
+            (num / den).sqrt() < 5e-2,
+            "la solution sur le domaine commun change trop : {:.2e}",
+            (num / den).sqrt()
+        );
     }
 
     /// Passe-haut des profils (critères fixés avant, valeurs calculées) : sur un profil de 400 points (pas 0,5 mm), σ = 10 mm, poids 1 partout : (a) un profil constant donne un résidu nul (< 1e-5) ; (b) un profil linéaire donne un résidu nul à 1e-3 près à plus de 40 mm
@@ -3956,26 +6143,79 @@ mod tests {
         let t: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
         let k = gaussian_smoothing_matrix(&t, 10.0, &device);
         let lire = |x: Tensor<2>| x.into_data().try_to_vec::<f32>().unwrap();
-        let profil = |f: &dyn Fn(f64) -> f64| Tensor::<2>::from_floats(TensorData::new(t.iter().map(|&x| f(x) as f32).collect::<Vec<f32>>(), [1, n]), &device);
+        let profil = |f: &dyn Fn(f64) -> f64| {
+            Tensor::<2>::from_floats(
+                TensorData::new(t.iter().map(|&x| f(x) as f32).collect::<Vec<f32>>(), [1, n]),
+                &device,
+            )
+        };
         let un = Tensor::<2>::ones([1, n], &device);
         // (a)
-        assert!(lire(highpass_profiles(profil(&|_| 5.0), un.clone(), k.clone())).iter().all(|v| v.abs() < 1e-4));
+        assert!(lire(highpass_profiles(profil(&|_| 5.0), un.clone(), k.clone()))
+            .iter()
+            .all(|v| v.abs() < 1e-4));
         // (b)
         let lin = lire(highpass_profiles(profil(&|x| 0.3 * x + 2.0), un.clone(), k.clone()));
-        assert!((0..n).filter(|&i| t[i] > 40.0 && t[i] < t[n - 1] - 40.0).all(|i| lin[i].abs() < 1e-3), "résidu linéaire");
+        assert!(
+            (0..n)
+                .filter(|&i| t[i] > 40.0 && t[i] < t[n - 1] - 40.0)
+                .all(|i| lin[i].abs() < 1e-3),
+            "résidu linéaire"
+        );
         // (c) et (d) loin des bords
         let loin = |i: usize| t[i] > 60.0 && t[i] < t[n - 1] - 60.0;
-        let rapide = lire(highpass_profiles(profil(&|x| (2.0 * std::f64::consts::PI * x / 4.0).sin()), un.clone(), k.clone()));
-        let ecart = (0..n).filter(|&i| loin(i)).map(|i| (f64::from(rapide[i]) - (2.0 * std::f64::consts::PI * t[i] / 4.0).sin()).abs()).fold(0.0, f64::max);
+        let rapide = lire(highpass_profiles(
+            profil(&|x| (2.0 * std::f64::consts::PI * x / 4.0).sin()),
+            un.clone(),
+            k.clone(),
+        ));
+        let ecart = (0..n)
+            .filter(|&i| loin(i))
+            .map(|i| (f64::from(rapide[i]) - (2.0 * std::f64::consts::PI * t[i] / 4.0).sin()).abs())
+            .fold(0.0, f64::max);
         assert!(ecart < 0.02, "sinusoïde rapide altérée de {ecart}");
-        let lente = lire(highpass_profiles(profil(&|x| (2.0 * std::f64::consts::PI * x / 200.0).sin()), un.clone(), k.clone()));
-        let reste = (0..n).filter(|&i| loin(i)).map(|i| f64::from(lente[i]).abs()).fold(0.0, f64::max);
+        let lente = lire(highpass_profiles(
+            profil(&|x| (2.0 * std::f64::consts::PI * x / 200.0).sin()),
+            un.clone(),
+            k.clone(),
+        ));
+        let reste = (0..n)
+            .filter(|&i| loin(i))
+            .map(|i| f64::from(lente[i]).abs())
+            .fold(0.0, f64::max);
         assert!(reste < 0.1, "sinusoïde lente non supprimée : {reste}");
         // (e) poids nuls
-        let poids = Tensor::<2>::from_floats(TensorData::new((0..n).map(|i| if i % 7 == 3 { 0.0_f32 } else { 1.0 }).collect::<Vec<f32>>(), [1, n]), &device);
-        let a = lire(highpass_profiles(profil(&|x| (x * 0.1).sin() + 0.001 * x), poids.clone(), k.clone()));
-        let b = lire(highpass_profiles(profil(&|x| (x * 0.1).sin() + 0.001 * x + if ((x / 0.5).round() as usize) % 7 == 3 { 500.0 } else { 0.0 }), poids, k.clone()));
-        assert!((0..n).filter(|i| i % 7 != 3).all(|i| (a[i] - b[i]).abs() < 1e-3), "un point de poids nul a contribué");
+        let poids = Tensor::<2>::from_floats(
+            TensorData::new(
+                (0..n)
+                    .map(|i| if i % 7 == 3 { 0.0_f32 } else { 1.0 })
+                    .collect::<Vec<f32>>(),
+                [1, n],
+            ),
+            &device,
+        );
+        let a = lire(highpass_profiles(
+            profil(&|x| (x * 0.1).sin() + 0.001 * x),
+            poids.clone(),
+            k.clone(),
+        ));
+        let b = lire(highpass_profiles(
+            profil(&|x| {
+                (x * 0.1).sin()
+                    + 0.001 * x
+                    + if ((x / 0.5).round() as usize) % 7 == 3 {
+                        500.0
+                    } else {
+                        0.0
+                    }
+            }),
+            poids,
+            k.clone(),
+        ));
+        assert!(
+            (0..n).filter(|i| i % 7 != 3).all(|i| (a[i] - b[i]).abs() < 1e-3),
+            "un point de poids nul a contribué"
+        );
         // (f)
         let m = lire(k);
         for a in [0usize, 7, 100, 399] {
@@ -4003,7 +6243,10 @@ mod tests {
                 assert_eq!(blocs.last().unwrap().end, n);
                 assert!(blocs.windows(2).all(|w| w[0].end == w[1].start));
                 let tailles: Vec<usize> = blocs.iter().map(|b| b.len()).collect();
-                assert!(tailles.iter().max().unwrap() - tailles.iter().min().unwrap() <= 1, "{n} coupes, niveau {niveau} : {tailles:?}");
+                assert!(
+                    tailles.iter().max().unwrap() - tailles.iter().min().unwrap() <= 1,
+                    "{n} coupes, niveau {niveau} : {tailles:?}"
+                );
             }
         }
         let t = Temp::new("blocs");
@@ -4014,20 +6257,59 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
         let med = |poses: &SlicePoses| {
-            let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+            let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies)
+                .into_iter()
+                .filter(|v| v.is_finite())
+                .collect();
             e.sort_by(|a, b| a.partial_cmp(b).unwrap());
             e[e.len() / 2]
         };
-        let base = S2sConfig { sweeps: 2, ..Default::default() };
-        let (seul, avec_blocs) = (crate::s2s::register_slices_s2s(&stacks, &depart, &base, &device).unwrap(), crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 8.0, ..base }, &device).unwrap());
+        let base = S2sConfig {
+            sweeps: 2,
+            ..Default::default()
+        };
+        let (seul, avec_blocs) = (
+            crate::s2s::register_slices_s2s(&stacks, &depart, &base, &device).unwrap(),
+            crate::s2s::register_slices_s2s(
+                &stacks,
+                &depart,
+                &S2sConfig {
+                    block_levels: 1,
+                    block_search_mm: 8.0,
+                    ..base
+                },
+                &device,
+            )
+            .unwrap(),
+        );
         let (e0, e_seul, e_blocs) = (med(&depart), med(&seul.poses), med(&avec_blocs.poses));
         println!("erreur médiane : en-tête {e0:.2} mm ; par coupe {e_seul:.2} mm ; avec blocs {e_blocs:.2} mm");
         // (a)
-        let zero_niveau = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 0, block_sweeps: 5, block_search_mm: 30.0, ..base }, &device).unwrap();
-        assert!(stacks.iter().enumerate().all(|(si, s)| (0..s.dim().2).all(|k| zero_niveau.poses.get(si, k) == seul.poses.get(si, k))), "block_levels = 0 doit redonner le recalage par coupe");
+        let zero_niveau = crate::s2s::register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                block_levels: 0,
+                block_sweeps: 5,
+                block_search_mm: 30.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            stacks
+                .iter()
+                .enumerate()
+                .all(|(si, s)| (0..s.dim().2).all(|k| zero_niveau.poses.get(si, k) == seul.poses.get(si, k))),
+            "block_levels = 0 doit redonner le recalage par coupe"
+        );
         // (b)
         assert!(e_blocs <= 1.5, "erreur médiane avec blocs : {e_blocs}");
-        assert!(e_blocs < e_seul, "les blocs doivent faire mieux que le recalage par coupe seul : {e_blocs} contre {e_seul}");
+        assert!(
+            e_blocs < e_seul,
+            "les blocs doivent faire mieux que le recalage par coupe seul : {e_blocs} contre {e_seul}"
+        );
     }
 
     /// Grille de recherche exhaustive de l'alignement par blocs (valeurs exactes) : symétrique, pas constant, contient toujours 0, ne dépasse jamais la demi-étendue ; `grille_1d(8, 4)` = −8, −4, 0, 4, 8 ; `grille_1d(9, 4)` aussi (9 n'est pas un multiple du pas) ; `grille_1d(3, 4)` = 0 seul.
@@ -4037,23 +6319,53 @@ mod tests {
         assert_eq!(grille_1d(8.0, 4.0), vec![-8.0, -4.0, 0.0, 4.0, 8.0]);
         assert_eq!(grille_1d(9.0, 4.0), vec![-8.0, -4.0, 0.0, 4.0, 8.0]);
         assert_eq!(grille_1d(3.0, 4.0), vec![0.0]);
-        assert_eq!(grille_1d(6.0, 1.5), vec![-6.0, -4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5, 6.0]);
+        assert_eq!(
+            grille_1d(6.0, 1.5),
+            vec![-6.0, -4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5, 6.0]
+        );
     }
 
     /// Prépare, pour le stack `si` de `stacks` aux poses `poses`, les problèmes d'intersection de toutes ses coupes recalables, avec le pivot moyen et l'échelle quadratique moyenne (comme `align_blocks_level`).
-    fn problemes_de_bloc(stacks: &[Stack], poses: &SlicePoses, si: usize, device: &burn::tensor::Device) -> (Vec<crate::s2s::IntersectionProblem>, burn::tensor::Tensor<1>, Vector3<f64>, f64) {
+    fn problemes_de_bloc(
+        stacks: &[Stack],
+        poses: &SlicePoses,
+        si: usize,
+        device: &burn::tensor::Device,
+    ) -> (
+        Vec<crate::s2s::IntersectionProblem>,
+        burn::tensor::Tensor<1>,
+        Vector3<f64>,
+        f64,
+    ) {
         let atlas = crate::s2s::SliceAtlas::new(stacks, device).unwrap();
         let (mut problemes, mut pivots, mut echelles) = (Vec::new(), Vec::new(), Vec::new());
         for k in 0..stacks[si].dim().2 {
-            let Some(p) = crate::align::preparer_coupe(&stacks[si], k, *poses.get(si, k)) else { continue };
-            let Some(pb) = crate::s2s::IntersectionProblem::build(&atlas, stacks, poses, si, k, &crate::s2s::IntersectionConfig::default(), device) else { continue };
+            let Some(p) = crate::align::preparer_coupe(&stacks[si], k, *poses.get(si, k)) else {
+                continue;
+            };
+            let Some(pb) = crate::s2s::IntersectionProblem::build(
+                &atlas,
+                stacks,
+                poses,
+                si,
+                k,
+                &crate::s2s::IntersectionConfig::default(),
+                device,
+            ) else {
+                continue;
+            };
             problemes.push(pb);
             pivots.push(p.pivot);
             echelles.push(p.echelle);
         }
         let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
         let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
-        (problemes, burn::tensor::Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device), pivot, echelle)
+        (
+            problemes,
+            burn::tensor::Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device),
+            pivot,
+            echelle,
+        )
     }
 
     /// Pondération des partenaires (blobs, trois stacks, mouvement par coupe de ±2 mm/°, la coupe 5 du stack coronal à deux jeux de paramètres) : (a) des poids tous égaux à 1 redonnent la moyenne simple ; (b) multiplier les poids par 7 ne change rien ; (c) un poids nul sur un partenaire donne la concordance du problème construit
@@ -4071,15 +6383,35 @@ mod tests {
         let depart = SlicePoses::identity(&stacks);
         let (si, k) = (1usize, 5usize);
         let prep = crate::align::preparer_coupe(&stacks[si], k, *depart.get(si, k)).unwrap();
-        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
-        let construire = |poses: &SlicePoses| IntersectionProblem::build(&atlas, &stacks, poses, si, k, &IntersectionConfig::default(), &device).unwrap();
-        let valeur = |p: &IntersectionProblem, params: [f32; 6]| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats(params, &device), pivot.clone(), prep.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let pivot = burn::tensor::Tensor::<1>::from_floats(
+            [prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32],
+            &device,
+        );
+        let construire = |poses: &SlicePoses| {
+            IntersectionProblem::build(&atlas, &stacks, poses, si, k, &IntersectionConfig::default(), &device).unwrap()
+        };
+        let valeur = |p: &IntersectionProblem, params: [f32; 6]| {
+            f64::from(
+                p.cost(
+                    burn::tensor::Tensor::<1>::from_floats(params, &device),
+                    pivot.clone(),
+                    prep.echelle,
+                )
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()[0],
+            )
+        };
         let loin = |poses: &SlicePoses, garder: &dyn Fn(usize, usize) -> bool| {
             let mut p = poses.clone();
             for (sj, s) in stacks.iter().enumerate() {
                 for kj in 0..s.dim().2 {
                     if (sj, kj) != (si, k) && !garder(sj, kj) {
-                        p.set(sj, kj, Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0)) * depart.get(sj, kj));
+                        p.set(
+                            sj,
+                            kj,
+                            Matrix4::new_translation(&Vector3::new(1000.0, 1000.0, 1000.0)) * depart.get(sj, kj),
+                        );
                     }
                 }
             }
@@ -4092,25 +6424,62 @@ mod tests {
             assert!(partenaires.len() >= 4, "{} partenaires", partenaires.len());
             // deux partenaires dont la paire est valide (concordance isolée non nulle) et de concordances différentes
             let isolee = |p: (usize, usize)| valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == p)), params);
-            let valides: Vec<((usize, usize), f64)> = partenaires.iter().map(|&p| (p, isolee(p))).filter(|(_, v)| v.abs() > 1e-9).collect();
+            let valides: Vec<((usize, usize), f64)> = partenaires
+                .iter()
+                .map(|&p| (p, isolee(p)))
+                .filter(|(_, v)| v.abs() > 1e-9)
+                .collect();
             assert!(valides.len() >= 2, "moins de deux paires valides");
-            let (a, b) = (valides[0].0, valides.iter().find(|(_, v)| (v - valides[0].1).abs() > 1e-3).expect("deux concordances différentes").0);
+            let (a, b) = (
+                valides[0].0,
+                valides
+                    .iter()
+                    .find(|(_, v)| (v - valides[0].1).abs() > 1e-3)
+                    .expect("deux concordances différentes")
+                    .0,
+            );
             // (a) et (b)
-            assert!((valeur(&construire(&depart).with_partner_weights(|_, _| 1.0), params) - m).abs() < 1e-6, "(a)");
-            assert!((valeur(&construire(&depart).with_partner_weights(|_, _| 7.0), params) - m).abs() < 1e-5, "(b)");
+            assert!(
+                (valeur(&construire(&depart).with_partner_weights(|_, _| 1.0), params) - m).abs() < 1e-6,
+                "(a)"
+            );
+            assert!(
+                (valeur(&construire(&depart).with_partner_weights(|_, _| 7.0), params) - m).abs() < 1e-5,
+                "(b)"
+            );
             // (c) poids nul sur `a`
             let sans_a = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) != a)), params);
-            let poids_nul = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 0.0 } else { 1.0 }), params);
+            let poids_nul = valeur(
+                &construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 0.0 } else { 1.0 }),
+                params,
+            );
             assert!((poids_nul - sans_a).abs() < 1e-5, "(c) {poids_nul} contre {sans_a}");
             // (d) un seul partenaire
             let seul_a = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == a)), params);
             let seul_b = valeur(&construire(&loin(&depart, &|sj, kj| (sj, kj) == b)), params);
-            let un_seul = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 1.0 } else { 0.0 }), params);
+            let un_seul = valeur(
+                &construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 1.0 } else { 0.0 }),
+                params,
+            );
             assert!((un_seul - seul_a).abs() < 1e-5, "(d) {un_seul} contre {seul_a}");
             // (e) deux partenaires, poids 3 et 1 : moyenne pondérée des deux concordances isolées
-            let deux = valeur(&construire(&depart).with_partner_weights(|sj, kj| if (sj, kj) == a { 3.0 } else if (sj, kj) == b { 1.0 } else { 0.0 }), params);
+            let deux = valeur(
+                &construire(&depart).with_partner_weights(|sj, kj| {
+                    if (sj, kj) == a {
+                        3.0
+                    } else if (sj, kj) == b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }),
+                params,
+            );
             let attendu = (3.0 * seul_a + seul_b) / 4.0;
-            assert!((deux - attendu).abs() < 1e-5, "(e) {deux} contre {attendu} (isolées {seul_a} et {seul_b})");
+            assert!(
+                (deux - attendu).abs() < 1e-5,
+                "(e) {deux} contre {attendu} (isolées {seul_a} et {seul_b})"
+            );
         }
     }
 
@@ -4123,14 +6492,61 @@ mod tests {
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        let base = S2sConfig { sweeps: 2, ..Default::default() };
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let base = S2sConfig {
+            sweeps: 2,
+            ..Default::default()
+        };
         let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
-        let inactive = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.7, reliability_high: 0.7, ..base }, &device).unwrap().poses;
+        let inactive = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                reliability_low: 0.7,
+                reliability_high: 0.7,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert_eq!(ecart(&sans, &inactive), 0.0, "(a)");
-        let active = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.95, reliability_high: 0.99, ..base }, &device).unwrap().poses;
-        assert!(ecart(&sans, &active) > 1e-6, "(b) la fiabilité n'a aucun effet : {}", ecart(&sans, &active));
-        let inverse = register_slices_s2s(&stacks, &depart, &S2sConfig { reliability_low: 0.99, reliability_high: 0.95, ..base }, &device).unwrap().poses;
+        let active = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                reliability_low: 0.95,
+                reliability_high: 0.99,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
+        assert!(
+            ecart(&sans, &active) > 1e-6,
+            "(b) la fiabilité n'a aucun effet : {}",
+            ecart(&sans, &active)
+        );
+        let inverse = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                reliability_low: 0.99,
+                reliability_high: 0.95,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert_eq!(ecart(&sans, &inverse), 0.0, "(c)");
     }
 
@@ -4149,43 +6565,135 @@ mod tests {
         let depart = SlicePoses::identity(&stacks);
         let (si, k) = (1usize, 5usize);
         let prep = crate::align::preparer_coupe(&stacks[si], k, *depart.get(si, k)).unwrap();
-        let pivot = burn::tensor::Tensor::<1>::from_floats([prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32], &device);
-        let construire = || IntersectionProblem::build(&atlas, &stacks, &depart, si, k, &IntersectionConfig::default(), &device).unwrap();
-        let valeur = |p: &IntersectionProblem, params: [f32; 6]| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats(params, &device), pivot.clone(), prep.echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
-        let points: Vec<Vector3<f64>> = prep.points.iter().step_by((prep.points.len() / 6).max(1)).copied().collect();
-        let cibles: Vec<Vector3<f64>> = points.iter().enumerate().map(|(i, p)| p + Vector3::new(2.0, -1.0, 0.5 * i as f64)).collect();
-        let penalite = |t: [f64; 3], poids: f64| poids * points.iter().zip(&cibles).map(|(p, q)| (p + Vector3::from(t) - q).norm_squared()).sum::<f64>() / points.len() as f64;
+        let pivot = burn::tensor::Tensor::<1>::from_floats(
+            [prep.pivot.x as f32, prep.pivot.y as f32, prep.pivot.z as f32],
+            &device,
+        );
+        let construire = || {
+            IntersectionProblem::build(&atlas, &stacks, &depart, si, k, &IntersectionConfig::default(), &device)
+                .unwrap()
+        };
+        let valeur = |p: &IntersectionProblem, params: [f32; 6]| {
+            f64::from(
+                p.cost(
+                    burn::tensor::Tensor::<1>::from_floats(params, &device),
+                    pivot.clone(),
+                    prep.echelle,
+                )
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()[0],
+            )
+        };
+        let points: Vec<Vector3<f64>> = prep
+            .points
+            .iter()
+            .step_by((prep.points.len() / 6).max(1))
+            .copied()
+            .collect();
+        let cibles: Vec<Vector3<f64>> = points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| p + Vector3::new(2.0, -1.0, 0.5 * i as f64))
+            .collect();
+        let penalite = |t: [f64; 3], poids: f64| {
+            poids
+                * points
+                    .iter()
+                    .zip(&cibles)
+                    .map(|(p, q)| (p + Vector3::from(t) - q).norm_squared())
+                    .sum::<f64>()
+                / points.len() as f64
+        };
         let base = construire();
-        for params in [[0.0f32; 6], [0.0, 0.0, 0.0, 1.5, -0.5, 2.0], [0.0, 0.0, 0.0, 2.0, -1.0, 0.0]] {
+        for params in [
+            [0.0f32; 6],
+            [0.0, 0.0, 0.0, 1.5, -0.5, 2.0],
+            [0.0, 0.0, 0.0, 2.0, -1.0, 0.0],
+        ] {
             let v0 = valeur(&base, params);
             // (a)
-            assert_eq!(valeur(&construire().with_temporal_prior(&points, &cibles, 0.0), params), v0, "(a) poids nul");
+            assert_eq!(
+                valeur(&construire().with_temporal_prior(&points, &cibles, 0.0), params),
+                v0,
+                "(a) poids nul"
+            );
             // (b)
             let avec = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05), params);
             let attendu = v0 - penalite([params[3] as f64, params[4] as f64, params[5] as f64], 0.05);
             assert!((avec - attendu).abs() < 1e-4, "(b) {avec} contre {attendu}");
             // (d)
-            let remplace = valeur(&construire().with_temporal_prior(&points, &cibles, 5.0).with_temporal_prior(&points, &cibles, 0.05), params);
+            let remplace = valeur(
+                &construire()
+                    .with_temporal_prior(&points, &cibles, 5.0)
+                    .with_temporal_prior(&points, &cibles, 0.05),
+                params,
+            );
             assert!((remplace - avec).abs() < 1e-6, "(d)");
         }
         // (e) pénalité robuste de Geman-McClure : coût sans a priori MOINS λ · moyenne d²/(1 + d²/c²) (valeur exacte) ; c = 0 : quadratique ; c très grand : quadratique à 1e-4 près ; et la pénalité est bornée (λ c² au plus)
-        for params in [[0.0f32; 6], [0.0, 0.0, 0.0, 1.5, -0.5, 2.0], [0.0, 0.0, 0.0, 6.0, -5.0, 9.0]] {
+        for params in [
+            [0.0f32; 6],
+            [0.0, 0.0, 0.0, 1.5, -0.5, 2.0],
+            [0.0, 0.0, 0.0, 6.0, -5.0, 9.0],
+        ] {
             let v0 = valeur(&base, params);
             let tr = Vector3::new(params[3] as f64, params[4] as f64, params[5] as f64);
-            let robuste = |c: f64| 0.05 * points.iter().zip(&cibles).map(|(p, q)| { let d2 = (p + tr - q).norm_squared(); d2 / (1.0 + d2 / (c * c)) }).sum::<f64>() / points.len() as f64;
+            let robuste = |c: f64| {
+                0.05 * points
+                    .iter()
+                    .zip(&cibles)
+                    .map(|(p, q)| {
+                        let d2 = (p + tr - q).norm_squared();
+                        d2 / (1.0 + d2 / (c * c))
+                    })
+                    .sum::<f64>()
+                    / points.len() as f64
+            };
             for c in [0.5, 2.0, 5.0] {
-                let avec = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(c), params);
-                assert!((avec - (v0 - robuste(c))).abs() < 1e-4, "(e) c = {c} : {avec} contre {}", v0 - robuste(c));
+                let avec = valeur(
+                    &construire()
+                        .with_temporal_prior(&points, &cibles, 0.05)
+                        .with_temporal_robustness(c),
+                    params,
+                );
+                assert!(
+                    (avec - (v0 - robuste(c))).abs() < 1e-4,
+                    "(e) c = {c} : {avec} contre {}",
+                    v0 - robuste(c)
+                );
                 assert!(v0 - avec <= 0.05 * c * c + 1e-4, "(e) pénalité bornée par λ c²");
             }
             let quadratique = valeur(&construire().with_temporal_prior(&points, &cibles, 0.05), params);
-            assert_eq!(valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(0.0), params), quadratique, "(e) c = 0");
-            assert!((valeur(&construire().with_temporal_prior(&points, &cibles, 0.05).with_temporal_robustness(1e4), params) - quadratique).abs() < 1e-3, "(e) c très grand");
+            assert_eq!(
+                valeur(
+                    &construire()
+                        .with_temporal_prior(&points, &cibles, 0.05)
+                        .with_temporal_robustness(0.0),
+                    params
+                ),
+                quadratique,
+                "(e) c = 0"
+            );
+            assert!(
+                (valeur(
+                    &construire()
+                        .with_temporal_prior(&points, &cibles, 0.05)
+                        .with_temporal_robustness(1e4),
+                    params
+                ) - quadratique)
+                    .abs()
+                    < 1e-3,
+                "(e) c très grand"
+            );
         }
         // (c)
         let enorme = construire().with_temporal_prior(&points, &cibles, 1000.0);
         let vers_cible = valeur(&enorme, [0.0, 0.0, 0.0, 2.0, -1.0, 0.0]);
-        assert!(vers_cible > valeur(&enorme, [0.0; 6]), "(c) la translation vers les cibles doit être préférée : {vers_cible}");
+        assert!(
+            vers_cible > valeur(&enorme, [0.0; 6]),
+            "(c) la translation vers les cibles doit être préférée : {vers_cible}"
+        );
     }
 
     /// Poids selon l'information (valeurs exactes) : (a) `γ = 0` ou un effectif nul : 1 ; (b) à effectif égal à la médiane : 1 ; (c) médiane 100, coupe 50 : 2 pour γ = 1 et √2 pour γ = 0,5 ; coupe 200 : ½ ; (d) bornes : coupe 10 (rapport 10) → 4 et coupe 1000 (rapport 0,1) → ¼ ; (e) décroissant en l'effectif de la coupe. `median_of_known` : médiane des valeurs finies strictement positives ([0, 4, 1, 0, 5, 2, 3, NaN] → 3 ; les zéros ne comptent pas), 0 si aucune.
@@ -4197,11 +6705,20 @@ mod tests {
         assert_eq!(information_weight(50.0, 0.0, 1.0), 1.0, "(a) médiane nulle");
         assert_eq!(information_weight(100.0, 100.0, 1.0), 1.0, "(b)");
         assert!((information_weight(50.0, 100.0, 1.0) - 2.0).abs() < 1e-12, "(c) γ = 1");
-        assert!((information_weight(50.0, 100.0, 0.5) - 2.0_f64.sqrt()).abs() < 1e-12, "(c) γ = 0,5");
-        assert!((information_weight(200.0, 100.0, 1.0) - 0.5).abs() < 1e-12, "(c) coupe plus informative");
+        assert!(
+            (information_weight(50.0, 100.0, 0.5) - 2.0_f64.sqrt()).abs() < 1e-12,
+            "(c) γ = 0,5"
+        );
+        assert!(
+            (information_weight(200.0, 100.0, 1.0) - 0.5).abs() < 1e-12,
+            "(c) coupe plus informative"
+        );
         assert_eq!(information_weight(10.0, 100.0, 1.0), 4.0, "(d) borne haute");
         assert_eq!(information_weight(1000.0, 100.0, 1.0), 0.25, "(d) borne basse");
-        let poids: Vec<f64> = [40.0, 60.0, 80.0, 100.0, 150.0, 300.0].iter().map(|&n| information_weight(n, 100.0, 0.7)).collect();
+        let poids: Vec<f64> = [40.0, 60.0, 80.0, 100.0, 150.0, 300.0]
+            .iter()
+            .map(|&n| information_weight(n, 100.0, 0.7))
+            .collect();
         assert!(poids.windows(2).all(|w| w[1] < w[0]), "(e) {poids:?}");
         assert_eq!(median_of_known(&[0.0, 4.0, 1.0, 0.0, 5.0, 2.0, 3.0, f64::NAN]), 3.0);
         assert_eq!(median_of_known(&[0.0, f64::NAN]), 0.0);
@@ -4219,10 +6736,29 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = SliceAtlas::new(&stacks, &device).unwrap();
         let depart = SlicePoses::identity(&stacks);
-        let construire = |pas: f64| IntersectionProblem::build(&atlas, &stacks, &depart, 1, 5, &IntersectionConfig { step_mm: pas, ..Default::default() }, &device).unwrap();
+        let construire = |pas: f64| {
+            IntersectionProblem::build(
+                &atlas,
+                &stacks,
+                &depart,
+                1,
+                5,
+                &IntersectionConfig {
+                    step_mm: pas,
+                    ..Default::default()
+                },
+                &device,
+            )
+            .unwrap()
+        };
         let (fin, grossier) = (construire(0.5), construire(1.0));
         let points_par_droite = (2.0 * 150.0 / 0.5 + 1.0) as usize;
-        assert!(fin.n_samples() >= 20 * fin.n_pairs() && fin.n_samples() <= points_par_droite * fin.n_pairs(), "(a) {} échantillons pour {} paires", fin.n_samples(), fin.n_pairs());
+        assert!(
+            fin.n_samples() >= 20 * fin.n_pairs() && fin.n_samples() <= points_par_droite * fin.n_pairs(),
+            "(a) {} échantillons pour {} paires",
+            fin.n_samples(),
+            fin.n_pairs()
+        );
         let rapport = grossier.n_samples() as f64 / fin.n_samples() as f64;
         assert!((rapport - 0.5).abs() < 0.075, "(b) rapport {rapport}");
         assert_eq!(construire(0.5).n_samples(), fin.n_samples(), "(c)");
@@ -4240,7 +6776,10 @@ mod tests {
         assert!((robust_scale(8.0, 2.0, 3, 4) - 2.0).abs() < 1e-12, "(b) fin");
         let r = (2.0_f64 / 8.0).powf(1.0 / 3.0);
         for s in 0..3 {
-            assert!((robust_scale(8.0, 2.0, s + 1, 4) / robust_scale(8.0, 2.0, s, 4) - r).abs() < 1e-12, "(c) {s}");
+            assert!(
+                (robust_scale(8.0, 2.0, s + 1, 4) / robust_scale(8.0, 2.0, s, 4) - r).abs() < 1e-12,
+                "(c) {s}"
+            );
         }
         assert_eq!(robust_scale(8.0, 2.0, 0, 1), 2.0, "(d)");
         assert_eq!(robust_scale(8.0, 2.0, 99, 4), 2.0, "balayage au-delà : borné à la fin");
@@ -4257,16 +6796,23 @@ mod tests {
         let n = stacks[si].dim().2;
         let mut poses = SlicePoses::identity(&stacks);
         let centre = Vector3::new(1.0, 2.0, 3.0);
-        let m = |rot: [f64; 3], tr: [f64; 3]| mouvement_rigide(&Vector3::from(rot).map(f64::to_radians), &Vector3::from(tr), &centre);
+        let m = |rot: [f64; 3], tr: [f64; 3]| {
+            mouvement_rigide(&Vector3::from(rot).map(f64::to_radians), &Vector3::from(tr), &centre)
+        };
         let (k, dernier) = (5usize, n - 1);
         poses.set(si, k, m([3.0, -2.0, 4.0], [0.0, 2.0, 1.0]));
         poses.set(si, k - 1, m([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]));
         poses.set(si, k + 1, m([-2.0, 1.0, 0.0], [3.0, -1.0, 0.5]));
         poses.set(si, dernier, m([1.0, 1.0, -1.0], [0.0, 0.5, 2.0]));
         poses.set(si, dernier - 1, m([0.0, 2.0, 0.0], [-1.0, 0.0, 1.0]));
-        let tous: Vec<Vector3<f64>> = (0..200).map(|i| Vector3::new(i as f64 * 0.7 - 30.0, (i % 13) as f64 * 3.0, (i % 7) as f64 - 20.0)).collect();
+        let tous: Vec<Vector3<f64>> = (0..200)
+            .map(|i| Vector3::new(i as f64 * 0.7 - 30.0, (i % 13) as f64 * 3.0, (i % 7) as f64 - 20.0))
+            .collect();
         let a_la_main = |coupe: usize, voisines: &[usize], p: &Vector3<f64>| {
-            let moyenne = voisines.iter().map(|&v| (poses.get(si, v) * poses.get(si, coupe).try_inverse().unwrap() * p.push(1.0)).xyz()).sum::<Vector3<f64>>();
+            let moyenne = voisines
+                .iter()
+                .map(|&v| (poses.get(si, v) * poses.get(si, coupe).try_inverse().unwrap() * p.push(1.0)).xyz())
+                .sum::<Vector3<f64>>();
             moyenne / voisines.len() as f64
         };
         for (coupe, voisines) in [(k, vec![k - 1, k + 1]), (dernier, vec![dernier - 1])] {
@@ -4275,12 +6821,37 @@ mod tests {
             assert!(points.len() >= 20 && points.len() <= 40, "(c) {} points", points.len());
             assert_eq!(points[1] - points[0], tous[10] - tous[0], "(c) pas régulier");
             for (p, c) in points.iter().zip(&cibles) {
-                assert!((c - a_la_main(coupe, &voisines, p)).norm() < 1e-9, "(a)/(b) coupe {coupe} : {c} contre {}", a_la_main(coupe, &voisines, p));
+                assert!(
+                    (c - a_la_main(coupe, &voisines, p)).norm() < 1e-9,
+                    "(a)/(b) coupe {coupe} : {c} contre {}",
+                    a_la_main(coupe, &voisines, p)
+                );
             }
         }
         // (d) un stack d'une seule coupe n'a pas de voisine
-        let seule = stack_avec_masque(&t, "seule", &Array3::<f32>::ones((8, 8, 1)), &Array3::<u8>::ones((8, 8, 1)), stacks[si].affine(), { let e = stacks[si].spacing(); [e[0] as f32, e[1] as f32, e[2] as f32] });
-        assert!(temporal_prior_inputs(&seule, &SlicePoses::identity(std::slice::from_ref(&seule)), 0, 0, &tous, 20).is_none(), "(d)");
+        let seule = stack_avec_masque(
+            &t,
+            "seule",
+            &Array3::<f32>::ones((8, 8, 1)),
+            &Array3::<u8>::ones((8, 8, 1)),
+            stacks[si].affine(),
+            {
+                let e = stacks[si].spacing();
+                [e[0] as f32, e[1] as f32, e[2] as f32]
+            },
+        );
+        assert!(
+            temporal_prior_inputs(
+                &seule,
+                &SlicePoses::identity(std::slice::from_ref(&seule)),
+                0,
+                0,
+                &tous,
+                20
+            )
+            .is_none(),
+            "(d)"
+        );
     }
 
     /// Câblage de la régularisation temporelle dans le recalage coupe-coupe (blobs) : (a) poids nul (défaut) : poses EXACTEMENT identiques à celles obtenues sans le champ ; (b) poids actif (0,05) : les poses diffèrent d'au moins 1e-6 de celles sans régularisation, et de celles obtenues avec 0,5 (le poids est transmis) ;
@@ -4292,19 +6863,90 @@ mod tests {
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        let rugosite = |p: &SlicePoses| -> f64 { stacks.iter().enumerate().flat_map(|(si, s)| (1..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - p.get(si, k - 1)).abs().max()).sum::<f64>() };
-        let base = S2sConfig { sweeps: 2, ..Default::default() };
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let rugosite = |p: &SlicePoses| -> f64 {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (1..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - p.get(si, k - 1)).abs().max())
+                .sum::<f64>()
+        };
+        let base = S2sConfig {
+            sweeps: 2,
+            ..Default::default()
+        };
         let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
-        let nul = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.0, temporal_points: 8, ..base }, &device).unwrap().poses;
+        let nul = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_weight: 0.0,
+                temporal_points: 8,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert_eq!(ecart(&sans, &nul), 0.0, "(a)");
-        let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.05, ..base }, &device).unwrap().poses;
+        let actif = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_weight: 0.05,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert!(ecart(&sans, &actif) > 1e-6, "(b) la régularisation n'a aucun effet");
-        let intermediaire = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 0.5, ..base }, &device).unwrap().poses;
-        assert!(ecart(&actif, &intermediaire) > 1e-6, "(b') le poids configuré doit être transmis : 0,05 et 0,5 donnent les mêmes poses");
-        let enorme = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: 50.0, ..base }, &device).unwrap().poses;
-        println!("rugosité : sans {:.3}, poids 0,05 {:.3}, poids 50 {:.3}", rugosite(&sans), rugosite(&actif), rugosite(&enorme));
-        assert!(rugosite(&enorme) < rugosite(&sans), "(c) rugosité {} contre {}", rugosite(&enorme), rugosite(&sans));
+        let intermediaire = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_weight: 0.5,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
+        assert!(
+            ecart(&actif, &intermediaire) > 1e-6,
+            "(b') le poids configuré doit être transmis : 0,05 et 0,5 donnent les mêmes poses"
+        );
+        let enorme = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_weight: 50.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
+        println!(
+            "rugosité : sans {:.3}, poids 0,05 {:.3}, poids 50 {:.3}",
+            rugosite(&sans),
+            rugosite(&actif),
+            rugosite(&enorme)
+        );
+        assert!(
+            rugosite(&enorme) < rugosite(&sans),
+            "(c) rugosité {} contre {}",
+            rugosite(&enorme),
+            rugosite(&sans)
+        );
         // (d) les cibles viennent des VOISINES : dans le stack 1, toutes les coupes partent d'un décalage de 3 mm en x sauf la coupe 5 (identité) ; avec un poids énorme, la coupe 5 est tirée vers ce décalage (écart de pose de 3 au départ, 3,11 sans régularisation, 1,50 mesuré avec un poids de 50 : les voisines se relâchent aussi vers la coupe, d'où la moitié de l'écart ; seuil à 2,25), pas laissée où elle est
         let decalage = mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros());
         let mut inegal = SlicePoses::identity(&stacks);
@@ -4312,11 +6954,34 @@ mod tests {
             inegal.set(1, k, decalage);
         }
         inegal.set(1, 5, Matrix4::identity());
-        let tiree = register_slices_s2s(&stacks, &inegal, &S2sConfig { temporal_weight: 50.0, ..base }, &device).unwrap().poses;
+        let tiree = register_slices_s2s(
+            &stacks,
+            &inegal,
+            &S2sConfig {
+                temporal_weight: 50.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         let distance = (tiree.get(1, 5) - decalage).abs().max();
-        let libre = register_slices_s2s(&stacks, &inegal, &S2sConfig { temporal_weight: 0.0, ..base }, &device).unwrap().poses;
+        let libre = register_slices_s2s(
+            &stacks,
+            &inegal,
+            &S2sConfig {
+                temporal_weight: 0.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         println!("(d) écart de la coupe 5 au décalage de ses voisines : départ 3, sans régularisation {:.3}, poids 50 {distance:.3}", (libre.get(1, 5) - decalage).abs().max());
-        assert!(distance < 2.25, "(d) la coupe 5 doit être tirée vers le mouvement de ses voisines : {distance}");
+        assert!(
+            distance < 2.25,
+            "(d) la coupe 5 doit être tirée vers le mouvement de ses voisines : {distance}"
+        );
     }
 
     /// Câblage de la pénalité temporelle robuste (blobs) : (a) avec un poids énorme (50) et une échelle minuscule (1e-3 mm), la pénalité est saturée (bornée par λ c² = 5e-5) : les poses diffèrent de plus de 1e-3 de celles du même poids quadratique (une comparaison avec le recalage sans régularisation est impossible : Adam normalise les gradients, et un résidu de gradient minuscule mais non nul suffit à déplacer une coupe sans information de concordance : mesuré 1,5 mm) ; (b) l'échelle décroissante est transmise, sur l'ensemble des balayages (un balayage gros-vers-fin puis un balayage fin, sans échelle intermédiaire : avec un indice local au niveau, le balayage fin garderait l'échelle de départ et le résultat redeviendrait exactement quadratique) : de 1e6 mm (quadratique) à 1e-3 mm (saturée), les poses diffèrent à la fois de la
@@ -4328,15 +6993,55 @@ mod tests {
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        let base = S2sConfig { sweeps: 1, coarse_sigma_pixels: 1.0, coarse_sweeps: 1, coarse_levels: 1, block_levels: 0, ..Default::default() };
-        let lancer = |poids: f64, debut: f64, fin: f64| register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_weight: poids, temporal_robust_start_mm: debut, temporal_robust_mm: fin, ..base }, &device).unwrap().poses;
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let base = S2sConfig {
+            sweeps: 1,
+            coarse_sigma_pixels: 1.0,
+            coarse_sweeps: 1,
+            coarse_levels: 1,
+            block_levels: 0,
+            ..Default::default()
+        };
+        let lancer = |poids: f64, debut: f64, fin: f64| {
+            register_slices_s2s(
+                &stacks,
+                &depart,
+                &S2sConfig {
+                    temporal_weight: poids,
+                    temporal_robust_start_mm: debut,
+                    temporal_robust_mm: fin,
+                    ..base
+                },
+                &device,
+            )
+            .unwrap()
+            .poses
+        };
         let quadratique = lancer(50.0, 0.0, 0.0);
         let saturee = lancer(50.0, 0.0, 1e-3);
-        assert!(ecart(&saturee, &quadratique) > 1e-3, "(a) l'échelle doit être transmise : saturée et quadratique donnent les mêmes poses ({})", ecart(&saturee, &quadratique));
+        assert!(
+            ecart(&saturee, &quadratique) > 1e-3,
+            "(a) l'échelle doit être transmise : saturée et quadratique donnent les mêmes poses ({})",
+            ecart(&saturee, &quadratique)
+        );
         let decroissante = lancer(50.0, 1e6, 1e-3);
-        assert!(ecart(&decroissante, &quadratique) > 1e-6, "(b) la fin de l'échelle doit être transmise : {}", ecart(&decroissante, &quadratique));
-        assert!(ecart(&decroissante, &saturee) > 1e-6, "(b) le départ de l'échelle doit être transmis : {}", ecart(&decroissante, &saturee));
+        assert!(
+            ecart(&decroissante, &quadratique) > 1e-6,
+            "(b) la fin de l'échelle doit être transmise : {}",
+            ecart(&decroissante, &quadratique)
+        );
+        assert!(
+            ecart(&decroissante, &saturee) > 1e-6,
+            "(b) le départ de l'échelle doit être transmis : {}",
+            ecart(&decroissante, &saturee)
+        );
     }
 
     /// Câblage de la pondération par l'information (blobs, un balayage) : avec un poids temporel fort (5) et `γ = 1`, les poses diffèrent (de plus de 1e-6) de celles avec `γ = 0` (les coupes de la jeu n'ont pas toutes le même nombre d'échantillons) ; avec `γ = 0` elles sont EXACTEMENT celles obtenues sans le champ.
@@ -4347,12 +7052,45 @@ mod tests {
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
         let depart = SlicePoses::identity(&stacks);
-        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        let base = S2sConfig { sweeps: 1, coarse_sigma_pixels: 0.0, block_levels: 0, temporal_weight: 5.0, ..Default::default() };
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let base = S2sConfig {
+            sweeps: 1,
+            coarse_sigma_pixels: 0.0,
+            block_levels: 0,
+            temporal_weight: 5.0,
+            ..Default::default()
+        };
         let sans = register_slices_s2s(&stacks, &depart, &base, &device).unwrap().poses;
-        let nul = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_info_exponent: 0.0, ..base }, &device).unwrap().poses;
+        let nul = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_info_exponent: 0.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert_eq!(ecart(&sans, &nul), 0.0, "γ = 0 : inchangé");
-        let actif = register_slices_s2s(&stacks, &depart, &S2sConfig { temporal_info_exponent: 1.0, ..base }, &device).unwrap().poses;
+        let actif = register_slices_s2s(
+            &stacks,
+            &depart,
+            &S2sConfig {
+                temporal_info_exponent: 1.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
         assert!(ecart(&sans, &actif) > 1e-6, "γ = 1 : aucun effet");
     }
 
@@ -4365,7 +7103,14 @@ mod tests {
         let t = Temp::new("raffinement_s2v");
         let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let ecart = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
         let ecarts = poses_aleatoires(&stacks, 2.0, 2.0, 77);
         let mut depart = SlicePoses::identity(&stacks);
         for (si, s) in stacks.iter().enumerate() {
@@ -4373,43 +7118,209 @@ mod tests {
                 depart.set(si, k, ecarts.get(si, k) * vraies.get(si, k));
             }
         }
-        let base = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, ..Default::default() };
+        let base = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 1,
+            s2s_block_levels: 0,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 0,
+            s2s_temporal_weight: 0.0,
+            ..Default::default()
+        };
         // (a) 0 cycle : poses et rapport rendus tels quels (rapport sentinelle d'une entrée)
-        let sentinelle = vec![crate::align::SliceReport { stack: 9, slice: 9, registered: false, ncc_first: 0.0, ncc_final: 0.0, runs: 0, correction_rms_mm: 0.0 }];
-        let (rendues, rapport) = refine_with_slice_to_volume(&stacks, depart.clone(), sentinelle, &ReconstructionConfig { s2v_refine_cycles: 0, ..base.clone() }, &device).unwrap();
+        let sentinelle = vec![crate::align::SliceReport {
+            stack: 9,
+            slice: 9,
+            registered: false,
+            ncc_first: 0.0,
+            ncc_final: 0.0,
+            runs: 0,
+            correction_rms_mm: 0.0,
+        }];
+        let (rendues, rapport) = refine_with_slice_to_volume(
+            &stacks,
+            depart.clone(),
+            sentinelle,
+            &ReconstructionConfig {
+                s2v_refine_cycles: 0,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
         assert_eq!(ecart(&rendues, &depart), 0.0, "(a)");
-        assert!(rapport.len() == 1 && rapport[0].stack == 9, "(a) le rapport doit être rendu tel quel");
+        assert!(
+            rapport.len() == 1 && rapport[0].stack == 9,
+            "(a) le rapport doit être rendu tel quel"
+        );
         // (b) 2 cycles : poses modifiées ; le rapport est celui du dernier cycle (une entrée par coupe) ; les cycles, la résolution et la marge de la reconstruction sont pris en compte (poses différentes dès qu'on en change un)
-        let (affinees, rapport) = refine_with_slice_to_volume(&stacks, depart.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
+        let (affinees, rapport) = refine_with_slice_to_volume(
+            &stacks,
+            depart.clone(),
+            Vec::new(),
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
         let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
-        assert!(rapport.len() == n_coupes, "(b) rapport de {} entrées pour {n_coupes} coupes", rapport.len());
+        assert!(
+            rapport.len() == n_coupes,
+            "(b) rapport de {} entrées pour {n_coupes} coupes",
+            rapport.len()
+        );
         assert!(ecart(&affinees, &depart) > 1e-6, "(b) aucune modification");
-        let (depuis_en_tete, _) = refine_with_slice_to_volume(&stacks, SlicePoses::identity(&stacks), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
-        assert!(ecart(&depuis_en_tete, &affinees) > 1e-6, "(b) le raffinement doit partir des poses données : même résultat depuis l'en-tête");
-        for (nom, autre) in [("cycles", ReconstructionConfig { s2v_refine_cycles: 1, ..base.clone() }), ("résolution", ReconstructionConfig { s2v_refine_cycles: 2, s2v_refine_resolution_mm: 3.0, ..base.clone() }), ("marge", ReconstructionConfig { s2v_refine_cycles: 2, margin_mm: 9.0, ..base.clone() })] {
+        let (depuis_en_tete, _) = refine_with_slice_to_volume(
+            &stacks,
+            SlicePoses::identity(&stacks),
+            Vec::new(),
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&depuis_en_tete, &affinees) > 1e-6,
+            "(b) le raffinement doit partir des poses données : même résultat depuis l'en-tête"
+        );
+        for (nom, autre) in [
+            (
+                "cycles",
+                ReconstructionConfig {
+                    s2v_refine_cycles: 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "résolution",
+                ReconstructionConfig {
+                    s2v_refine_cycles: 2,
+                    s2v_refine_resolution_mm: 3.0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "marge",
+                ReconstructionConfig {
+                    s2v_refine_cycles: 2,
+                    margin_mm: 9.0,
+                    ..base.clone()
+                },
+            ),
+        ] {
             let (p, _) = refine_with_slice_to_volume(&stacks, depart.clone(), Vec::new(), &autre, &device).unwrap();
             assert!(ecart(&p, &affinees) > 1e-6, "(b) {nom} sans effet");
         }
-        assert!(stacks.iter().enumerate().all(|(si, s)| (0..s.dim().2).all(|k| affinees.get(si, k).iter().all(|v| v.is_finite()))), "(b) poses non finies");
+        assert!(
+            stacks
+                .iter()
+                .enumerate()
+                .all(|(si, s)| (0..s.dim().2).all(|k| affinees.get(si, k).iter().all(|v| v.is_finite()))),
+            "(b) poses non finies"
+        );
         // (c)
         let sans = reconstruct(&stacks, &base, &device).unwrap();
-        let avec = reconstruct(&stacks, &ReconstructionConfig { s2v_refine_cycles: 2, ..base.clone() }, &device).unwrap();
-        assert!(ecart(&sans.poses, &avec.poses) > 1e-6, "(c) le raffinement n'a aucun effet dans le pipeline");
-        let (manuelle, _) = refine_with_slice_to_volume(&stacks, sans.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base }, &device).unwrap();
-        assert!(ecart(&avec.poses, &manuelle) < 1e-9, "(c) le pipeline doit appliquer le raffinement aux poses du coupe-coupe : {}", ecart(&avec.poses, &manuelle));
+        let avec = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&sans.poses, &avec.poses) > 1e-6,
+            "(c) le raffinement n'a aucun effet dans le pipeline"
+        );
+        let (manuelle, _) = refine_with_slice_to_volume(
+            &stacks,
+            sans.poses.clone(),
+            Vec::new(),
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..base
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&avec.poses, &manuelle) < 1e-9,
+            "(c) le pipeline doit appliquer le raffinement aux poses du coupe-coupe : {}",
+            ecart(&avec.poses, &manuelle)
+        );
         // (d) branche avec correction de biais (une alternance), sur des stacks avec un biais marqué (le champ corrigé change réellement les stacks) : le pipeline applique le raffinement aux poses du coupe-coupe SUR LES STACKS CORRIGÉS, c'est-à-dire exactement ce que donne `refine_with_slice_to_volume`
         // appliqué aux poses du pipeline sans raffinement et aux stacks corrigés des champs estimés à ces poses
         use crate::bias::{estimate_bias_fields, BiasConfig};
-        let champ = |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
-        let biaises = simuler_blobs_avec_champ(&t, &volume_de_blobs(), &modeles_de_blobs_larges(&t), &vraies, Some(&champ));
-        let avec_biais = ReconstructionConfig { s2s_bias_rounds: 1, s2s_bias_min_reduction: 0.0, ..base.clone() };
+        let champ =
+            |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
+        let biaises = simuler_blobs_avec_champ(
+            &t,
+            &volume_de_blobs(),
+            &modeles_de_blobs_larges(&t),
+            &vraies,
+            Some(&champ),
+        );
+        let avec_biais = ReconstructionConfig {
+            s2s_bias_rounds: 1,
+            s2s_bias_min_reduction: 0.0,
+            ..base.clone()
+        };
         let sans_raffinement = reconstruct(&biaises, &avec_biais, &device).unwrap();
-        let avec_raffinement = reconstruct(&biaises, &ReconstructionConfig { s2v_refine_cycles: 2, ..avec_biais.clone() }, &device).unwrap();
-        assert!(ecart(&sans_raffinement.poses, &avec_raffinement.poses) > 1e-6, "(d) le raffinement n'a aucun effet avec la correction de biais");
-        let corriges = crate::pipeline::correct_stacks(&biaises, &estimate_bias_fields(&biaises, &sans_raffinement.poses, &BiasConfig::default()).unwrap(), 0.0);
-        let (attendues, _) = refine_with_slice_to_volume(&corriges, sans_raffinement.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..avec_biais }, &device).unwrap();
-        assert!(ecart(&avec_raffinement.poses, &attendues) < 1e-9, "(d) le raffinement doit porter sur les stacks corrigés : {}", ecart(&avec_raffinement.poses, &attendues));
-        let (sur_bruts, _) = refine_with_slice_to_volume(&biaises, sans_raffinement.poses.clone(), Vec::new(), &ReconstructionConfig { s2v_refine_cycles: 2, ..base }, &device).unwrap();
+        let avec_raffinement = reconstruct(
+            &biaises,
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..avec_biais.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&sans_raffinement.poses, &avec_raffinement.poses) > 1e-6,
+            "(d) le raffinement n'a aucun effet avec la correction de biais"
+        );
+        let corriges = crate::pipeline::correct_stacks(
+            &biaises,
+            &estimate_bias_fields(&biaises, &sans_raffinement.poses, &BiasConfig::default()).unwrap(),
+            0.0,
+        );
+        let (attendues, _) = refine_with_slice_to_volume(
+            &corriges,
+            sans_raffinement.poses.clone(),
+            Vec::new(),
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..avec_biais
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&avec_raffinement.poses, &attendues) < 1e-9,
+            "(d) le raffinement doit porter sur les stacks corrigés : {}",
+            ecart(&avec_raffinement.poses, &attendues)
+        );
+        let (sur_bruts, _) = refine_with_slice_to_volume(
+            &biaises,
+            sans_raffinement.poses.clone(),
+            Vec::new(),
+            &ReconstructionConfig {
+                s2v_refine_cycles: 2,
+                ..base
+            },
+            &device,
+        )
+        .unwrap();
         assert!(ecart(&sur_bruts, &attendues) > 1e-6, "(d) la correction de biais doit changer le raffinement (sinon le test ne distingue pas stacks corrigés et bruts)");
     }
 
@@ -4419,17 +7330,44 @@ mod tests {
     fn the_exclusion_removes_exactly_the_lowest_concordance_slices() {
         use crate::align::SliceReport;
         use crate::pipeline::{slices_to_exclude, without_excluded_slices};
-        let rapport = |stack: usize, slice: usize, ncc: f64, recalee: bool| SliceReport { stack, slice, registered: recalee, ncc_first: 0.0, ncc_final: ncc, runs: 0, correction_rms_mm: 0.0 };
+        let rapport = |stack: usize, slice: usize, ncc: f64, recalee: bool| SliceReport {
+            stack,
+            slice,
+            registered: recalee,
+            ncc_first: 0.0,
+            ncc_final: ncc,
+            runs: 0,
+            correction_rms_mm: 0.0,
+        };
         let ordre = [7usize, 2, 9, 4, 0, 5, 1, 8, 3, 6];
-        let mut rapports: Vec<SliceReport> = ordre.iter().map(|&i| rapport(i % 2, i, 0.1 * (i as f64 + 1.0), true)).collect();
+        let mut rapports: Vec<SliceReport> = ordre
+            .iter()
+            .map(|&i| rapport(i % 2, i, 0.1 * (i as f64 + 1.0), true))
+            .collect();
         rapports.push(rapport(0, 10, 0.0, false));
         rapports.push(rapport(1, 11, 0.0, false));
-        assert_eq!(slices_to_exclude(&rapports, 0.3), vec![(0, 2), (0, 0), (1, 1)].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(), "(a)");
+        assert_eq!(
+            slices_to_exclude(&rapports, 0.3),
+            vec![(0, 2), (0, 0), (1, 1)]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "(a)"
+        );
         assert_eq!(slices_to_exclude(&rapports, 0.25), vec![(0, 0), (1, 1)], "(b) 2,5 → 2");
-        assert!(slices_to_exclude(&rapports, 0.0).is_empty() && slices_to_exclude(&rapports, -0.5).is_empty(), "(b) aucune");
+        assert!(
+            slices_to_exclude(&rapports, 0.0).is_empty() && slices_to_exclude(&rapports, -0.5).is_empty(),
+            "(b) aucune"
+        );
         assert_eq!(slices_to_exclude(&rapports, 1.0).len(), 10, "(b) toutes les recalées");
         assert_eq!(slices_to_exclude(&rapports, 2.0).len(), 10, "(b) borné à 1");
-        let egales = vec![rapport(1, 4, 0.5, true), rapport(0, 9, 0.5, true), rapport(0, 3, 0.5, true), rapport(1, 0, 0.9, true)];
+        let egales = vec![
+            rapport(1, 4, 0.5, true),
+            rapport(0, 9, 0.5, true),
+            rapport(0, 3, 0.5, true),
+            rapport(1, 0, 0.9, true),
+        ];
         assert_eq!(slices_to_exclude(&egales, 0.5), vec![(0, 3), (0, 9)], "(c)");
         // (d)
         let t = Temp::new("exclusion_coupes");
@@ -4442,17 +7380,59 @@ mod tests {
             let plan_apres = apres.index_axis(Axis(2), k);
             if k == 2 || k == 5 {
                 assert!(plan_apres.iter().all(|&v| !v), "(d) plan {k} non vidé");
-                assert!(plan_avant.iter().any(|&v| v), "(d) le plan {k} du jeu d'essai doit avoir des pixels de masque");
+                assert!(
+                    plan_avant.iter().any(|&v| v),
+                    "(d) le plan {k} du jeu d'essai doit avoir des pixels de masque"
+                );
             } else {
                 assert_eq!(plan_avant, plan_apres, "(d) plan {k} modifié");
             }
         }
         assert_eq!(s.dim(), sans.dim());
-        let liste = vec![rapport(1, 3, 0.1, true), rapport(1, 4, 0.2, true), rapport(0, 6, 0.3, true), rapport(2, 7, 0.9, true)];
+        let liste = vec![
+            rapport(1, 3, 0.1, true),
+            rapport(1, 4, 0.2, true),
+            rapport(0, 6, 0.3, true),
+            rapport(2, 7, 0.9, true),
+        ];
         let appliquee = without_excluded_slices(&stacks, &liste, 0.75);
-        assert!(appliquee[1].brain_mask().unwrap().voxels().index_axis(Axis(2), 3).iter().all(|&v| !v) && appliquee[1].brain_mask().unwrap().voxels().index_axis(Axis(2), 4).iter().all(|&v| !v), "(d) stack 1");
-        assert!(appliquee[0].brain_mask().unwrap().voxels().index_axis(Axis(2), 6).iter().all(|&v| !v), "(d) stack 0");
-        assert!(appliquee[2].brain_mask().unwrap().voxels().index_axis(Axis(2), 7).iter().any(|&v| v), "(d) la coupe de meilleure concordance est conservée");
+        assert!(
+            appliquee[1]
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .index_axis(Axis(2), 3)
+                .iter()
+                .all(|&v| !v)
+                && appliquee[1]
+                    .brain_mask()
+                    .unwrap()
+                    .voxels()
+                    .index_axis(Axis(2), 4)
+                    .iter()
+                    .all(|&v| !v),
+            "(d) stack 1"
+        );
+        assert!(
+            appliquee[0]
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .index_axis(Axis(2), 6)
+                .iter()
+                .all(|&v| !v),
+            "(d) stack 0"
+        );
+        assert!(
+            appliquee[2]
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .index_axis(Axis(2), 7)
+                .iter()
+                .any(|&v| v),
+            "(d) la coupe de meilleure concordance est conservée"
+        );
     }
 
     /// Câblage de l'exclusion dans le pipeline (blobs, coupe-coupe) : avec `s2s_exclude_fraction = 0,3` les POSES sont exactement celles obtenues sans exclusion, et le volume est exactement celui que reconstruit `reconstruct_with_poses` sur les stacks privés des coupes désignées par `without_excluded_slices` à partir du rapport du pipeline sans exclusion ; il diffère du volume sans exclusion.
@@ -4462,28 +7442,114 @@ mod tests {
         let t = Temp::new("exclusion_pipeline");
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let base = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 0, s2s_temporal_weight: 0.0, ..Default::default() };
+        let base = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 1,
+            s2s_block_levels: 0,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 0,
+            s2s_temporal_weight: 0.0,
+            ..Default::default()
+        };
         let sans = reconstruct(&stacks, &base, &device).unwrap();
-        let avec = reconstruct(&stacks, &ReconstructionConfig { s2s_exclude_fraction: 0.3, ..base.clone() }, &device).unwrap();
-        let ecart_poses = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (sans.poses.get(si, k) - avec.poses.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let avec = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_exclude_fraction: 0.3,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        let ecart_poses = stacks
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+            .map(|(si, k)| (sans.poses.get(si, k) - avec.poses.get(si, k)).abs().max())
+            .fold(0.0_f64, f64::max);
         assert_eq!(ecart_poses, 0.0, "les poses ne doivent pas changer");
-        let attendu = crate::pipeline::reconstruct_with_poses(&sans.grid, &without_excluded_slices(&stacks, &sans.slices, 0.3), &sans.poses, &base).unwrap();
-        let ecart_volume = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f64, f64::max);
-        assert!(ecart_volume(&avec.volume, &attendu) < 1e-9, "le volume doit être la reconstruction sans les coupes écartées : {}", ecart_volume(&avec.volume, &attendu));
-        assert!(ecart_volume(&avec.volume, &sans.volume) > 1e-9, "l'exclusion n'a aucun effet sur le volume");
+        let attendu = crate::pipeline::reconstruct_with_poses(
+            &sans.grid,
+            &without_excluded_slices(&stacks, &sans.slices, 0.3),
+            &sans.poses,
+            &base,
+        )
+        .unwrap();
+        let ecart_volume = |a: &Array3<f64>, b: &Array3<f64>| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        assert!(
+            ecart_volume(&avec.volume, &attendu) < 1e-9,
+            "le volume doit être la reconstruction sans les coupes écartées : {}",
+            ecart_volume(&avec.volume, &attendu)
+        );
+        assert!(
+            ecart_volume(&avec.volume, &sans.volume) > 1e-9,
+            "l'exclusion n'a aucun effet sur le volume"
+        );
         // branche avec correction de biais (stacks avec un biais marqué : le champ corrigé change réellement les stacks) : l'exclusion porte sur les stacks CORRIGÉS
         use crate::bias::{estimate_bias_fields, BiasConfig};
         let (_, vraies) = jeu_de_blobs_pour_s2s(&t);
-        let champ = |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
-        let biaises = simuler_blobs_avec_champ(&t, &volume_de_blobs(), &modeles_de_blobs_larges(&t), &vraies, Some(&champ));
-        let avec_biais = ReconstructionConfig { s2s_bias_rounds: 1, s2s_bias_min_reduction: 0.0, ..base.clone() };
+        let champ =
+            |s: usize, x: &Vector3<f64>| 0.5 * (0.02 * x.x + 0.015 * (s as f64 + 1.0) * x.y).sin() + 0.1 * s as f64;
+        let biaises = simuler_blobs_avec_champ(
+            &t,
+            &volume_de_blobs(),
+            &modeles_de_blobs_larges(&t),
+            &vraies,
+            Some(&champ),
+        );
+        let avec_biais = ReconstructionConfig {
+            s2s_bias_rounds: 1,
+            s2s_bias_min_reduction: 0.0,
+            ..base.clone()
+        };
         let sans_b = reconstruct(&biaises, &avec_biais, &device).unwrap();
-        let avec_b = reconstruct(&biaises, &ReconstructionConfig { s2s_exclude_fraction: 0.3, ..avec_biais.clone() }, &device).unwrap();
-        let corriges = crate::pipeline::correct_stacks(&biaises, &estimate_bias_fields(&biaises, &sans_b.poses, &BiasConfig::default()).unwrap(), 0.0);
-        let attendu_b = crate::pipeline::reconstruct_with_poses(&sans_b.grid, &without_excluded_slices(&corriges, &sans_b.slices, 0.3), &sans_b.poses, &avec_biais).unwrap();
-        assert!(ecart_volume(&avec_b.volume, &attendu_b) < 1e-9, "avec correction de biais, l'exclusion doit porter sur les stacks corrigés : {}", ecart_volume(&avec_b.volume, &attendu_b));
-        let sur_bruts = crate::pipeline::reconstruct_with_poses(&sans_b.grid, &without_excluded_slices(&biaises, &sans_b.slices, 0.3), &sans_b.poses, &avec_biais).unwrap();
-        assert!(ecart_volume(&sur_bruts, &attendu_b) > 1e-9, "la correction de biais doit changer le volume (sinon le test ne distingue pas stacks corrigés et bruts)");
+        let avec_b = reconstruct(
+            &biaises,
+            &ReconstructionConfig {
+                s2s_exclude_fraction: 0.3,
+                ..avec_biais.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        let corriges = crate::pipeline::correct_stacks(
+            &biaises,
+            &estimate_bias_fields(&biaises, &sans_b.poses, &BiasConfig::default()).unwrap(),
+            0.0,
+        );
+        let attendu_b = crate::pipeline::reconstruct_with_poses(
+            &sans_b.grid,
+            &without_excluded_slices(&corriges, &sans_b.slices, 0.3),
+            &sans_b.poses,
+            &avec_biais,
+        )
+        .unwrap();
+        assert!(
+            ecart_volume(&avec_b.volume, &attendu_b) < 1e-9,
+            "avec correction de biais, l'exclusion doit porter sur les stacks corrigés : {}",
+            ecart_volume(&avec_b.volume, &attendu_b)
+        );
+        let sur_bruts = crate::pipeline::reconstruct_with_poses(
+            &sans_b.grid,
+            &without_excluded_slices(&biaises, &sans_b.slices, 0.3),
+            &sans_b.poses,
+            &avec_biais,
+        )
+        .unwrap();
+        assert!(
+            ecart_volume(&sur_bruts, &attendu_b) > 1e-9,
+            "la correction de biais doit changer le volume (sinon le test ne distingue pas stacks corrigés et bruts)"
+        );
     }
 
     /// Poids de fiabilité (valeurs exactes) : `floor` au niveau de `low` et en dessous, 1 à `high` et au-dessus, `(floor + 1) / 2` au milieu (la rampe `x²(3 − 2x)` vaut ½ en x = ½), monotone croissant entre les deux ; 1 partout si `high <= low` ; en particulier
@@ -4497,7 +7563,9 @@ mod tests {
         assert_eq!(reliability_weight(0.8, low, high, floor), 1.0);
         assert_eq!(reliability_weight(1.0, low, high, floor), 1.0);
         assert!((reliability_weight(0.65, low, high, floor) - 0.525).abs() < 1e-12);
-        let echantillon: Vec<f64> = (0..=30).map(|i| reliability_weight(0.5 + 0.01 * i as f64, low, high, floor)).collect();
+        let echantillon: Vec<f64> = (0..=30)
+            .map(|i| reliability_weight(0.5 + 0.01 * i as f64, low, high, floor))
+            .collect();
         assert!(echantillon.windows(2).all(|w| w[1] >= w[0]), "non monotone");
         // quart de la rampe : x = 0,25 → x²(3 − 2x) = 0,15625
         assert!((reliability_weight(0.575, low, high, floor) - (floor + (1.0 - floor) * 0.15625)).abs() < 1e-12);
@@ -4518,33 +7586,87 @@ mod tests {
         let modeles = modeles_de_blobs_larges(&t);
         let mut vraies = SlicePoses::identity(&modeles);
         for k in 0..12 {
-            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()));
+            vraies.set(
+                1,
+                k,
+                mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()),
+            );
         }
         let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
         let device = burn::tensor::Device::flex().autodiff();
         let (problemes, pivot, _, echelle) = problemes_de_bloc(&stacks, &SlicePoses::identity(&stacks), 1, &device);
-        let config = RegistrationConfig { learning_rate: 0.3, iterations: 60, lr_decay: 0.97, initial: [0.0; 6] };
+        let config = RegistrationConfig {
+            learning_rate: 0.3,
+            iterations: 60,
+            lr_decay: 0.97,
+            initial: [0.0; 6],
+        };
         // (a)
-        let individuelles: Vec<f64> = problemes.iter().map(|p| f64::from(p.cost(burn::tensor::Tensor::<1>::from_floats([0.0_f32; 6], &device), pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0])).collect();
+        let individuelles: Vec<f64> = problemes
+            .iter()
+            .map(|p| {
+                f64::from(
+                    p.cost(
+                        burn::tensor::Tensor::<1>::from_floats([0.0_f32; 6], &device),
+                        pivot.clone(),
+                        echelle,
+                    )
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()[0],
+                )
+            })
+            .collect();
         let attendu_3 = individuelles.iter().step_by(3).sum::<f64>() / individuelles.iter().step_by(3).count() as f64;
         let attendu_1 = individuelles.iter().sum::<f64>() / individuelles.len() as f64;
         let r0 = register_block_multistart(&problemes, pivot.clone(), echelle, config, &[0.0], 3, 0, 1, 1.0);
-        assert!((r0.ncc_history[0] - attendu_1).abs() < 1e-5, "(a) zéro : {} contre {attendu_1}", r0.ncc_history[0]);
+        assert!(
+            (r0.ncc_history[0] - attendu_1).abs() < 1e-5,
+            "(a) zéro : {} contre {attendu_1}",
+            r0.ncc_history[0]
+        );
         let zero = burn::tensor::Tensor::<1>::from_floats([0.0_f32; 6], &device);
-        let sous_ensemble = f64::from(crate::s2s::block_cost_subset(&problemes, 3, zero.clone(), pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
-        let plein = f64::from(crate::s2s::block_cost_subset(&problemes, 1, zero, pivot.clone(), echelle).into_data().try_to_vec::<f32>().unwrap()[0]);
-        assert!((sous_ensemble - attendu_3).abs() < 1e-5, "(a) une coupe sur 3 : {sous_ensemble} contre {attendu_3}");
-        assert!((plein - attendu_1).abs() < 1e-5, "(a) bloc entier : {plein} contre {attendu_1}");
+        let sous_ensemble = f64::from(
+            crate::s2s::block_cost_subset(&problemes, 3, zero.clone(), pivot.clone(), echelle)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()[0],
+        );
+        let plein = f64::from(
+            crate::s2s::block_cost_subset(&problemes, 1, zero, pivot.clone(), echelle)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()[0],
+        );
+        assert!(
+            (sous_ensemble - attendu_3).abs() < 1e-5,
+            "(a) une coupe sur 3 : {sous_ensemble} contre {attendu_3}"
+        );
+        assert!(
+            (plein - attendu_1).abs() < 1e-5,
+            "(a) bloc entier : {plein} contre {attendu_1}"
+        );
         // (d)
         assert_eq!(r0.params, [0.0; 6], "(d)");
         assert_eq!(r0.ncc_history[0], r0.ncc_history[1], "(d)");
         // (b) et (c)
         let r = register_block_multistart(&problemes, pivot, echelle, config, &[-4.0, 0.0, 4.0], 3, 2, 12, 1.0);
-        println!("multi-départs : concordance {:.3} -> {:.3}, paramètres {:.2?}", r.ncc_history[0], r.ncc_history[1], r.params);
+        println!(
+            "multi-départs : concordance {:.3} -> {:.3}, paramètres {:.2?}",
+            r.ncc_history[0], r.ncc_history[1], r.params
+        );
         assert!(r.ncc_history[1] >= r.ncc_history[0], "(b)");
         assert!(r.params.iter().all(|v| v.is_finite()), "(b)");
-        assert!(r.ncc_history[1] - r.ncc_history[0] >= 0.05, "(c) gain de concordance {}", r.ncc_history[1] - r.ncc_history[0]);
-        assert!((r.params[3] - 3.0).abs() < 0.5, "(c) translation x estimée {}", r.params[3]);
+        assert!(
+            r.ncc_history[1] - r.ncc_history[0] >= 0.05,
+            "(c) gain de concordance {}",
+            r.ncc_history[1] - r.ncc_history[0]
+        );
+        assert!(
+            (r.params[3] - 3.0).abs() < 0.5,
+            "(c) translation x estimée {}",
+            r.params[3]
+        );
     }
 
     /// Maxima locaux d'une grille de candidats (valeurs exactes) : grille 3 × 3 × 3 de concordance 0, avec deux pics (au coin `(0,0,0)` : 0,9 ; au centre : 0,7), un plateau de deux points égaux à 0,5 en `(2,2,1)` et `(2,2,2)` (jamais un maximum : l'inégalité est stricte) ; les maxima sont `(0,0,0)` puis le centre, triés par concordance décroissante ;
@@ -4552,14 +7674,30 @@ mod tests {
     #[test]
     fn the_grid_local_maxima_are_exact() {
         use crate::s2s::{grid_local_maxima, Candidate};
-        let mut c = vec![Candidate { params: [0.0; 6], concordance: 0.0 }; 27];
+        let mut c = vec![
+            Candidate {
+                params: [0.0; 6],
+                concordance: 0.0
+            };
+            27
+        ];
         let idx = |i: usize, j: usize, k: usize| (i * 3 + j) * 3 + k;
         c[idx(0, 0, 0)].concordance = 0.9;
         c[idx(1, 1, 1)].concordance = 0.7;
         c[idx(2, 2, 1)].concordance = 0.5;
         c[idx(2, 2, 2)].concordance = 0.5;
         assert_eq!(grid_local_maxima(&c, 3), vec![idx(0, 0, 0), idx(1, 1, 1)]);
-        assert!(grid_local_maxima(&vec![Candidate { params: [0.0; 6], concordance: 0.3 }; 27], 3).is_empty());
+        assert!(grid_local_maxima(
+            &vec![
+                Candidate {
+                    params: [0.0; 6],
+                    concordance: 0.3
+                };
+                27
+            ],
+            3
+        )
+        .is_empty());
         // le centre dominé par un voisin n'est pas un maximum
         c[idx(1, 1, 2)].concordance = 0.8;
         assert_eq!(grid_local_maxima(&c, 3), vec![idx(0, 0, 0), idx(1, 1, 2)]);
@@ -4576,23 +7714,60 @@ mod tests {
         let modeles = modeles_de_blobs_larges(&t);
         let mut vraies = SlicePoses::identity(&modeles);
         for k in 0..12 {
-            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()));
+            vraies.set(
+                1,
+                k,
+                mouvement_rigide(&Vector3::zeros(), &Vector3::new(3.0, 0.0, 0.0), &Vector3::zeros()),
+            );
         }
         let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = SliceAtlas::new(&stacks, &device).unwrap();
         let depart = SlicePoses::identity(&stacks);
         let preparee = crate::align::preparer_coupe(&stacks[1], 5, *depart.get(1, 5)).unwrap();
-        let probleme = IntersectionProblem::build(&atlas, &stacks, &depart, 1, 5, &IntersectionConfig::default(), &device).unwrap();
-        let pivot = burn::tensor::Tensor::<1>::from_floats([preparee.pivot.x as f32, preparee.pivot.y as f32, preparee.pivot.z as f32], &device);
+        let probleme =
+            IntersectionProblem::build(&atlas, &stacks, &depart, 1, 5, &IntersectionConfig::default(), &device)
+                .unwrap();
+        let pivot = burn::tensor::Tensor::<1>::from_floats(
+            [
+                preparee.pivot.x as f32,
+                preparee.pivot.y as f32,
+                preparee.pivot.z as f32,
+            ],
+            &device,
+        );
         let rotation = [0.25, -0.5, 0.125];
-        let config = RegistrationConfig { learning_rate: 0.5, iterations: 40, lr_decay: 0.97, initial: [0.0; 6] };
+        let config = RegistrationConfig {
+            learning_rate: 0.5,
+            iterations: 40,
+            lr_decay: 0.97,
+            initial: [0.0; 6],
+        };
         let r = register_translation_s2s(&probleme, pivot.clone(), preparee.echelle, rotation, config);
-        println!("concordance {:.3} -> {:.3}, translation {:.2?}", r.ncc_history[0], r.ncc_history.last().unwrap(), &r.params[3..]);
+        println!(
+            "concordance {:.3} -> {:.3}, translation {:.2?}",
+            r.ncc_history[0],
+            r.ncc_history.last().unwrap(),
+            &r.params[3..]
+        );
         assert_eq!(&r.params[..3], &rotation, "la rotation fixée a changé");
-        assert!(r.ncc_history.last().unwrap() - r.ncc_history[0] >= 0.1, "concordance : {:?} -> {:?}", r.ncc_history[0], r.ncc_history.last());
+        assert!(
+            r.ncc_history.last().unwrap() - r.ncc_history[0] >= 0.1,
+            "concordance : {:?} -> {:?}",
+            r.ncc_history[0],
+            r.ncc_history.last()
+        );
         assert!(r.params[3].abs() >= 2.0, "translation x estimée : {}", r.params[3]);
-        let zero = register_translation_s2s(&probleme, pivot, preparee.echelle, [0.0; 3], RegistrationConfig { iterations: 0, ..config });
+        let zero = register_translation_s2s(
+            &probleme,
+            pivot,
+            preparee.echelle,
+            [0.0; 3],
+            RegistrationConfig {
+                iterations: 0,
+                ..config
+            },
+        );
         assert_eq!(zero.params, [0.0; 6]);
     }
 
@@ -4602,8 +7777,13 @@ mod tests {
     fn the_exhaustive_search_picks_the_best_translation_then_the_best_rotation_around_it() {
         use crate::s2s::{grille_1d, recherche_exhaustive};
         let grille = grille_1d(8.0, 4.0);
-        let f = |p: [f64; 6]| -((p[3] - 8.0).powi(2) + p[4].powi(2) + p[5].powi(2)) - ((p[0] - 4.0).powi(2) + p[1].powi(2) + p[2].powi(2));
-        assert_eq!(recherche_exhaustive(&f, &grille, f([0.0; 6])), [4.0, 0.0, 0.0, 8.0, 0.0, 0.0]);
+        let f = |p: [f64; 6]| {
+            -((p[3] - 8.0).powi(2) + p[4].powi(2) + p[5].powi(2)) - ((p[0] - 4.0).powi(2) + p[1].powi(2) + p[2].powi(2))
+        };
+        assert_eq!(
+            recherche_exhaustive(&f, &grille, f([0.0; 6])),
+            [4.0, 0.0, 0.0, 8.0, 0.0, 0.0]
+        );
         let g = |p: [f64; 6]| -p.iter().map(|v| v * v).sum::<f64>();
         assert_eq!(recherche_exhaustive(&g, &grille, g([0.0; 6])), [0.0; 6]);
     }
@@ -4619,17 +7799,35 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let mut vraies = SlicePoses::identity(&modeles);
         for k in 0..12 {
-            vraies.set(1, k, mouvement_rigide(&Vector3::zeros(), &Vector3::new(8.0, 0.0, 0.0), &Vector3::zeros()));
+            vraies.set(
+                1,
+                k,
+                mouvement_rigide(&Vector3::zeros(), &Vector3::new(8.0, 0.0, 0.0), &Vector3::zeros()),
+            );
         }
         let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
         let (problemes, pivot, _, echelle) = problemes_de_bloc(&stacks, &SlicePoses::identity(&stacks), 1, &device);
-        let config = RegistrationConfig { learning_rate: 0.3, iterations: 5, lr_decay: 1.0, initial: [0.0; 6] };
+        let config = RegistrationConfig {
+            learning_rate: 0.3,
+            iterations: 5,
+            lr_decay: 1.0,
+            initial: [0.0; 6],
+        };
         let sans = crate::s2s::register_block_s2s(&problemes, pivot.clone(), echelle, config, 0.0, 4.0);
         let avec = crate::s2s::register_block_s2s(&problemes, pivot, echelle, config, 8.0, 4.0);
-        println!("concordance sans recherche {:.3}, avec {:.3} ; translation estimée {:.2?}", sans.ncc_history[1], avec.ncc_history[1], &avec.params[3..]);
+        println!(
+            "concordance sans recherche {:.3}, avec {:.3} ; translation estimée {:.2?}",
+            sans.ncc_history[1],
+            avec.ncc_history[1],
+            &avec.params[3..]
+        );
         assert!(sans.ncc_history[1] < 0.6, "sans recherche : {}", sans.ncc_history[1]);
         assert!(avec.ncc_history[1] > 0.85, "avec recherche : {}", avec.ncc_history[1]);
-        assert!((7.0..=9.0).contains(&avec.params[3].abs()), "translation estimée : {:?}", avec.params);
+        assert!(
+            (7.0..=9.0).contains(&avec.params[3].abs()),
+            "translation estimée : {:?}",
+            avec.params
+        );
     }
 
     /// Un niveau de l'alignement par blocs, sur des blobs, depuis des poses de départ DIFFÉRENTES pour chaque coupe : (a) niveau 0 : le premier stack ne bouge pas (exactement), chaque autre stack reçoit UNE transformation commune (`après · avant⁻¹` identique pour toutes ses coupes, à 1e-6 près, et
@@ -4646,23 +7844,48 @@ mod tests {
         let depart = poses_aleatoires(&modeles, 1.0, 1.0, 5);
         let device = burn::tensor::Device::flex().autodiff();
         let atlas = SliceAtlas::new(&stacks, &device).unwrap();
-        let config = S2sConfig { block_sweeps: 1, block_search_mm: 8.0, block_search_step_mm: 4.0, ..Default::default() };
+        let config = S2sConfig {
+            block_sweeps: 1,
+            block_search_mm: 8.0,
+            block_search_step_mm: 4.0,
+            ..Default::default()
+        };
         let change = |poses: &SlicePoses, si: usize| (0..12).any(|k| poses.get(si, k) != depart.get(si, k));
         let ecart = |a: &Matrix4<f64>, b: &Matrix4<f64>| (a - b).iter().fold(0.0_f64, |m, v| m.max(v.abs()));
         // (a)
         let mut niveau0 = depart.clone();
         align_blocks_level(&stacks, &mut niveau0, &atlas, &config, 0, &device);
         assert!(!change(&niveau0, 0), "le premier stack a bougé au niveau 0");
-        let deltas = |poses: &SlicePoses, si: usize| (0..12).map(|k| poses.get(si, k) * depart.get(si, k).try_inverse().unwrap()).collect::<Vec<Matrix4<f64>>>();
+        let deltas = |poses: &SlicePoses, si: usize| {
+            (0..12)
+                .map(|k| poses.get(si, k) * depart.get(si, k).try_inverse().unwrap())
+                .collect::<Vec<Matrix4<f64>>>()
+        };
         for si in 1..3 {
             // les coupes de bord, sans assez de pixels de masque, ne sont pas recalées : elles gardent leur pose
-            let d: Vec<Matrix4<f64>> = deltas(&niveau0, si).into_iter().filter(|m| ecart(m, &Matrix4::identity()) > 1e-12).collect();
+            let d: Vec<Matrix4<f64>> = deltas(&niveau0, si)
+                .into_iter()
+                .filter(|m| ecart(m, &Matrix4::identity()) > 1e-12)
+                .collect();
             assert!(d.len() >= 8, "stack {si} : seulement {} coupes corrigées", d.len());
-            assert!(d.iter().all(|m| ecart(m, &d[0]) < 1e-6), "stack {si} : transformation non commune");
-            assert!(ecart(&d[0], &Matrix4::identity()) > 1e-3, "stack {si} : correction nulle");
+            assert!(
+                d.iter().all(|m| ecart(m, &d[0]) < 1e-6),
+                "stack {si} : transformation non commune"
+            );
+            assert!(
+                ecart(&d[0], &Matrix4::identity()) > 1e-3,
+                "stack {si} : correction nulle"
+            );
         }
         let (problemes, pivot_t, pivot, echelle) = problemes_de_bloc(&stacks, &depart, 1, &device);
-        let r = crate::s2s::register_block_s2s(&problemes, pivot_t, echelle, config.registration, config.block_search_mm, config.block_search_step_mm);
+        let r = crate::s2s::register_block_s2s(
+            &problemes,
+            pivot_t,
+            echelle,
+            config.registration,
+            config.block_search_mm,
+            config.block_search_step_mm,
+        );
         let attendu = crate::diff::pose_to_matrix(&r.params, &pivot, echelle);
         let obtenu = deltas(&niveau0, 1)[1];
         println!("écart à la transformation attendue : {:.2e}", ecart(&obtenu, &attendu));
@@ -4670,16 +7893,31 @@ mod tests {
         // (b)
         let mut niveau3 = depart.clone();
         align_blocks_level(&stacks, &mut niveau3, &atlas, &config, 3, &device);
-        assert!((0..3).all(|si| !change(&niveau3, si)), "des blocs de moins de 3 coupes ont été recalés");
+        assert!(
+            (0..3).all(|si| !change(&niveau3, si)),
+            "des blocs de moins de 3 coupes ont été recalés"
+        );
         // (c)
         let mut niveau2 = depart.clone();
         align_blocks_level(&stacks, &mut niveau2, &atlas, &config, 2, &device);
         assert!(change(&niveau2, 1), "aucun bloc de 3 coupes n'a été recalé");
         // (e) mise à jour rejetée : depuis les poses vraies (concordance maximale) un pas d'Adam énorme ne peut que dégrader la concordance du bloc, les poses restent exactement celles de départ
-        let brutal = S2sConfig { registration: crate::diff::RegistrationConfig { learning_rate: 3.0, iterations: 1, lr_decay: 1.0, initial: [0.0; 6] }, block_search_mm: 0.0, ..config };
+        let brutal = S2sConfig {
+            registration: crate::diff::RegistrationConfig {
+                learning_rate: 3.0,
+                iterations: 1,
+                lr_decay: 1.0,
+                initial: [0.0; 6],
+            },
+            block_search_mm: 0.0,
+            ..config
+        };
         let mut rejete = vraies.clone();
         align_blocks_level(&stacks, &mut rejete, &atlas, &brutal, 0, &device);
-        assert!((0..3).all(|si| (0..12).all(|k| rejete.get(si, k) == vraies.get(si, k))), "une mise à jour qui dégrade la concordance a été acceptée");
+        assert!(
+            (0..3).all(|si| (0..12).all(|k| rejete.get(si, k) == vraies.get(si, k))),
+            "une mise à jour qui dégrade la concordance a été acceptée"
+        );
         // (d)
         let mut niveau1 = depart.clone();
         align_blocks_level(&stacks, &mut niveau1, &atlas, &config, 1, &device);
@@ -4688,7 +7926,12 @@ mod tests {
 
     /// Stacks ANALYTIQUES : l'intensité d'un pixel est `f(position vraie) × exp(champ(stack, position nominale))`, avec `f` une fonction lisse et positive (un fond plus trois gaussiennes) évaluée à la position du centre du pixel après le mouvement vrai ; masque plein. Le « même tissu » est donc
     /// exactement le même en deux coupes qui se croisent (à l'interpolation bilinéaire près), sans l'écart de profil de coupe d'un fantôme à bords francs.
-    fn stacks_analytiques(t: &Temp, modeles: &[Stack], vraies: &SlicePoses, champ: &dyn Fn(usize, &Vector3<f64>) -> f64) -> Vec<Stack> {
+    fn stacks_analytiques(
+        t: &Temp,
+        modeles: &[Stack],
+        vraies: &SlicePoses,
+        champ: &dyn Fn(usize, &Vector3<f64>) -> f64,
+    ) -> Vec<Stack> {
         let tissu = |x: &Vector3<f64>| {
             let g = |c: [f64; 3], s: f64| (-((x - Vector3::from(c)).norm_squared()) / (2.0 * s * s)).exp();
             1.0 + 0.8 * g([0.0, 0.0, 0.0], 9.0) + 0.6 * g([6.0, -4.0, 3.0], 5.0) + 0.5 * g([-5.0, 5.0, -4.0], 6.0)
@@ -4700,10 +7943,20 @@ mod tests {
                 let mut data = Array3::<f32>::zeros(modele.dim());
                 for ((i, j, k), v) in data.indexed_iter_mut() {
                     let h = nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0);
-                    let (nominale, vraie) = ((modele.affine() * h).xyz(), (vraies.get(n, k) * modele.affine() * h).xyz());
+                    let (nominale, vraie) = (
+                        (modele.affine() * h).xyz(),
+                        (vraies.get(n, k) * modele.affine() * h).xyz(),
+                    );
                     *v = (tissu(&vraie) * champ(n, &nominale).exp()) as f32;
                 }
-                stack_avec_masque(t, &format!("analytique{n}"), &data, &Array3::from_elem(modele.dim(), 1u8), modele.affine(), [1.0, 1.0, 3.0])
+                stack_avec_masque(
+                    t,
+                    &format!("analytique{n}"),
+                    &data,
+                    &Array3::from_elem(modele.dim(), 1u8),
+                    modele.affine(),
+                    [1.0, 1.0, 3.0],
+                )
             })
             .collect()
     }
@@ -4728,49 +7981,127 @@ mod tests {
                 _ => 0.20 * w - 0.15 * u * v + 0.10,
             }
         };
-        let config = BiasConfig { scale_mm: 15.0, ridge: 1e-3, ..Default::default() };
+        let config = BiasConfig {
+            scale_mm: 15.0,
+            ridge: 1e-3,
+            ..Default::default()
+        };
         let stacks = stacks_analytiques(&t, &modeles, &vraies, &vrai_champ);
         let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
         assert_eq!(champs.coefficients()[0][0], 0.0, "(c)");
         // régularisation par défaut (0,1) plus forte que celle de ce test (0,001) : la norme des coefficients est plus petite, et l'incohérence résiduelle reste du même ordre
-        let par_defaut = estimate_bias_fields(&stacks, &vraies, &BiasConfig { scale_mm: 15.0, ..Default::default() }).unwrap();
+        let par_defaut = estimate_bias_fields(
+            &stacks,
+            &vraies,
+            &BiasConfig {
+                scale_mm: 15.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let norme = |c: &crate::bias::BiasFields| c.coefficients().iter().flatten().map(|v| v * v).sum::<f64>();
-        assert!(norme(&par_defaut) < norme(&champs), "la régularisation par défaut ne réduit pas les coefficients : {} contre {}", norme(&par_defaut), norme(&champs));
+        assert!(
+            norme(&par_defaut) < norme(&champs),
+            "la régularisation par défaut ne réduit pas les coefficients : {} contre {}",
+            norme(&par_defaut),
+            norme(&champs)
+        );
         // pas d'extrapolation : très loin des données, le champ vaut une borne de la plage vue aux points d'intersection, et tous les voxels de masque sont dans la plage
         for (s, stack) in stacks.iter().enumerate() {
             let (bas, haut) = champs.log_field_range(s);
-            assert!(bas <= haut && bas.is_finite() && haut.is_finite(), "plage du stack {s} : {bas} {haut}");
+            assert!(
+                bas <= haut && bas.is_finite() && haut.is_finite(),
+                "plage du stack {s} : {bas} {haut}"
+            );
             let loin = champs.log_field(s, &Vector3::new(1.0e4, -2.0e4, 3.0e4));
-            assert!(loin == bas || loin == haut, "stack {s} : champ très loin des données {loin} hors des bornes {bas} {haut}");
-            for ((i, j, k), _) in stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).step_by(7) {
-                let v = champs.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz());
+            assert!(
+                loin == bas || loin == haut,
+                "stack {s} : champ très loin des données {loin} hors des bornes {bas} {haut}"
+            );
+            for ((i, j, k), _) in stack
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .indexed_iter()
+                .filter(|(_, &m)| m)
+                .step_by(7)
+            {
+                let v = champs.log_field(
+                    s,
+                    &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz(),
+                );
                 assert!(v >= bas && v <= haut, "voxel hors plage : {v}");
             }
         }
-        let (avant, apres) = (intensity_inconsistency(&stacks, &vraies, &config, None).unwrap(), intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap());
+        let (avant, apres) = (
+            intensity_inconsistency(&stacks, &vraies, &config, None).unwrap(),
+            intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap(),
+        );
         println!("incohérence d'intensité : avant {avant:.4}, après {apres:.4}");
         assert!(avant >= 0.1, "(a) avant : {avant}");
-        assert!((champs.inconsistency().0 - avant).abs() < 1e-9 && (champs.inconsistency().1 - apres).abs() < 1e-9, "(a') incohérences enregistrées : {:?}", champs.inconsistency());
-        assert!(champs.inconsistency_reduction() >= 0.9, "(a') réduction : {}", champs.inconsistency_reduction());
-        assert!(apres <= 0.01 && apres * 10.0 <= avant, "(a) après : {apres} (avant {avant})");
+        assert!(
+            (champs.inconsistency().0 - avant).abs() < 1e-9 && (champs.inconsistency().1 - apres).abs() < 1e-9,
+            "(a') incohérences enregistrées : {:?}",
+            champs.inconsistency()
+        );
+        assert!(
+            champs.inconsistency_reduction() >= 0.9,
+            "(a') réduction : {}",
+            champs.inconsistency_reduction()
+        );
+        assert!(
+            apres <= 0.01 && apres * 10.0 <= avant,
+            "(a) après : {apres} (avant {avant})"
+        );
         // (b)
         let sans = stacks_analytiques(&t, &modeles, &vraies, &|_, _| 0.0);
         let champs_sans = estimate_bias_fields(&sans, &vraies, &config).unwrap();
         for (s, stack) in sans.iter().enumerate() {
-            let valeurs: Vec<f64> = stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).map(|((i, j, k), _)| champs_sans.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz())).collect();
+            let valeurs: Vec<f64> = stack
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .indexed_iter()
+                .filter(|(_, &m)| m)
+                .map(|((i, j, k), _)| {
+                    champs_sans.log_field(
+                        s,
+                        &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz(),
+                    )
+                })
+                .collect();
             let moyenne = valeurs.iter().sum::<f64>() / valeurs.len() as f64;
             let ecart = (valeurs.iter().map(|a| (a - moyenne).powi(2)).sum::<f64>() / valeurs.len() as f64).sqrt();
-            assert!(ecart <= 0.01, "(b) stack {s} : écart type du champ estimé sans biais {ecart}");
+            assert!(
+                ecart <= 0.01,
+                "(b) stack {s} : écart type du champ estimé sans biais {ecart}"
+            );
         }
         assert!(champs_sans.inconsistency().0 <= 0.001, "(b) incohérence sans biais : {:?} (la réduction relative n'a de sens qu'au-dessus du bruit : ici l'« avant » est du bruit d'interpolation)", champs_sans.inconsistency());
-        let (i0, i1) = (intensity_inconsistency(&sans, &vraies, &config, None).unwrap(), intensity_inconsistency(&sans, &vraies, &config, Some(&champs_sans)).unwrap());
+        let (i0, i1) = (
+            intensity_inconsistency(&sans, &vraies, &config, None).unwrap(),
+            intensity_inconsistency(&sans, &vraies, &config, Some(&champs_sans)).unwrap(),
+        );
         assert!((i0 - i1).abs() <= 0.001, "(b) incohérence sans biais : {i0} puis {i1}");
         // (d)
-        assert!(matches!(estimate_bias_fields(&stacks[..1], &SlicePoses::identity(&stacks[..1]), &BiasConfig::default()), Err(SvrError::NotEnoughStacks)));
-        assert!(matches!(estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks[..2]), &BiasConfig::default()), Err(SvrError::PoseMismatch)));
+        assert!(matches!(
+            estimate_bias_fields(
+                &stacks[..1],
+                &SlicePoses::identity(&stacks[..1]),
+                &BiasConfig::default()
+            ),
+            Err(SvrError::NotEnoughStacks)
+        ));
+        assert!(matches!(
+            estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks[..2]), &BiasConfig::default()),
+            Err(SvrError::PoseMismatch)
+        ));
         let deux = [modeles[0].clone(), modeles[0].clone()];
         let paralleles = stacks_analytiques(&t, &deux, &SlicePoses::identity(&deux), &|_, _| 0.0);
-        assert!(matches!(estimate_bias_fields(&paralleles, &SlicePoses::identity(&paralleles), &BiasConfig::default()), Err(SvrError::NoIntersections)));
+        assert!(matches!(
+            estimate_bias_fields(&paralleles, &SlicePoses::identity(&paralleles), &BiasConfig::default()),
+            Err(SvrError::NoIntersections)
+        ));
     }
 
     /// Perte de signal (critère fixé avant) : une coupe entière du stack 0 (la 5ᵉ, d'intensité multipliée par 1e-4) est ignorée par le seuil d'intensité (10 % du 99ᵉ centile) : avec les mêmes champs vrais que ci-dessus, l'incohérence après correction reste ≤ 0,01 ; sans ce seuil, le log du rapport
@@ -4790,12 +8121,19 @@ mod tests {
                 _ => 0.20 * w - 0.15 * u * v + 0.10,
             }
         };
-        let config = BiasConfig { scale_mm: 15.0, ridge: 1e-3, ..Default::default() };
+        let config = BiasConfig {
+            scale_mm: 15.0,
+            ridge: 1e-3,
+            ..Default::default()
+        };
         let stacks = stacks_analytiques(&t, &modeles, &vraies, &champ);
         let champs = estimate_bias_fields(&stacks, &vraies, &config).unwrap();
         let apres = intensity_inconsistency(&stacks, &vraies, &config, Some(&champs)).unwrap();
         println!("perte de signal : incohérence après correction {apres:.4}");
-        assert!(apres <= 0.01, "incohérence après correction avec une coupe sans signal : {apres}");
+        assert!(
+            apres <= 0.01,
+            "incohérence après correction avec une coupe sans signal : {apres}"
+        );
     }
 
     /// COMPARAISON avec la référence Python (`scripts/prototype_champ_biais.py`) sur un jeu simulé de l'atlas (poses vraies) : écart type du log du champ estimé par stack et rapports de gain.
@@ -4808,26 +8146,61 @@ mod tests {
         let stacks: Vec<Stack> = (0..3)
             .map(|n| {
                 let mut s = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).unwrap();
-                s.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                s.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz")))
+                    .unwrap();
                 s
             })
             .collect();
         let poses = lire_poses_tsv(&dossier.join("poses.tsv"), &stacks);
-        let champs = estimate_bias_fields(&stacks, &poses, &BiasConfig { ridge: 1e-3, ..Default::default() }).unwrap();
+        let champs = estimate_bias_fields(
+            &stacks,
+            &poses,
+            &BiasConfig {
+                ridge: 1e-3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut moyennes = Vec::new();
         for (s, stack) in stacks.iter().enumerate() {
-            let v: Vec<f64> = stack.brain_mask().unwrap().voxels().indexed_iter().filter(|(_, &m)| m).map(|((i, j, k), _)| champs.log_field(s, &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz())).collect();
+            let v: Vec<f64> = stack
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .indexed_iter()
+                .filter(|(_, &m)| m)
+                .map(|((i, j, k), _)| {
+                    champs.log_field(
+                        s,
+                        &(stack.affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz(),
+                    )
+                })
+                .collect();
             let m = v.iter().sum::<f64>() / v.len() as f64;
             let e = (v.iter().map(|a| (a - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
             println!("stack {s} : écart type du log estimé {e:.3}, moyenne {m:+.3}");
             moyennes.push(m);
         }
-        println!("gains par rapport au stack 0 : {:+.3} {:+.3}", moyennes[1] - moyennes[0], moyennes[2] - moyennes[0]);
-        let config = BiasConfig { ridge: 1e-3, ..Default::default() };
+        println!(
+            "gains par rapport au stack 0 : {:+.3} {:+.3}",
+            moyennes[1] - moyennes[0],
+            moyennes[2] - moyennes[0]
+        );
+        let config = BiasConfig {
+            ridge: 1e-3,
+            ..Default::default()
+        };
         for (nom, p) in [("vraies", poses.clone()), ("en-tête", SlicePoses::identity(&stacks))] {
             let champs = estimate_bias_fields(&stacks, &p, &config).unwrap();
-            println!("poses {nom} : réduction de l'incohérence {:.3}", champs.inconsistency_reduction());
-            println!("poses {nom} : incohérence d'intensité avant {:.4}, après {:.4}", crate::bias::intensity_inconsistency(&stacks, &p, &config, None).unwrap(), crate::bias::intensity_inconsistency(&stacks, &p, &config, Some(&champs)).unwrap());
+            println!(
+                "poses {nom} : réduction de l'incohérence {:.3}",
+                champs.inconsistency_reduction()
+            );
+            println!(
+                "poses {nom} : incohérence d'intensité avant {:.4}, après {:.4}",
+                crate::bias::intensity_inconsistency(&stacks, &p, &config, None).unwrap(),
+                crate::bias::intensity_inconsistency(&stacks, &p, &config, Some(&champs)).unwrap()
+            );
         }
     }
 
@@ -4845,14 +8218,40 @@ mod tests {
             let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
             let depart = SlicePoses::identity(&stacks);
             let med = |poses: &SlicePoses| {
-                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies).into_iter().filter(|v| v.is_finite()).collect();
+                let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies)
+                    .into_iter()
+                    .filter(|v| v.is_finite())
+                    .collect();
                 e.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 e[e.len() / 2]
             };
-            let base = S2sConfig { sweeps: 2, ..Default::default() };
+            let base = S2sConfig {
+                sweeps: 2,
+                ..Default::default()
+            };
             let seul = crate::s2s::register_slices_s2s(&stacks, &depart, &base, &device).unwrap();
-            let adam = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 0.0, ..base }, &device).unwrap();
-            let grille = crate::s2s::register_slices_s2s(&stacks, &depart, &S2sConfig { block_levels: 1, block_search_mm: 8.0, ..base }, &device).unwrap();
+            let adam = crate::s2s::register_slices_s2s(
+                &stacks,
+                &depart,
+                &S2sConfig {
+                    block_levels: 1,
+                    block_search_mm: 0.0,
+                    ..base
+                },
+                &device,
+            )
+            .unwrap();
+            let grille = crate::s2s::register_slices_s2s(
+                &stacks,
+                &depart,
+                &S2sConfig {
+                    block_levels: 1,
+                    block_search_mm: 8.0,
+                    ..base
+                },
+                &device,
+            )
+            .unwrap();
             println!("décalage {decalage} : en-tête {:.2} ; par coupe {:.2} ; blocs Adam seul {:.2} ; blocs + recherche {:.2}", med(&depart), med(&seul.poses), med(&adam.poses), med(&grille.poses));
         }
     }
@@ -4866,38 +8265,127 @@ mod tests {
         let t = Temp::new("pipeline_biais");
         let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
         let device = burn::tensor::Device::flex().autodiff();
-        let config = ReconstructionConfig { motion: Motion::SliceToSlice, resolution_mm: 2.0, margin_mm: 4.0, alpha: 0.02, cg_max_iterations: 7, cg_tolerance: 1e-3, s2s_sweeps: 1, s2s_block_levels: 0, s2s_coarse_sigma_pixels: 0.0, s2s_bias_rounds: 2, s2s_bias_min_reduction: 0.0, s2s_temporal_weight: 0.0, ..Default::default() };
+        let config = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 1,
+            s2s_block_levels: 0,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 2,
+            s2s_bias_min_reduction: 0.0,
+            s2s_temporal_weight: 0.0,
+            ..Default::default()
+        };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
-        let s2s = crate::s2s::S2sConfig { sweeps: 1, block_levels: 0, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() }, ..Default::default() };
+        let s2s = crate::s2s::S2sConfig {
+            sweeps: 1,
+            block_levels: 0,
+            intersection: crate::s2s::IntersectionConfig {
+                highpass_sigma_mm: config.s2s_highpass_mm,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let direct = |alternances: usize, seuil: f64| {
             let (mut poses, mut slices) = (SlicePoses::identity(&stacks), Vec::new());
             for _ in 0..alternances {
-                let corriges = correct_stacks(&stacks, &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(), seuil);
+                let corriges = correct_stacks(
+                    &stacks,
+                    &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(),
+                    seuil,
+                );
                 let rapport = crate::s2s::register_slices_s2s(&corriges, &poses, &s2s, &device).unwrap();
                 (poses, slices) = (rapport.poses, rapport.slices);
             }
-            let corriges = correct_stacks(&stacks, &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(), seuil);
+            let corriges = correct_stacks(
+                &stacks,
+                &estimate_bias_fields(&stacks, &poses, &BiasConfig::default()).unwrap(),
+                seuil,
+            );
             let grille = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
-            let probleme = ReconstructionProblem::with_poses_covered(&grille, &corriges, &poses, config.alpha, config.min_stack_coverage).unwrap();
-            (poses, slices, probleme.conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance).x)
+            let probleme = ReconstructionProblem::with_poses_covered(
+                &grille,
+                &corriges,
+                &poses,
+                config.alpha,
+                config.min_stack_coverage,
+            )
+            .unwrap();
+            (
+                poses,
+                slices,
+                probleme
+                    .conjugate_gradient(&probleme.initial_guess(), config.cg_max_iterations, config.cg_tolerance)
+                    .x,
+            )
         };
-        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
-        let ecart_volumes = |a: &Array3<f64>, b: &Array3<f64>| a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let ecart_poses = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let ecart_volumes = |a: &Array3<f64>, b: &Array3<f64>| {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+                / b.iter().map(|v| v * v).sum::<f64>().sqrt()
+        };
         let (poses, slices, volume) = direct(2, 0.0);
-        assert_eq!(sortie.slices, slices, "rapports par coupe différents de la séquence directe");
-        assert_eq!(ecart_poses(&sortie.poses, &poses), 0.0, "poses différentes de la séquence directe");
-        assert!(ecart_volumes(&sortie.volume, &volume) < 1e-9, "volume différent de la séquence directe : {:.2e}", ecart_volumes(&sortie.volume, &volume));
+        assert_eq!(
+            sortie.slices, slices,
+            "rapports par coupe différents de la séquence directe"
+        );
+        assert_eq!(
+            ecart_poses(&sortie.poses, &poses),
+            0.0,
+            "poses différentes de la séquence directe"
+        );
+        assert!(
+            ecart_volumes(&sortie.volume, &volume) < 1e-9,
+            "volume différent de la séquence directe : {:.2e}",
+            ecart_volumes(&sortie.volume, &volume)
+        );
         let (poses_1, _, volume_1) = direct(1, 0.0);
-        assert!(ecart_poses(&poses, &poses_1) > 1e-6 || ecart_volumes(&volume, &volume_1) > 1e-6, "le nombre d'alternances n'a aucun effet");
+        assert!(
+            ecart_poses(&poses, &poses_1) > 1e-6 || ecart_volumes(&volume, &volume_1) > 1e-6,
+            "le nombre d'alternances n'a aucun effet"
+        );
         // le seuil de la garde est lu : avec un seuil inatteignable (2), aucune correction n'est appliquée, ni pendant les alternances ni à la fin, et la sortie est celle de la séquence directe avec ce seuil, différente de celle à seuil 0
-        let gardee = reconstruct(&stacks, &ReconstructionConfig { s2s_bias_min_reduction: 2.0, ..config.clone() }, &device).unwrap();
+        let gardee = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_min_reduction: 2.0,
+                ..config.clone()
+            },
+            &device,
+        )
+        .unwrap();
         let (poses_g, slices_g, volume_g) = direct(2, 2.0);
         assert_eq!(gardee.slices, slices_g, "garde : rapports par coupe");
         assert_eq!(ecart_poses(&gardee.poses, &poses_g), 0.0, "garde : poses");
         assert!(ecart_volumes(&gardee.volume, &volume_g) < 1e-9, "garde : volume");
-        assert!(ecart_poses(&gardee.poses, &poses) > 1e-6 || ecart_volumes(&gardee.volume, &volume) > 1e-6, "le seuil de la garde n'a aucun effet");
-        let sans = reconstruct(&stacks, &ReconstructionConfig { s2s_bias_rounds: 0, ..config.clone() }, &device).unwrap();
-        assert!(ecart_volumes(&sortie.volume, &sans.volume) > 1e-6, "la correction de biais n'a aucun effet sur le volume");
+        assert!(
+            ecart_poses(&gardee.poses, &poses) > 1e-6 || ecart_volumes(&gardee.volume, &volume) > 1e-6,
+            "le seuil de la garde n'a aucun effet"
+        );
+        let sans = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_rounds: 0,
+                ..config.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart_volumes(&sortie.volume, &sans.volume) > 1e-6,
+            "la correction de biais n'a aucun effet sur le volume"
+        );
     }
 
     /// Division d'un stack par un champ de biais et garde « ne pas nuire » (valeurs exactes) : `divided_by_log_field` divise chaque voxel par `exp(f(position nominale))` (ici `f = ln 2` si x > 0, sinon 0) et laisse l'original et le masque intacts ;
@@ -4922,17 +8410,37 @@ mod tests {
                 for k in 0..nz {
                     let x = (stacks[1].affine() * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
                     let attendu = f64::from(stacks[1].data()[[i, j, k]]) / if x.x > 0.0 { 2.0 } else { 1.0 };
-                    assert!((f64::from(divise.data()[[i, j, k]]) - attendu).abs() <= 1e-6 * attendu.abs().max(1.0), "voxel ({i},{j},{k})");
+                    assert!(
+                        (f64::from(divise.data()[[i, j, k]]) - attendu).abs() <= 1e-6 * attendu.abs().max(1.0),
+                        "voxel ({i},{j},{k})"
+                    );
                 }
             }
         }
-        assert_eq!(divise.brain_mask().unwrap().voxels(), stacks[1].brain_mask().unwrap().voxels());
-        let champs = estimate_bias_fields(&stacks, &vraies, &BiasConfig { scale_mm: 15.0, ..Default::default() }).unwrap();
+        assert_eq!(
+            divise.brain_mask().unwrap().voxels(),
+            stacks[1].brain_mask().unwrap().voxels()
+        );
+        let champs = estimate_bias_fields(
+            &stacks,
+            &vraies,
+            &BiasConfig {
+                scale_mm: 15.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(champs.inconsistency_reduction() > 0.9);
         let strict = correct_stacks(&stacks, &champs, 0.9999);
-        assert!(stacks.iter().zip(&strict).all(|(a, b)| a.data() == b.data()), "la garde aurait dû laisser les stacks inchangés");
+        assert!(
+            stacks.iter().zip(&strict).all(|(a, b)| a.data() == b.data()),
+            "la garde aurait dû laisser les stacks inchangés"
+        );
         let corriges = correct_stacks(&stacks, &champs, 0.5);
-        assert!((1..3).all(|s| corriges[s].data() != stacks[s].data()), "les stacks auraient dû être corrigés");
+        assert!(
+            (1..3).all(|s| corriges[s].data() != stacks[s].data()),
+            "les stacks auraient dû être corrigés"
+        );
     }
 
     /// Calendrier du gros vers fin du coupe-coupe (critères fixés avant, valeurs exactes) : sans flou (σ = 0), un seul niveau net de `sweeps` balayages ; σ = 6, 2 niveaux, 2 balayages grossiers, 3 balayages nets : (6, 2), (3, 2), (0, 3 net) ; `coarse_levels` = 0 compte pour 1 ;
@@ -4941,17 +8449,82 @@ mod tests {
     fn the_coarse_schedule_and_the_pipeline_s2s_settings_are_exact() {
         use crate::pipeline::{s2s_config, ReconstructionConfig};
         use crate::s2s::{sweep_schedule, S2sConfig};
-        let base = S2sConfig { sweeps: 3, ..Default::default() };
+        let base = S2sConfig {
+            sweeps: 3,
+            ..Default::default()
+        };
         assert_eq!(sweep_schedule(&base), vec![(0.0, 3, true)]);
-        let deux = S2sConfig { coarse_sigma_pixels: 6.0, coarse_sweeps: 2, coarse_levels: 2, ..base };
-        assert_eq!(sweep_schedule(&deux), vec![(6.0, 2, false), (3.0, 2, false), (0.0, 3, true)]);
-        assert_eq!(sweep_schedule(&S2sConfig { coarse_levels: 0, ..deux }), vec![(6.0, 2, false), (0.0, 3, true)]);
-        assert_eq!(sweep_schedule(&S2sConfig { coarse_sweeps: 0, ..deux }), vec![(0.0, 3, true)]);
-        assert_eq!(sweep_schedule(&S2sConfig { coarse_sigma_pixels: 8.0, coarse_sweeps: 1, coarse_levels: 3, ..base }), vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]);
+        let deux = S2sConfig {
+            coarse_sigma_pixels: 6.0,
+            coarse_sweeps: 2,
+            coarse_levels: 2,
+            ..base
+        };
+        assert_eq!(
+            sweep_schedule(&deux),
+            vec![(6.0, 2, false), (3.0, 2, false), (0.0, 3, true)]
+        );
+        assert_eq!(
+            sweep_schedule(&S2sConfig {
+                coarse_levels: 0,
+                ..deux
+            }),
+            vec![(6.0, 2, false), (0.0, 3, true)]
+        );
+        assert_eq!(
+            sweep_schedule(&S2sConfig {
+                coarse_sweeps: 0,
+                ..deux
+            }),
+            vec![(0.0, 3, true)]
+        );
+        assert_eq!(
+            sweep_schedule(&S2sConfig {
+                coarse_sigma_pixels: 8.0,
+                coarse_sweeps: 1,
+                coarse_levels: 3,
+                ..base
+            }),
+            vec![(8.0, 1, false), (4.0, 1, false), (2.0, 1, false), (0.0, 3, true)]
+        );
         // défaut : σ = 1 pixel, 3 balayages, 2 niveaux (σ = 1 puis 0,5), puis 3 balayages nets
-        assert_eq!(sweep_schedule(&s2s_config(&ReconstructionConfig::default())), vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]);
-        let c = ReconstructionConfig { s2s_sweeps: 5, s2s_coarse_sigma_pixels: 7.0, s2s_coarse_sweeps: 4, s2s_coarse_levels: 3, s2s_highpass_mm: 12.0, s2s_block_levels: 2, s2s_block_sweeps: 3, s2s_block_search_mm: 9.0, s2s_temporal_weight: 0.07, s2s_temporal_robust_mm: 1.7, s2s_temporal_robust_start_mm: 6.5, s2s_temporal_info_exponent: 0.8, ..Default::default() };
-        let attendu = S2sConfig { sweeps: 5, coarse_sigma_pixels: 7.0, coarse_sweeps: 4, coarse_levels: 3, block_levels: 2, block_sweeps: 3, block_search_mm: 9.0, temporal_weight: 0.07, temporal_robust_mm: 1.7, temporal_robust_start_mm: 6.5, temporal_info_exponent: 0.8, intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: 12.0, ..Default::default() }, ..Default::default() };
+        assert_eq!(
+            sweep_schedule(&s2s_config(&ReconstructionConfig::default())),
+            vec![(1.0, 3, false), (0.5, 3, false), (0.0, 3, true)]
+        );
+        let c = ReconstructionConfig {
+            s2s_sweeps: 5,
+            s2s_coarse_sigma_pixels: 7.0,
+            s2s_coarse_sweeps: 4,
+            s2s_coarse_levels: 3,
+            s2s_highpass_mm: 12.0,
+            s2s_block_levels: 2,
+            s2s_block_sweeps: 3,
+            s2s_block_search_mm: 9.0,
+            s2s_temporal_weight: 0.07,
+            s2s_temporal_robust_mm: 1.7,
+            s2s_temporal_robust_start_mm: 6.5,
+            s2s_temporal_info_exponent: 0.8,
+            ..Default::default()
+        };
+        let attendu = S2sConfig {
+            sweeps: 5,
+            coarse_sigma_pixels: 7.0,
+            coarse_sweeps: 4,
+            coarse_levels: 3,
+            block_levels: 2,
+            block_sweeps: 3,
+            block_search_mm: 9.0,
+            temporal_weight: 0.07,
+            temporal_robust_mm: 1.7,
+            temporal_robust_start_mm: 6.5,
+            temporal_info_exponent: 0.8,
+            intersection: crate::s2s::IntersectionConfig {
+                highpass_sigma_mm: 12.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 
@@ -4973,7 +8546,12 @@ mod tests {
         for sigma in [1.0, 2.5, 6.0] {
             for masque in [&plein, &demi] {
                 let b = blur_slice_in_mask(constante.view(), masque.view(), sigma);
-                assert!(b.indexed_iter().filter(|(idx, _)| masque[*idx]).all(|(_, &v)| (v - 7.5).abs() < 1e-4), "constante non conservée (σ = {sigma})");
+                assert!(
+                    b.indexed_iter()
+                        .filter(|(idx, _)| masque[*idx])
+                        .all(|(_, &v)| (v - 7.5).abs() < 1e-4),
+                    "constante non conservée (σ = {sigma})"
+                );
             }
         }
         // (c)
@@ -4983,10 +8561,20 @@ mod tests {
                 *v += 1000.0;
             }
         }
-        let (a, b) = (blur_slice_in_mask(bruit.view(), demi.view(), 2.0), blur_slice_in_mask(modifiee.view(), demi.view(), 2.0));
-        for ((i, j), (&va, &vb)) in a.indexed_iter().zip(b.iter()).map(|(((i, j), x), y)| (((i, j)), (x, y))) {
+        let (a, b) = (
+            blur_slice_in_mask(bruit.view(), demi.view(), 2.0),
+            blur_slice_in_mask(modifiee.view(), demi.view(), 2.0),
+        );
+        for ((i, j), (&va, &vb)) in a
+            .indexed_iter()
+            .zip(b.iter())
+            .map(|(((i, j), x), y)| (((i, j)), (x, y)))
+        {
             if demi[[i, j]] {
-                assert!((va - vb).abs() < 1e-3, "un pixel hors masque a contribué en ({i},{j}) : {va} contre {vb}");
+                assert!(
+                    (va - vb).abs() < 1e-3,
+                    "un pixel hors masque a contribué en ({i},{j}) : {va} contre {vb}"
+                );
             } else {
                 assert_eq!(vb, modifiee[[i, j]], "un pixel hors masque a été modifié en ({i},{j})");
             }
@@ -4998,13 +8586,21 @@ mod tests {
         // convolution normalisée : (impulsion ⊛ G) / (1 ⊛ G) ; loin des bords le dénominateur vaut 1
         assert!((k.sum() - 1.0).abs() < 1e-3, "somme du noyau : {}", k.sum());
         let attendu = 1.0 / (2.0 * std::f64::consts::PI * 9.0);
-        assert!(((f64::from(k[[20, 18]]) - attendu) / attendu).abs() < 0.01, "valeur centrale {} contre {attendu}", k[[20, 18]]);
+        assert!(
+            ((f64::from(k[[20, 18]]) - attendu) / attendu).abs() < 0.01,
+            "valeur centrale {} contre {attendu}",
+            k[[20, 18]]
+        );
         // (e)
         let variance = |x: &Array2<f32>| {
             let m = x.mean().unwrap();
             x.iter().map(|v| (v - m).powi(2)).sum::<f32>() / x.len() as f32
         };
-        let (v1, v2, v3) = (variance(&bruit), variance(&blur_slice_in_mask(bruit.view(), plein.view(), 1.0)), variance(&blur_slice_in_mask(bruit.view(), plein.view(), 3.0)));
+        let (v1, v2, v3) = (
+            variance(&bruit),
+            variance(&blur_slice_in_mask(bruit.view(), plein.view(), 1.0)),
+            variance(&blur_slice_in_mask(bruit.view(), plein.view(), 3.0)),
+        );
         assert!(v1 > v2 && v2 > v3, "variances {v1} {v2} {v3}");
     }
 
@@ -5022,20 +8618,69 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
-        let robuste = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, lr_decay: 0.93, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 1, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
+        let robuste = RobustConfig {
+            base: crate::diff::RegistrationConfig {
+                iterations: 12,
+                lr_decay: 0.93,
+                ..crate::diff::RegistrationConfig::DEFAULT
+            },
+            extra_starts: 1,
+            start_amplitude_mm: 2.0,
+            ..RobustConfig::new(0.99)
+        };
         let boucle = |saute: bool, loso: usize| align::LoopConfig {
-            min_stack_coverage: 1, cycles: 2, alpha: 0.01, cg_max_iterations: 300, cg_tolerance: 1e-6, robust: robuste, leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: loso,
-            leave_slice_out_window: 0, pose_outlier_window: 0, pose_outlier_max_mm: 5.0, pose_outlier_max_deg: 10.0, skip_unused_reconstructions: saute,
+            min_stack_coverage: 1,
+            cycles: 2,
+            alpha: 0.01,
+            cg_max_iterations: 300,
+            cg_tolerance: 1e-6,
+            robust: robuste,
+            leave_one_stack_out_cycles: 0,
+            coarse_sigma_voxels: 0.0,
+            leave_one_slice_out_cycles: loso,
+            leave_slice_out_window: 0,
+            pose_outlier_window: 0,
+            pose_outlier_max_mm: 5.0,
+            pose_outlier_max_deg: 10.0,
+            skip_unused_reconstructions: saute,
         };
         let (mut appels_complet, mut appels_saut, mut appels_partiel) = (Vec::new(), Vec::new(), Vec::new());
-        let complet = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(false, 2), &device, |c, _, _| appels_complet.push(c)).unwrap();
-        let saut = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 2), &device, |c, _, _| appels_saut.push(c)).unwrap();
+        let complet = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &depart,
+            boucle(false, 2),
+            &device,
+            |c, _, _| appels_complet.push(c),
+        )
+        .unwrap();
+        let saut = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &depart,
+            boucle(true, 2),
+            &device,
+            |c, _, _| appels_saut.push(c),
+        )
+        .unwrap();
         // (a) poses identiques
-        let ecart = stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (complet.poses.get(si, k) - saut.poses.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecart = stacks
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+            .map(|(si, k)| (complet.poses.get(si, k) - saut.poses.get(si, k)).abs().max())
+            .fold(0.0_f64, f64::max);
         assert!(ecart < 1e-9, "poses différentes : {ecart}");
         // (b) volume final
         let norme = complet.volume.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let diff = complet.volume.iter().zip(saut.volume.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+        let diff = complet
+            .volume
+            .iter()
+            .zip(saut.volume.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / norme;
         println!("poses : écart {ecart:.1e} ; volume final : écart relatif {diff:.2e} ; observateur {appels_complet:?} contre {appels_saut:?}");
         assert!(diff < 2e-2, "volume final : écart relatif {diff}");
         // (c) observateur
@@ -5043,11 +8688,22 @@ mod tests {
         assert_eq!(appels_saut, vec![2]);
         assert_eq!(saut.cg_iterations.len(), 1);
         // (d) 2 cycles sur 3 « sans la coupe »
-        align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 1), &device, |c, _, _| appels_partiel.push(c)).unwrap();
+        align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 1), &device, |c, _, _| {
+            appels_partiel.push(c)
+        })
+        .unwrap();
         assert_eq!(appels_partiel, vec![1, 2]);
         // (e) plus de cycles « sans la coupe » que de cycles : la dernière reconstruction est toujours faite (sinon la boucle n'aurait aucun volume à rendre)
         let mut appels_debord = Vec::new();
-        let debord = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, boucle(true, 5), &device, |c, _, _| appels_debord.push(c)).unwrap();
+        let debord = align::reconstruct_with_motion_correction(
+            &grille,
+            &stacks,
+            &depart,
+            boucle(true, 5),
+            &device,
+            |c, _, _| appels_debord.push(c),
+        )
+        .unwrap();
         assert_eq!(appels_debord, vec![2]);
         assert!(debord.volume.iter().all(|v| v.is_finite()));
     }
@@ -5065,27 +8721,62 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
-        let base = RobustConfig { base: crate::diff::RegistrationConfig { iterations: 12, lr_decay: 0.93, ..crate::diff::RegistrationConfig::DEFAULT }, extra_starts: 2, start_amplitude_mm: 2.0, ..RobustConfig::new(0.99) };
+        let base = RobustConfig {
+            base: crate::diff::RegistrationConfig {
+                iterations: 12,
+                lr_decay: 0.93,
+                ..crate::diff::RegistrationConfig::DEFAULT
+            },
+            extra_starts: 2,
+            start_amplitude_mm: 2.0,
+            ..RobustConfig::new(0.99)
+        };
         let lots = RobustConfig { batched: true, ..base };
-        let ecart = |a: &SlicePoses, b: &SlicePoses| stacks.iter().enumerate().flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k))).map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max()).fold(0.0_f64, f64::max);
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
         for (fenetre, sigma) in [(0usize, 0.0), (2, 0.0), (0, 1.0)] {
-            let seul = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, base, &device).unwrap();
-            let lot = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device).unwrap();
+            let seul =
+                align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, base, &device)
+                    .unwrap();
+            let lot = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device)
+                .unwrap();
             assert_eq!(seul.slices.len(), lot.slices.len());
             for (a, b) in seul.slices.iter().zip(&lot.slices) {
-                assert_eq!((a.stack, a.slice, a.registered, a.runs), (b.stack, b.slice, b.registered, b.runs), "(fenêtre {fenetre}, σ {sigma}) : {a:?} contre {b:?}");
-                assert!((a.ncc_first - b.ncc_first).abs() < 1e-4 && (a.ncc_final - b.ncc_final).abs() < 1e-4, "NCC différentes : {a:?} contre {b:?}");
+                assert_eq!(
+                    (a.stack, a.slice, a.registered, a.runs),
+                    (b.stack, b.slice, b.registered, b.runs),
+                    "(fenêtre {fenetre}, σ {sigma}) : {a:?} contre {b:?}"
+                );
+                assert!(
+                    (a.ncc_first - b.ncc_first).abs() < 1e-4 && (a.ncc_final - b.ncc_final).abs() < 1e-4,
+                    "NCC différentes : {a:?} contre {b:?}"
+                );
             }
             let e = ecart(&seul.poses, &lot.poses);
             let relancees = lot.slices.iter().filter(|r| r.runs > 1).count();
             println!("(fenêtre {fenetre}, σ {sigma}) : {} coupes recalées dont {relancees} relancées, écart de poses lot / coupe par coupe {e:.2e}", lot.slices.iter().filter(|r| r.registered).count());
             assert!(e < 1e-3, "(fenêtre {fenetre}, σ {sigma}) : écart de poses {e}");
             if sigma == 0.0 {
-                assert!(relancees >= 10, "trop peu de relances pour tester le second lot : {relancees}");
+                assert!(
+                    relancees >= 10,
+                    "trop peu de relances pour tester le second lot : {relancees}"
+                );
             }
             if fenetre == 0 && sigma == 0.0 {
-                let encore = align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device).unwrap();
-                assert_eq!(ecart(&lot.poses, &encore.poses), 0.0, "deux exécutions par lots diffèrent");
+                let encore =
+                    align::register_slices_leave_window_out(&grille, &stacks, &depart, fenetre, sigma, lots, &device)
+                        .unwrap();
+                assert_eq!(
+                    ecart(&lot.poses, &encore.poses),
+                    0.0,
+                    "deux exécutions par lots diffèrent"
+                );
             }
         }
     }
@@ -5102,18 +8793,29 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
         let identite = SlicePoses::identity(&stacks);
-        let mediane = |v: Vec<f64>| { let mut x: Vec<f64> = v.into_iter().filter(|e| e.is_finite()).collect(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); (x[x.len() / 2], x[x.len() * 9 / 10], x.len()) };
+        let mediane = |v: Vec<f64>| {
+            let mut x: Vec<f64> = v.into_iter().filter(|e| e.is_finite()).collect();
+            x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (x[x.len() / 2], x[x.len() * 9 / 10], x.len())
+        };
         // A : passes répétées depuis l'identité
         let mut poses = identite.clone();
         for passe in 1..=5 {
-            poses = align::register_slices_leave_slice_out(&grille, &stacks, &poses, RobustConfig::new(0.9), &device).unwrap().poses;
+            poses = align::register_slices_leave_slice_out(&grille, &stacks, &poses, RobustConfig::new(0.9), &device)
+                .unwrap()
+                .poses;
             let m = mediane(erreurs_de_pose(&stacks, &poses, &vraies));
-            println!("A passe {passe} depuis l'identité : médiane {:.2}, p90 {:.2} ({} coupes)", m.0, m.1, m.2);
+            println!(
+                "A passe {passe} depuis l'identité : médiane {:.2}, p90 {:.2} ({} coupes)",
+                m.0, m.1, m.2
+            );
         }
         // B : les AUTRES coupes aux vraies poses (référence idéale), la coupe elle-même à l'identité
         let mut hybride = vraies.clone();
         for (si, stack) in stacks.iter().enumerate() {
-            for c in stack.slices() { hybride.set(si, c.index(), Matrix4::identity()); }
+            for c in stack.slices() {
+                hybride.set(si, c.index(), Matrix4::identity());
+            }
         }
         // on recale chaque coupe contre la référence sans elle, calculée avec les vraies poses pour toutes les autres : on utilise les vraies poses partout et on part de l'identité
         let rapport = {
@@ -5124,18 +8826,40 @@ mod tests {
                 let masque = stack.brain_mask().unwrap().voxels();
                 for coupe in stack.slices() {
                     let k = coupe.index();
-                    let (nk, dk) = align::contribution_de_la_coupe(&geometrie, &coupe.with_motion(*vraies.get(si, k)), masque.index_axis(Axis(2), k));
-                    let reference = Volume::new(align::reference_sans_la_coupe(&num, &den, &nk, &dk), grille.affine).unwrap();
-                    let un = align::register_slices(std::slice::from_ref(stack), &identite.select(&[si]), &VolumeTensors::new(&reference, &device), RobustConfig::new(0.9), &device).unwrap();
+                    let (nk, dk) = align::contribution_de_la_coupe(
+                        &geometrie,
+                        &coupe.with_motion(*vraies.get(si, k)),
+                        masque.index_axis(Axis(2), k),
+                    );
+                    let reference =
+                        Volume::new(align::reference_sans_la_coupe(&num, &den, &nk, &dk), grille.affine).unwrap();
+                    let un = align::register_slices(
+                        std::slice::from_ref(stack),
+                        &identite.select(&[si]),
+                        &VolumeTensors::new(&reference, &device),
+                        RobustConfig::new(0.9),
+                        &device,
+                    )
+                    .unwrap();
                     nouvelles.set(si, k, *un.poses.get(0, k));
                 }
             }
             nouvelles
         };
         let m = mediane(erreurs_de_pose(&stacks, &rapport, &vraies));
-        println!("B autres coupes aux vraies poses, départ identité : médiane {:.2}, p90 {:.2}", m.0, m.1);
+        println!(
+            "B autres coupes aux vraies poses, départ identité : médiane {:.2}, p90 {:.2}",
+            m.0, m.1
+        );
         // C : référence = volume exact (rappel)
-        let exact = align::register_slices(&stacks, &identite, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let exact = align::register_slices(
+            &stacks,
+            &identite,
+            &VolumeTensors::new(&volume, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
         let m = mediane(erreurs_de_pose(&stacks, &exact.poses, &vraies));
         println!("C volume exact : médiane {:.2}, p90 {:.2}", m.0, m.1);
         let m = mediane(erreurs_de_pose(&stacks, &identite, &vraies));
@@ -5153,13 +8877,26 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let reference = VolumeTensors::new(&volume, &device);
         let config = RobustConfig::new(0.9);
-        let premier = align::register_slices(&stacks, &SlicePoses::identity(&stacks), &reference, config, &device).unwrap();
+        let premier =
+            align::register_slices(&stacks, &SlicePoses::identity(&stacks), &reference, config, &device).unwrap();
         let second = align::register_slices(&stacks, &premier.poses, &reference, config, &device).unwrap();
-        let (e1, e2) = (erreurs_de_pose(&stacks, &premier.poses, &vraies), erreurs_de_pose(&stacks, &second.poses, &vraies));
+        let (e1, e2) = (
+            erreurs_de_pose(&stacks, &premier.poses, &vraies),
+            erreurs_de_pose(&stacks, &second.poses, &vraies),
+        );
         let petits: Vec<f64> = second.slices.iter().map(|r| r.correction_rms_mm).collect();
-        println!("corrections du second passage {:?}", petits.iter().map(|e| (e * 1000.0).round() / 1000.0).collect::<Vec<_>>());
-        assert!(petits.iter().all(|&c| c < 0.3), "le second passage doit changer peu les poses : {petits:?}");
-        assert!(e1.iter().zip(&e2).all(|(a, b)| *b <= a + 0.1), "le second passage ne doit pas dégrader : {e1:?} → {e2:?}");
+        println!(
+            "corrections du second passage {:?}",
+            petits.iter().map(|e| (e * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+        );
+        assert!(
+            petits.iter().all(|&c| c < 0.3),
+            "le second passage doit changer peu les poses : {petits:?}"
+        );
+        assert!(
+            e1.iter().zip(&e2).all(|(a, b)| *b <= a + 0.1),
+            "le second passage ne doit pas dégrader : {e1:?} → {e2:?}"
+        );
         // depuis des poses vraies perturbées (±1°, ±1 mm autour du centre de chaque coupe) : la nouvelle pose est D · M, plus proche de la vérité
         let perturbees = {
             let mut p = poses_aleatoires(&stacks, 1.0, 1.0, 5);
@@ -5174,12 +8911,19 @@ mod tests {
         let depart = erreurs_de_pose(&stacks, &perturbees, &vraies);
         let rapport = align::register_slices(&stacks, &perturbees, &reference, config, &device).unwrap();
         let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
-        println!("depuis des vraies poses perturbées : {:?} → {:?}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>());
+        println!(
+            "depuis des vraies poses perturbées : {:?} → {:?}",
+            depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(),
+            apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>()
+        );
         // Plancher du modèle : la coupe simulée (avec PSF) ne vaut jamais exactement un échantillonnage ponctuel du volume, d'où quelques dixièmes de mm
         // d'erreur résiduelle ici. Une coupe déjà à ce niveau (0,52 mm au départ) ne peut pas s'améliorer : on exige donc une amélioration stricte
         // pour celles qui partent de plus de 1 mm, et pour toutes une erreur finale ≤ 0,7 mm.
         assert!(apres.iter().all(|a| *a <= 0.7), "{depart:?} → {apres:?}");
-        assert!(apres.iter().zip(&depart).all(|(a, d)| *d <= 1.0 || a < d), "{depart:?} → {apres:?}");
+        assert!(
+            apres.iter().zip(&depart).all(|(a, d)| *d <= 1.0 || a < d),
+            "{depart:?} → {apres:?}"
+        );
     }
 
     /// Une coupe de masque trop petit n'est pas recalée : elle garde exactement sa pose et le rapport la signale ; les autres sont recalées.
@@ -5198,21 +8942,48 @@ mod tests {
             }
         }
         let sp = stacks[0].spacing();
-        let modifie = stack_avec_masque(&t, "petit", stacks[0].data(), &masque, stacks[0].affine(), [sp[0] as f32, sp[1] as f32, sp[2] as f32]);
+        let modifie = stack_avec_masque(
+            &t,
+            "petit",
+            stacks[0].data(),
+            &masque,
+            stacks[0].affine(),
+            [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+        );
         let stacks2 = vec![modifie, Stack::read(stacks[1].path()).unwrap()];
         let mut stacks2 = stacks2;
         let m1 = t.fichier("blobs1_mask.nii.gz");
         stacks2[1].set_brain_mask(&m1).unwrap();
         let depart = poses_aleatoires(&stacks2, 1.0, 1.0, 3);
         let device = burn::tensor::Device::flex().autodiff();
-        let rapport = align::register_slices(&stacks2, &depart, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
-        let ignorees: Vec<(usize, usize)> = rapport.slices.iter().filter(|r| !r.registered).map(|r| (r.stack, r.slice)).collect();
+        let rapport = align::register_slices(
+            &stacks2,
+            &depart,
+            &VolumeTensors::new(&volume, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
+        let ignorees: Vec<(usize, usize)> = rapport
+            .slices
+            .iter()
+            .filter(|r| !r.registered)
+            .map(|r| (r.stack, r.slice))
+            .collect();
         println!("coupes non recalées : {ignorees:?}");
         assert_eq!(ignorees, vec![(0, 1)]);
-        assert_eq!(rapport.poses.get(0, 1), depart.get(0, 1), "la pose d'une coupe non recalée est inchangée");
+        assert_eq!(
+            rapport.poses.get(0, 1),
+            depart.get(0, 1),
+            "la pose d'une coupe non recalée est inchangée"
+        );
         let r = rapport.slices.iter().find(|r| r.stack == 0 && r.slice == 1).unwrap();
         assert_eq!((r.runs, r.correction_rms_mm), (0, 0.0));
-        assert_ne!(rapport.poses.get(0, 0), depart.get(0, 0), "une coupe recalée change de pose");
+        assert_ne!(
+            rapport.poses.get(0, 0),
+            depart.get(0, 0),
+            "une coupe recalée change de pose"
+        );
     }
 
     #[test]
@@ -5223,9 +8994,21 @@ mod tests {
         let device = burn::tensor::Device::flex().autodiff();
         let reference = VolumeTensors::new(&volume, &device);
         let mauvaises = SlicePoses::identity(&stacks[..1]);
-        assert!(matches!(align::register_slices(&stacks, &mauvaises, &reference, RobustConfig::new(0.9), &device), Err(SvrError::PoseMismatch)));
+        assert!(matches!(
+            align::register_slices(&stacks, &mauvaises, &reference, RobustConfig::new(0.9), &device),
+            Err(SvrError::PoseMismatch)
+        ));
         let sans_masque = vec![Stack::read(stacks[0].path()).unwrap()];
-        assert!(matches!(align::register_slices(&sans_masque, &SlicePoses::identity(&sans_masque), &reference, RobustConfig::new(0.9), &device), Err(SvrError::NoMask(_))));
+        assert!(matches!(
+            align::register_slices(
+                &sans_masque,
+                &SlicePoses::identity(&sans_masque),
+                &reference,
+                RobustConfig::new(0.9),
+                &device
+            ),
+            Err(SvrError::NoMask(_))
+        ));
     }
     /// L'ordre de composition compte quand la pose courante est **grande** : (`D · M` et `M · D` diffèrent d'un commutateur, négligeable pour de petits
     /// mouvements ; il est borné par `2 sin(θ/2) · |t|`, soit ≈ 1,7 mm pour θ = 20° et |t| ≈ 5 mm). Pose courante `M₀` (±20°, ±3 mm par coupe), vraie pose `D_vrai · M₀` avec un delta (±3°, ±5 mm) :
@@ -5245,13 +9028,34 @@ mod tests {
         }
         let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
         let device = burn::tensor::Device::flex().autodiff();
-        let rapport = align::register_slices(&stacks, &m0, &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
-        let (depart, apres) = (erreurs_de_pose(&stacks, &m0, &vraies), erreurs_de_pose(&stacks, &rapport.poses, &vraies));
-        println!("pose courante grande : erreur {:?} → {:?} ; coupes non recalées : {}", depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(), rapport.slices.iter().filter(|r| !r.registered).count());
-        assert!(rapport.slices.iter().all(|r| r.registered), "toutes les coupes doivent avoir assez de masque");
+        let rapport = align::register_slices(
+            &stacks,
+            &m0,
+            &VolumeTensors::new(&volume, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
+        let (depart, apres) = (
+            erreurs_de_pose(&stacks, &m0, &vraies),
+            erreurs_de_pose(&stacks, &rapport.poses, &vraies),
+        );
+        println!(
+            "pose courante grande : erreur {:?} → {:?} ; coupes non recalées : {}",
+            depart.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(),
+            apres.iter().map(|e| (e * 100.0).round() / 100.0).collect::<Vec<_>>(),
+            rapport.slices.iter().filter(|r| !r.registered).count()
+        );
+        assert!(
+            rapport.slices.iter().all(|r| r.registered),
+            "toutes les coupes doivent avoir assez de masque"
+        );
         // l'erreur de départ (contre la vérité) est celle du petit delta ; ce qui est grand, c'est la pose courante M₀ elle-même
         let sans_correction = erreurs_de_pose(&stacks, &SlicePoses::identity(&stacks), &vraies);
-        assert!(sans_correction.iter().all(|e| *e > 3.0), "la pose courante doit être grande : {sans_correction:?}");
+        assert!(
+            sans_correction.iter().all(|e| *e > 3.0),
+            "la pose courante doit être grande : {sans_correction:?}"
+        );
         assert!(apres.iter().all(|a| *a <= 1.2), "{depart:?} → {apres:?}");
     }
     /// ÉVALUATION de `register_slices` (sous-étape 3) sur STA31 avec un mouvement propre à chaque coupe, **l'atlas lui-même comme référence** (cas
@@ -5268,37 +9072,71 @@ mod tests {
             let identite = SlicePoses::identity(&stacks);
             let depart = erreurs_de_pose(&stacks, &identite, &vraies);
             let debut = std::time::Instant::now();
-            let premier = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
+            let premier =
+                align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
             let duree = debut.elapsed().as_secs_f64();
             let apres = erreurs_de_pose(&stacks, &premier.poses, &vraies);
-            let second = align::register_slices(&stacks, &premier.poses, &reference, RobustConfig::new(0.9), &device).unwrap();
+            let second =
+                align::register_slices(&stacks, &premier.poses, &reference, RobustConfig::new(0.9), &device).unwrap();
             let apres2 = erreurs_de_pose(&stacks, &second.poses, &vraies);
             let stat = |v: &[f64]| {
                 let mut x: Vec<f64> = v.iter().copied().filter(|e| e.is_finite()).collect();
                 x.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let part = |seuil: f64| 100.0 * x.iter().filter(|&&e| e <= seuil).count() as f64 / x.len() as f64;
-                (x[x.len() / 2], x[(x.len() as f64 * 0.9) as usize], x[x.len() - 1], part(0.5), part(1.0))
+                (
+                    x[x.len() / 2],
+                    x[(x.len() as f64 * 0.9) as usize],
+                    x[x.len() - 1],
+                    part(0.5),
+                    part(1.0),
+                )
             };
             // statistiques séparées : coupes recalées / coupes ignorées (masque trop petit, pose inchangée)
-            let choisir = |v: &[f64], recalee: bool| -> Vec<f64> { v.iter().zip(&premier.slices).filter(|(_, r)| r.registered == recalee).map(|(e, _)| *e).collect() };
-            let (d, a, a2) = (stat(&choisir(&depart, true)), stat(&choisir(&apres, true)), stat(&choisir(&apres2, true)));
+            let choisir = |v: &[f64], recalee: bool| -> Vec<f64> {
+                v.iter()
+                    .zip(&premier.slices)
+                    .filter(|(_, r)| r.registered == recalee)
+                    .map(|(e, _)| *e)
+                    .collect()
+            };
+            let (d, a, a2) = (
+                stat(&choisir(&depart, true)),
+                stat(&choisir(&apres, true)),
+                stat(&choisir(&apres2, true)),
+            );
             let ignorees_apres: Vec<f64> = choisir(&apres, false).into_iter().filter(|e| e.is_finite()).collect();
             let ignorees = premier.slices.iter().filter(|r| !r.registered).count();
             let relancees = premier.slices.iter().filter(|r| r.runs > 1).count();
-            let moyenne_second = second.slices.iter().filter(|r| r.registered).map(|r| r.correction_rms_mm).sum::<f64>() / second.slices.iter().filter(|r| r.registered).count() as f64;
+            let moyenne_second = second
+                .slices
+                .iter()
+                .filter(|r| r.registered)
+                .map(|r| r.correction_rms_mm)
+                .sum::<f64>()
+                / second.slices.iter().filter(|r| r.registered).count() as f64;
             println!("--- mouvement ±{amplitude}°/±{amplitude} mm : {} coupes, dont {ignorees} non recalées (masque < {} pixels) ; {relancees} relancées ; {duree:.0} s", premier.slices.len(), align::MIN_MASK_PIXELS);
             println!("  coupes RECALÉES ({}) :", premier.slices.len() - ignorees);
-            println!("  départ      : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", d.0, d.1, d.2, d.3, d.4);
-            println!("  1ᵉʳ passage : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", a.0, a.1, a.2, a.3, a.4);
+            println!(
+                "  départ      : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %",
+                d.0, d.1, d.2, d.3, d.4
+            );
+            println!(
+                "  1ᵉʳ passage : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %",
+                a.0, a.1, a.2, a.3, a.4
+            );
             println!("  2ᵉ passage  : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} % ; correction moyenne du 2ᵉ passage {moyenne_second:.3} mm", a2.0, a2.1, a2.2, a2.3, a2.4);
             if !ignorees_apres.is_empty() {
                 let mut x = ignorees_apres.clone();
                 x.sort_by(|p, q| p.partial_cmp(q).unwrap());
-                println!("  coupes IGNORÉES ({}), pose inchangée : erreur médiane {:.2} mm, max {:.2} mm", x.len(), x[x.len() / 2], x[x.len() - 1]);
+                println!(
+                    "  coupes IGNORÉES ({}), pose inchangée : erreur médiane {:.2} mm, max {:.2} mm",
+                    x.len(),
+                    x[x.len() / 2],
+                    x[x.len() - 1]
+                );
             }
         }
     }
-
 
     type Paire = (Vector3<f64>, Vector3<f64>);
 
@@ -5335,7 +9173,9 @@ mod tests {
         let n = paires.len() as f64;
         let ce = paires.iter().map(|p| p.0).sum::<Vector3<f64>>() / n;
         let ct = paires.iter().map(|p| p.1).sum::<Vector3<f64>>() / n;
-        let h = paires.iter().fold(nalgebra::Matrix3::zeros(), |acc, p| acc + (p.0 - ce) * (p.1 - ct).transpose());
+        let h = paires.iter().fold(nalgebra::Matrix3::zeros(), |acc, p| {
+            acc + (p.0 - ce) * (p.1 - ct).transpose()
+        });
         let svd = h.svd(true, true);
         let (u, vt) = (svd.u.unwrap(), svd.v_t.unwrap());
         let d = (vt.transpose() * u.transpose()).determinant().signum();
@@ -5350,15 +9190,40 @@ mod tests {
     /// meilleur mouvement rigide commun** (Kabsch) entre positions estimées et vraies : un seul pour tous les stacks (`par_stack = false`) ou un
     /// par stack. Sépare un décalage global (le repère de la reconstruction est ancré par les données, pas par la vérité) de l'erreur propre à
     /// chaque coupe. Un pixel de masque sur 5 est utilisé.
-    fn erreurs_apres_mouvement_commun(stacks: &[Stack], estimees: &SlicePoses, vraies: &SlicePoses, par_stack: bool) -> Vec<f64> {
+    fn erreurs_apres_mouvement_commun(
+        stacks: &[Stack],
+        estimees: &SlicePoses,
+        vraies: &SlicePoses,
+        par_stack: bool,
+    ) -> Vec<f64> {
         let coupes = paires_par_coupe(stacks, estimees, vraies);
         let groupes: Vec<Matrix4<f64>> = if par_stack {
-            (0..stacks.len()).map(|si| kabsch(&coupes.iter().filter(|c| c.0 == si).flat_map(|c| c.1.iter()).collect::<Vec<_>>())).collect()
+            (0..stacks.len())
+                .map(|si| {
+                    kabsch(
+                        &coupes
+                            .iter()
+                            .filter(|c| c.0 == si)
+                            .flat_map(|c| c.1.iter())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect()
         } else {
             let g = kabsch(&coupes.iter().flat_map(|c| c.1.iter()).collect::<Vec<_>>());
             vec![g; stacks.len()]
         };
-        coupes.iter().map(|(si, paires)| (paires.iter().map(|(e, v)| ((groupes[*si] * e.push(1.0)).xyz() - v).norm_squared()).sum::<f64>() / paires.len() as f64).sqrt()).collect()
+        coupes
+            .iter()
+            .map(|(si, paires)| {
+                (paires
+                    .iter()
+                    .map(|(e, v)| ((groupes[*si] * e.push(1.0)).xyz() - v).norm_squared())
+                    .sum::<f64>()
+                    / paires.len() as f64)
+                    .sqrt()
+            })
+            .collect()
     }
 
     /// **Désalignement entre stacks** (mm) : pour chaque stack, déplacement quadratique moyen, sur ses pixels de masque, entre son meilleur mouvement rigide propre et le meilleur
@@ -5371,7 +9236,12 @@ mod tests {
             .map(|si| {
                 let paires: Vec<&Paire> = coupes.iter().filter(|c| c.0 == si).flat_map(|c| c.1.iter()).collect();
                 let propre = kabsch(&paires);
-                (paires.iter().map(|(e, _)| ((propre * e.push(1.0)).xyz() - (commun * e.push(1.0)).xyz()).norm_squared()).sum::<f64>() / paires.len() as f64).sqrt()
+                (paires
+                    .iter()
+                    .map(|(e, _)| ((propre * e.push(1.0)).xyz() - (commun * e.push(1.0)).xyz()).norm_squared())
+                    .sum::<f64>()
+                    / paires.len() as f64)
+                    .sqrt()
             })
             .collect()
     }
@@ -5392,22 +9262,39 @@ mod tests {
             }
             p
         };
-        let g1 = mouvement_rigide(&Vector3::new(0.03, -0.02, 0.04), &Vector3::new(1.5, -2.0, 0.7), &Vector3::new(3.0, -1.0, 2.0));
-        let g2 = mouvement_rigide(&Vector3::new(-0.04, 0.02, 0.01), &Vector3::new(-1.0, 0.5, 2.5), &Vector3::new(3.0, -1.0, 2.0));
+        let g1 = mouvement_rigide(
+            &Vector3::new(0.03, -0.02, 0.04),
+            &Vector3::new(1.5, -2.0, 0.7),
+            &Vector3::new(3.0, -1.0, 2.0),
+        );
+        let g2 = mouvement_rigide(
+            &Vector3::new(-0.04, 0.02, 0.01),
+            &Vector3::new(-1.0, 0.5, 2.5),
+            &Vector3::new(3.0, -1.0, 2.0),
+        );
         let max = |v: Vec<f64>| v.into_iter().fold(0.0_f64, f64::max);
         let commun = compose(&[g1, g1]);
-        let (brute, global, par_stack) = (max(erreurs_de_pose(&stacks, &commun, &vraies)), max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, false)), max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, true)));
+        let (brute, global, par_stack) = (
+            max(erreurs_de_pose(&stacks, &commun, &vraies)),
+            max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, false)),
+            max(erreurs_apres_mouvement_commun(&stacks, &commun, &vraies, true)),
+        );
         println!("commun : brute {brute:.3}, global {global:.2e}, par stack {par_stack:.2e}");
         assert!(brute > 1.0 && global < 1e-9 && par_stack < 1e-9);
         let different = compose(&[g1, g2]);
-        let (global, par_stack) = (max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, false)), max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, true)));
+        let (global, par_stack) = (
+            max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, false)),
+            max(erreurs_apres_mouvement_commun(&stacks, &different, &vraies, true)),
+        );
         println!("différent par stack : global {global:.3}, par stack {par_stack:.2e}");
         assert!(global > 0.1 && par_stack < 1e-9);
         assert!(max(erreurs_apres_mouvement_commun(&stacks, &vraies, &vraies, false)) < 1e-9);
         // le résultat compte une valeur par coupe recalable (ici les 6 coupes, 784 pixels chacune)
-        assert_eq!(erreurs_apres_mouvement_commun(&stacks, &vraies, &vraies, false).len(), 6);
+        assert_eq!(
+            erreurs_apres_mouvement_commun(&stacks, &vraies, &vraies, false).len(),
+            6
+        );
     }
-
 
     // ------------------------------------------------------------------ jeux simulés par pyrecon (benchmark)
 
@@ -5419,13 +9306,25 @@ mod tests {
 
     /// Comme [`stacks_pyrecon`], pour un modèle de mouvement : `""` (indépendant par coupe), `"lisse"` ou `"lisseint"` (voir `scripts/make_pyrecon_benchmark.py`).
     fn stacks_pyrecon_modele(modele: &str, amplitude: u32) -> (Volume, Vec<Stack>, SlicePoses) {
-        let atlas = Volume::from_stack(&Stack::read(Path::new(&format!("{}/data/atlas/gholipour/STA31.nii.gz", racine()))).expect("atlas absent"));
-        let infixe = if modele.is_empty() { String::new() } else { format!("_{modele}") };
-        let dossier = PathBuf::from(format!("{}/data/atlas/sim_pyrecon/STA31{infixe}_mvt{amplitude}_b5", racine()));
+        let atlas = Volume::from_stack(
+            &Stack::read(Path::new(&format!("{}/data/atlas/gholipour/STA31.nii.gz", racine()))).expect("atlas absent"),
+        );
+        let infixe = if modele.is_empty() {
+            String::new()
+        } else {
+            format!("_{modele}")
+        };
+        let dossier = PathBuf::from(format!(
+            "{}/data/atlas/sim_pyrecon/STA31{infixe}_mvt{amplitude}_b5",
+            racine()
+        ));
         let stacks: Vec<Stack> = (0..3)
             .map(|n| {
-                let mut stack = Stack::read(&dossier.join(format!("stack{n}.nii.gz"))).expect("jeu absent : lancer scripts/make_pyrecon_benchmark.py");
-                stack.set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz"))).unwrap();
+                let mut stack = Stack::read(&dossier.join(format!("stack{n}.nii.gz")))
+                    .expect("jeu absent : lancer scripts/make_pyrecon_benchmark.py");
+                stack
+                    .set_brain_mask(&dossier.join(format!("stack{n}_mask.nii.gz")))
+                    .unwrap();
                 stack
             })
             .collect();
@@ -5433,7 +9332,11 @@ mod tests {
         for ligne in std::fs::read_to_string(dossier.join("poses.tsv")).unwrap().lines() {
             let c: Vec<&str> = ligne.split('\t').collect();
             let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
-            vraies.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+            vraies.set(
+                c[0].parse().unwrap(),
+                c[1].parse().unwrap(),
+                Matrix4::from_iterator(valeurs.iter().copied()),
+            );
         }
         (atlas, stacks, vraies)
     }
@@ -5476,13 +9379,25 @@ mod tests {
                     meilleures += usize::from(c_vraie > c_identite);
                 }
             }
-            let mediane = |v: &Vec<f64>| { let mut x = v.clone(); x.sort_by(|a, b| a.partial_cmp(b).unwrap()); x[x.len() / 2] };
+            let mediane = |v: &Vec<f64>| {
+                let mut x = v.clone();
+                x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                x[x.len() / 2]
+            };
             println!("±{amplitude} : {n} coupes ; NCC médiane avec M_k {:.4}, avec l'identité {:.4} ; M_k meilleure pour {:.0} % des coupes", mediane(&avec), mediane(&sans), 100.0 * meilleures as f64 / n as f64);
             assert!(mediane(&avec) >= 0.95, "NCC médiane avec M_k : {}", mediane(&avec));
             if amplitude == 0 {
-                assert!(stacks.iter().enumerate().all(|(si, s)| s.slices().all(|c| (vraies.get(si, c.index()) - Matrix4::identity()).abs().max() < 1e-12)));
+                assert!(stacks
+                    .iter()
+                    .enumerate()
+                    .all(|(si, s)| s
+                        .slices()
+                        .all(|c| (vraies.get(si, c.index()) - Matrix4::identity()).abs().max() < 1e-12)));
             } else {
-                assert!(meilleures as f64 >= 0.95 * n as f64, "M_k meilleure que l'identité pour {meilleures}/{n} coupes");
+                assert!(
+                    meilleures as f64 >= 0.95 * n as f64,
+                    "M_k meilleure que l'identité pour {meilleures}/{n} coupes"
+                );
             }
         }
     }
@@ -5498,12 +9413,26 @@ mod tests {
             let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
             let init = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
             let c = construire_comparaison(&grille, &init.support, &atlas, &stacks);
-            println!("--- pyrecon, mouvement ±{amplitude} : grille {:?}, {} voxels de comparaison", grille.dims, c.voxels.len());
-            for (nom, poses) in [("vraies poses (borne haute)", vraies.clone()), ("sans correction (borne basse)", SlicePoses::identity(&stacks))] {
+            println!(
+                "--- pyrecon, mouvement ±{amplitude} : grille {:?}, {} voxels de comparaison",
+                grille.dims,
+                c.voxels.len()
+            );
+            for (nom, poses) in [
+                ("vraies poses (borne haute)", vraies.clone()),
+                ("sans correction (borne basse)", SlicePoses::identity(&stacks)),
+            ] {
                 let p = ReconstructionProblem::with_poses(&grille, &stacks, &poses, ALPHA_CHOISI).unwrap();
                 let debut = std::time::Instant::now();
                 let r = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4);
-                ligne_qualite(nom, &c, &r.x, r.iterations, *r.residual_history.last().unwrap(), debut.elapsed().as_secs_f64());
+                ligne_qualite(
+                    nom,
+                    &c,
+                    &r.x,
+                    r.iterations,
+                    *r.residual_history.last().unwrap(),
+                    debut.elapsed().as_secs_f64(),
+                );
             }
         }
     }
@@ -5522,7 +9451,14 @@ mod tests {
             for v in &c.voxels {
                 ensemble[*v] = 1.0;
             }
-            ecrire_image_grille(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt{amplitude}/comparison_set.nii.gz", racine())), &ensemble, &grille);
+            ecrire_image_grille(
+                &PathBuf::from(format!(
+                    "{}/data/atlas/results/pyrecon_mvt{amplitude}/comparison_set.nii.gz",
+                    racine()
+                )),
+                &ensemble,
+                &grille,
+            );
             println!("±{amplitude} : {} voxels exportés", c.voxels.len());
         }
     }
@@ -5539,7 +9475,14 @@ mod tests {
         let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
         let q = qualite(&c, &x);
         println!("sans mouvement : NCC {:.4}, PSNR {:.2} dB", q.0, q.1);
-        ecrire_image_grille(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt0/ours_true_poses.nii.gz", racine())), &x, &grille);
+        ecrire_image_grille(
+            &PathBuf::from(format!(
+                "{}/data/atlas/results/pyrecon_mvt0/ours_true_poses.nii.gz",
+                racine()
+            )),
+            &x,
+            &grille,
+        );
     }
 
     /// DIAGNOSTIC de la capture du recalage sur les jeux pyrecon (variables MEDOXIDE_MODELE et MEDOXIDE_AMPLITUDES) : on recale toutes les coupes depuis les poses
@@ -5551,13 +9494,27 @@ mod tests {
     #[ignore = "données locales"]
     fn diagnose_the_registration_capture_on_pyrecon_data() {
         let device = burn::tensor::Device::flex().autodiff();
-        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "2".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES")
+            .unwrap_or_else(|_| "2".into())
+            .split(',')
+            .map(|a| a.trim().parse().unwrap())
+            .collect();
         let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
-        let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.clone(), format!("pyrecon_{modele}")) };
+        let (infixe, slug) = if modele == "independant" {
+            (String::new(), "pyrecon".to_string())
+        } else {
+            (modele.clone(), format!("pyrecon_{modele}"))
+        };
         for amplitude in amplitudes {
             let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
             let dossier = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
-            let reference = VolumeTensors::new(&Volume::from_stack(&Stack::read(&dossier.join("ours_true_poses.nii.gz")).expect("exporter d'abord (evaluer_la_boucle)")), &device);
+            let reference = VolumeTensors::new(
+                &Volume::from_stack(
+                    &Stack::read(&dossier.join("ours_true_poses.nii.gz"))
+                        .expect("exporter d'abord (evaluer_la_boucle)"),
+                ),
+                &device,
+            );
             let identite = SlicePoses::identity(&stacks);
             let depart = erreurs_de_pose(&stacks, &identite, &vraies);
             println!("--- {modele} ±{amplitude} : recalage depuis les poses d'en-tête contre la reconstruction aux vraies poses");
@@ -5565,20 +9522,35 @@ mod tests {
             // Partir des VRAIES poses : si la NCC obtenue est plus haute que celle trouvée depuis l'en-tête et que la pose reste proche de la vérité, l'optimiseur échoue à
             // trouver un optimum qui existe ; si la pose s'éloigne de la vérité avec une NCC plus haute, c'est la fonction de coût qui préfère une mauvaise pose.
             {
-                let depuis_en_tete = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
+                let depuis_en_tete =
+                    align::register_slices(&stacks, &identite, &reference, RobustConfig::new(0.9), &device).unwrap();
                 let apres_en_tete = erreurs_de_pose(&stacks, &depuis_en_tete.poses, &vraies);
-                let depuis_verite = align::register_slices(&stacks, &vraies, &reference, RobustConfig::new(0.9), &device).unwrap();
+                let depuis_verite =
+                    align::register_slices(&stacks, &vraies, &reference, RobustConfig::new(0.9), &device).unwrap();
                 let apres_verite = erreurs_de_pose(&stacks, &depuis_verite.poses, &vraies);
                 println!("  coupes en échec (> 3 mm depuis l'en-tête) : NCC finale depuis l'en-tête / depuis la vérité, erreur finale depuis l'en-tête / depuis la vérité");
-                for (((a, v), e1), e2) in depuis_en_tete.slices.iter().zip(&depuis_verite.slices).zip(&apres_en_tete).zip(&apres_verite) {
+                for (((a, v), e1), e2) in depuis_en_tete
+                    .slices
+                    .iter()
+                    .zip(&depuis_verite.slices)
+                    .zip(&apres_en_tete)
+                    .zip(&apres_verite)
+                {
                     if a.registered && *e1 > 3.0 {
-                        println!("    stack {} coupe {:2} : NCC {:.3} / {:.3} ; erreur {:.2} mm / {:.2} mm", a.stack, a.slice, a.ncc_final, v.ncc_final, e1, e2);
+                        println!(
+                            "    stack {} coupe {:2} : NCC {:.3} / {:.3} ; erreur {:.2} mm / {:.2} mm",
+                            a.stack, a.slice, a.ncc_final, v.ncc_final, e1, e2
+                        );
                     }
                 }
             }
             for (tau, departs, amplitude_mm) in [(0.9, 6usize, 5.0)] {
                 let debut = std::time::Instant::now();
-                let config = RobustConfig { extra_starts: departs, start_amplitude_mm: amplitude_mm, ..RobustConfig::new(tau) };
+                let config = RobustConfig {
+                    extra_starts: departs,
+                    start_amplitude_mm: amplitude_mm,
+                    ..RobustConfig::new(tau)
+                };
                 let rapport = align::register_slices(&stacks, &identite, &reference, config, &device).unwrap();
                 let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
                 let mut lignes = vec!["stack\tcoupe\tpixels_masque\terreur_depart_mm\terreur_finale_mm\tncc_premiere\tncc_finale\trelances".to_string()];
@@ -5587,11 +9559,25 @@ mod tests {
                     if !r.registered {
                         continue;
                     }
-                    let pixels = stacks[r.stack].brain_mask().unwrap().voxels().index_axis(Axis(2), r.slice).iter().filter(|&&v| v).count();
-                    lignes.push(format!("{}\t{}\t{pixels}\t{d:.3}\t{a:.3}\t{:.4}\t{:.4}\t{}", r.stack, r.slice, r.ncc_first, r.ncc_final, r.runs));
+                    let pixels = stacks[r.stack]
+                        .brain_mask()
+                        .unwrap()
+                        .voxels()
+                        .index_axis(Axis(2), r.slice)
+                        .iter()
+                        .filter(|&&v| v)
+                        .count();
+                    lignes.push(format!(
+                        "{}\t{}\t{pixels}\t{d:.3}\t{a:.3}\t{:.4}\t{:.4}\t{}",
+                        r.stack, r.slice, r.ncc_first, r.ncc_final, r.runs
+                    ));
                     finales.push(*a);
                 }
-                std::fs::write(dossier.join(format!("capture_{tau}_{departs}_{amplitude_mm}.tsv")), lignes.join("\n")).unwrap();
+                std::fs::write(
+                    dossier.join(format!("capture_{tau}_{departs}_{amplitude_mm}.tsv")),
+                    lignes.join("\n"),
+                )
+                .unwrap();
                 finales.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let part = |s: f64| 100.0 * finales.iter().filter(|&&v| v <= s).count() as f64 / finales.len() as f64;
                 println!(
@@ -5609,7 +9595,9 @@ mod tests {
             return image.clone();
         }
         let rayon = (3.0 * sigma).ceil() as isize;
-        let noyau: Vec<f64> = (-rayon..=rayon).map(|i| (-0.5 * (i as f64 / sigma).powi(2)).exp()).collect();
+        let noyau: Vec<f64> = (-rayon..=rayon)
+            .map(|i| (-0.5 * (i as f64 / sigma).powi(2)).exp())
+            .collect();
         let somme: f64 = noyau.iter().sum();
         let noyau: Vec<f64> = noyau.iter().map(|w| w / somme).collect();
         let mut courant = image.mapv(f64::from);
@@ -5639,10 +9627,23 @@ mod tests {
     #[ignore = "données locales"]
     fn experiment_coarse_to_fine_on_a_perfect_reference() {
         let device = burn::tensor::Device::flex().autodiff();
-        for (modele, amplitude) in [("independant", 2u32), ("independant", 4), ("independant", 6), ("lisse", 6)] {
-            let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.to_string(), format!("pyrecon_{modele}")) };
+        for (modele, amplitude) in [
+            ("independant", 2u32),
+            ("independant", 4),
+            ("independant", 6),
+            ("lisse", 6),
+        ] {
+            let (infixe, slug) = if modele == "independant" {
+                (String::new(), "pyrecon".to_string())
+            } else {
+                (modele.to_string(), format!("pyrecon_{modele}"))
+            };
             let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
-            let source = Stack::read(&PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}/ours_true_poses.nii.gz", racine()))).expect("exporter d'abord");
+            let source = Stack::read(&PathBuf::from(format!(
+                "{}/data/atlas/results/{slug}_mvt{amplitude}/ours_true_poses.nii.gz",
+                racine()
+            )))
+            .expect("exporter d'abord");
             let nette = Volume::from_stack(&source);
             let identite = SlicePoses::identity(&stacks);
             println!("--- {modele} ±{amplitude}");
@@ -5651,13 +9652,29 @@ mod tests {
                 let mut poses = identite.clone();
                 let mut registered = Vec::new();
                 for &sigma in &schema {
-                    let reference = if sigma == 0.0 { Volume::from_stack(&source) } else { Volume::new(flouter(nette.data(), sigma), *source.affine()).unwrap() };
-                    let rapport = align::register_slices(&stacks, &poses, &VolumeTensors::new(&reference, &device), RobustConfig::new(0.9), &device).unwrap();
+                    let reference = if sigma == 0.0 {
+                        Volume::from_stack(&source)
+                    } else {
+                        Volume::new(flouter(nette.data(), sigma), *source.affine()).unwrap()
+                    };
+                    let rapport = align::register_slices(
+                        &stacks,
+                        &poses,
+                        &VolumeTensors::new(&reference, &device),
+                        RobustConfig::new(0.9),
+                        &device,
+                    )
+                    .unwrap();
                     registered = rapport.slices.iter().map(|r| r.registered).collect();
                     poses = rapport.poses;
                 }
                 let erreurs = erreurs_de_pose(&stacks, &poses, &vraies);
-                let mut e: Vec<f64> = erreurs.iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| *e).collect();
+                let mut e: Vec<f64> = erreurs
+                    .iter()
+                    .zip(&registered)
+                    .filter(|(_, r)| **r)
+                    .map(|(e, _)| *e)
+                    .collect();
                 e.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let part = |s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
                 println!(
@@ -5676,14 +9693,25 @@ mod tests {
     #[ignore = "données locales"]
     fn evaluate_stack_alignment_on_pyrecon_data() {
         let device = burn::tensor::Device::flex().autodiff();
-        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "4".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES")
+            .unwrap_or_else(|_| "4".into())
+            .split(',')
+            .map(|a| a.trim().parse().unwrap())
+            .collect();
         let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
-        let infixe = if modele == "independant" { String::new() } else { modele.clone() };
+        let infixe = if modele == "independant" {
+            String::new()
+        } else {
+            modele.clone()
+        };
         for amplitude in amplitudes {
             let (_, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
             let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
             let identite = SlicePoses::identity(&stacks);
-            let mediane = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
+            let mediane = |mut v: Vec<f64>| {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v[v.len() / 2]
+            };
             let arrondi = |v: Vec<f64>| v.iter().map(|d| (d * 100.0).round() / 100.0).collect::<Vec<_>>();
             println!(
                 "--- {modele} ±{amplitude} : départ : erreur sans mvt commun médiane {:.2} mm, un par stack {:.2} mm ; désalignement entre stacks {:?}",
@@ -5692,7 +9720,8 @@ mod tests {
             );
             for sweeps in [0usize, 2] {
                 let debut = std::time::Instant::now();
-                let r = align::register_stacks(&grille, &stacks, &identite, sweeps, RobustConfig::new(0.9), &device).unwrap();
+                let r = align::register_stacks(&grille, &stacks, &identite, sweeps, RobustConfig::new(0.9), &device)
+                    .unwrap();
                 let des = desalignement_entre_stacks(&stacks, &r.poses, &vraies);
                 println!(
                     "  {sweeps} balayage(s) : erreur sans mvt commun médiane {:.2} mm, un par stack {:.2} mm ; désalignement {:?} ; NCC finales {:?} ; relances {:?} ; {:.0} s",
@@ -5709,9 +9738,15 @@ mod tests {
     /// (racine du jeu BIDS local), `MEDOXIDE_SUJET` (identifiant du sujet) ; les masques sont lus dans `derivatives/medx-fetalbet`. Les données sont celles de patientes :
     /// rien n'est copié hors de `data/`, aucun identifiant n'apparaît dans le code.
     fn stacks_reels() -> Vec<Stack> {
-        let racine = PathBuf::from(std::env::var("MEDOXIDE_DONNEES_REELLES").expect("MEDOXIDE_DONNEES_REELLES : racine du jeu BIDS local"));
+        let racine = PathBuf::from(
+            std::env::var("MEDOXIDE_DONNEES_REELLES").expect("MEDOXIDE_DONNEES_REELLES : racine du jeu BIDS local"),
+        );
         let sujet = std::env::var("MEDOXIDE_SUJET").expect("MEDOXIDE_SUJET : identifiant du sujet");
-        let mut sessions: Vec<PathBuf> = std::fs::read_dir(racine.join(&sujet)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("ses-")).collect();
+        let mut sessions: Vec<PathBuf> = std::fs::read_dir(racine.join(&sujet))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("ses-"))
+            .collect();
         sessions.sort();
         let session = sessions.into_iter().next().expect("aucune session");
         // tous les stacks TRUFI de la session : axial, coronal, sagittal du run 1 d'abord (indices 0, 1, 2), puis les stacks supplémentaires (autres runs) par ordre de run et de plan
@@ -5720,17 +9755,35 @@ mod tests {
         let mut noms: Vec<(usize, usize, String)> = Vec::new();
         for entree in std::fs::read_dir(&dossier).unwrap() {
             let fichier = entree.unwrap().file_name().to_string_lossy().into_owned();
-            let Some(reste) = fichier.strip_prefix(&prefixe).and_then(|r| r.strip_suffix("_T2w.nii.gz")) else { continue };
-            let Some((plan, run)) = reste.split_once("_run-") else { continue };
-            let Some(rang_plan) = ["trufiax", "truficor", "trufisag"].iter().position(|p| *p == plan) else { continue };
+            let Some(reste) = fichier
+                .strip_prefix(&prefixe)
+                .and_then(|r| r.strip_suffix("_T2w.nii.gz"))
+            else {
+                continue;
+            };
+            let Some((plan, run)) = reste.split_once("_run-") else {
+                continue;
+            };
+            let Some(rang_plan) = ["trufiax", "truficor", "trufisag"].iter().position(|p| *p == plan) else {
+                continue;
+            };
             let run: usize = run.parse().unwrap();
-            noms.push((usize::from(run != 1), run * 10 + rang_plan, format!("{prefixe}{plan}_run-{run}")));
+            noms.push((
+                usize::from(run != 1),
+                run * 10 + rang_plan,
+                format!("{prefixe}{plan}_run-{run}"),
+            ));
         }
         noms.sort();
         noms.into_iter()
             .map(|(_, _, nom)| {
                 let mut stack = Stack::read(&dossier.join(format!("{nom}_T2w.nii.gz"))).expect("stack absent");
-                let masque = racine.join("derivatives/medx-fetalbet").join(&sujet).join(session.file_name().unwrap()).join("anat").join(format!("{nom}_desc-brain_mask.nii.gz"));
+                let masque = racine
+                    .join("derivatives/medx-fetalbet")
+                    .join(&sujet)
+                    .join(session.file_name().unwrap())
+                    .join("anat")
+                    .join(format!("{nom}_desc-brain_mask.nii.gz"));
                 stack.set_brain_mask(&masque).expect("masque absent");
                 stack
             })
@@ -5739,7 +9792,11 @@ mod tests {
 
     /// Dossier de sortie local des résultats sur données réelles (`data/svr/results/<sujet>/`).
     fn sortie_reelle() -> PathBuf {
-        PathBuf::from(format!("{}/data/svr/results/{}", racine(), std::env::var("MEDOXIDE_SUJET").unwrap()))
+        PathBuf::from(format!(
+            "{}/data/svr/results/{}",
+            racine(),
+            std::env::var("MEDOXIDE_SUJET").unwrap()
+        ))
     }
 
     /// Reconstruction par notre algorithme sur un sujet réel (variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET ; optionnelles : MEDOXIDE_STACKS_RETENUS = indices des stacks
@@ -5752,20 +9809,37 @@ mod tests {
     fn reconstruct_a_real_subject() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
-        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(",")).split(',').map(|i| i.trim().parse().unwrap()).collect();
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS")
+            .unwrap_or_else(|_| (0..tous.len()).map(|i| i.to_string()).collect::<Vec<_>>().join(","))
+            .split(',')
+            .map(|i| i.trim().parse().unwrap())
+            .collect();
         let stacks: Vec<Stack> = retenus.iter().map(|&i| tous[i].clone()).collect();
-        let cycles: usize = std::env::var("MEDOXIDE_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
+        let cycles: usize = std::env::var("MEDOXIDE_CYCLES")
+            .ok()
+            .map_or(6, |v| v.trim().parse().unwrap());
         let etiquette = std::env::var("MEDOXIDE_ETIQUETTE").unwrap_or_default();
         // MEDOXIDE_ALPHA : poids de la régularisation (ALPHA_CHOISI = 0,01 par défaut : la valeur historique de ce test)
-        let alpha: f64 = std::env::var("MEDOXIDE_ALPHA").ok().map_or(ALPHA_CHOISI, |v| v.trim().parse().unwrap());
+        let alpha: f64 = std::env::var("MEDOXIDE_ALPHA")
+            .ok()
+            .map_or(ALPHA_CHOISI, |v| v.trim().parse().unwrap());
         let sortie = sortie_reelle();
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
         // MEDOXIDE_ALIGN_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (un mouvement rigide par stack, 2 balayages) au lieu des poses d'en-tête
         let depart = if std::env::var("MEDOXIDE_ALIGN_STACKS").map_or(false, |v| v.trim() == "1") {
             let debut_stacks = std::time::Instant::now();
-            let alignes = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
-            println!("alignement des stacks : {:.0} s ; NCC finales {:?}", debut_stacks.elapsed().as_secs_f64(), alignes.stacks.iter().map(|r| (r.ncc_final * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+            let alignes =
+                align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            println!(
+                "alignement des stacks : {:.0} s ; NCC finales {:?}",
+                debut_stacks.elapsed().as_secs_f64(),
+                alignes
+                    .stacks
+                    .iter()
+                    .map(|r| (r.ncc_final * 1000.0).round() / 1000.0)
+                    .collect::<Vec<_>>()
+            );
             alignes.poses
         } else {
             identite.clone()
@@ -5773,21 +9847,38 @@ mod tests {
         // MEDOXIDE_INIT_S2S = 1 : la boucle (coupe-volume) part des poses de l'estimation coupe-coupe au lieu des poses d'en-tête (ou alignées)
         let depart = if std::env::var("MEDOXIDE_INIT_S2S").map_or(false, |v| v.trim() == "1") {
             let debut_s2s = std::time::Instant::now();
-            let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
-            println!("initialisation coupe-coupe : {} coupes recalées sur {} en {:.0} s", rapport.slices.iter().filter(|s| s.registered).count(), rapport.slices.len(), debut_s2s.elapsed().as_secs_f64());
+            let rapport =
+                crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
+            println!(
+                "initialisation coupe-coupe : {} coupes recalées sur {} en {:.0} s",
+                rapport.slices.iter().filter(|s| s.registered).count(),
+                rapport.slices.len(),
+                debut_s2s.elapsed().as_secs_f64()
+            );
             rapport.poses
         } else {
             depart
         };
-        println!("stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles", grille.dims, stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        println!(
+            "stacks retenus {retenus:?} ; grille {:?} ; {} coupes ; {cycles} cycles",
+            grille.dims,
+            stacks.iter().map(|s| s.dim().2).sum::<usize>()
+        );
         // MEDOXIDE_MOTION = s2s : mouvement estimé SANS reconstruction (coupe-coupe, `register_slices_s2s`, MEDOXIDE_S2S_SWEEPS balayages, 3 par défaut), puis UNE reconstruction avec ces poses
         if std::env::var("MEDOXIDE_MOTION").map_or(false, |v| v.trim() == "s2s") {
             let debut = std::time::Instant::now();
             // MEDOXIDE_S2S_ANCRE = a : seules les paires impliquant le stack `a` (indice dans `retenus`) servent à l'estimation ; les autres paires restent pour évaluer
-            let ancre = std::env::var("MEDOXIDE_S2S_ANCRE").ok().map(|v| v.trim().parse::<usize>().unwrap());
+            let ancre = std::env::var("MEDOXIDE_S2S_ANCRE")
+                .ok()
+                .map(|v| v.trim().parse::<usize>().unwrap());
             let reglages = crate::s2s::S2sConfig {
-                sweeps: std::env::var("MEDOXIDE_S2S_SWEEPS").ok().map_or(3, |v| v.trim().parse().unwrap()),
-                intersection: crate::s2s::IntersectionConfig { anchor_stack: ancre, ..Default::default() },
+                sweeps: std::env::var("MEDOXIDE_S2S_SWEEPS")
+                    .ok()
+                    .map_or(3, |v| v.trim().parse().unwrap()),
+                intersection: crate::s2s::IntersectionConfig {
+                    anchor_stack: ancre,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let rapport = crate::s2s::register_slices_s2s(&stacks, &depart, &reglages, &device).unwrap();
@@ -5805,7 +9896,12 @@ mod tests {
             for (n, stack) in stacks.iter().enumerate() {
                 for coupe in stack.slices() {
                     let m = rapport.poses.get(n, coupe.index());
-                    lignes.push(format!("{}\t{}\t{}", retenus[n], coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+                    lignes.push(format!(
+                        "{}\t{}\t{}",
+                        retenus[n],
+                        coupe.index(),
+                        m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")
+                    ));
                 }
             }
             std::fs::write(sortie.join(format!("poses_s2s{etiquette}.tsv")), lignes.join("\n")).unwrap();
@@ -5818,15 +9914,52 @@ mod tests {
         ecrire_image_grille(&sortie.join(format!("ours_header{etiquette}.nii.gz")), &x0, &grille);
         println!("sans correction : {:.0} s", debut.elapsed().as_secs_f64());
         let robuste = RobustConfig {
-            extra_starts: std::env::var("MEDOXIDE_STARTS").ok().map_or(6, |v| v.trim().parse().unwrap()),
-            start_amplitude_mm: std::env::var("MEDOXIDE_START_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()),
+            extra_starts: std::env::var("MEDOXIDE_STARTS")
+                .ok()
+                .map_or(6, |v| v.trim().parse().unwrap()),
+            start_amplitude_mm: std::env::var("MEDOXIDE_START_MM")
+                .ok()
+                .map_or(5.0, |v| v.trim().parse().unwrap()),
             ..RobustConfig::new(0.9)
         };
-        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles, alpha: alpha, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: robuste, leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(cycles, |v| v.trim().parse().unwrap()), coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap()), leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
-        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
-            println!("  reconstruction {cycle} faite (t = {:.0} s)", debut.elapsed().as_secs_f64());
-        })
-        .unwrap();
+        let config = align::LoopConfig {
+            min_stack_coverage: 1,
+            skip_unused_reconstructions: false,
+            cycles,
+            alpha: alpha,
+            cg_max_iterations: 300,
+            cg_tolerance: 1e-4,
+            robust: robuste,
+            leave_one_stack_out_cycles: std::env::var("MEDOXIDE_LOO_CYCLES")
+                .ok()
+                .map_or(cycles, |v| v.trim().parse().unwrap()),
+            coarse_sigma_voxels: std::env::var("MEDOXIDE_SIGMA")
+                .ok()
+                .map_or(0.0, |v| v.trim().parse().unwrap()),
+            leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM")
+                .ok()
+                .map_or(5.0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG")
+                .ok()
+                .map_or(10.0, |v| v.trim().parse().unwrap()),
+        };
+        let resultat =
+            align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, _, _| {
+                println!(
+                    "  reconstruction {cycle} faite (t = {:.0} s)",
+                    debut.elapsed().as_secs_f64()
+                );
+            })
+            .unwrap();
         for (n, r) in resultat.cycles.iter().enumerate() {
             let rec: Vec<_> = r.slices.iter().filter(|s| s.registered).collect();
             println!(
@@ -5835,16 +9968,36 @@ mod tests {
             );
             // une ligne par coupe recalée (diagnostic de la calibration du seuil de relance) : cycle, stack, coupe, NCC du premier recalage, NCC finale, nombre de recalages
             for s in rec {
-                println!("SLICE\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}", n + 1, s.stack, s.slice, s.ncc_first, s.ncc_final, s.runs);
+                println!(
+                    "SLICE\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}",
+                    n + 1,
+                    s.stack,
+                    s.slice,
+                    s.ncc_first,
+                    s.ncc_final,
+                    s.runs
+                );
             }
         }
-        ecrire_image_grille(&sortie.join(format!("ours_loop{etiquette}.nii.gz")), &resultat.volume, &grille);
-        println!("poses remplacées par la médiane locale, par cycle : {:?}", resultat.pose_replacements);
+        ecrire_image_grille(
+            &sortie.join(format!("ours_loop{etiquette}.nii.gz")),
+            &resultat.volume,
+            &grille,
+        );
+        println!(
+            "poses remplacées par la médiane locale, par cycle : {:?}",
+            resultat.pose_replacements
+        );
         let mut lignes = Vec::new();
         for (n, stack) in stacks.iter().enumerate() {
             for coupe in stack.slices() {
                 let m = resultat.poses.get(n, coupe.index());
-                lignes.push(format!("{}\t{}\t{}", retenus[n], coupe.index(), m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")));
+                lignes.push(format!(
+                    "{}\t{}\t{}",
+                    retenus[n],
+                    coupe.index(),
+                    m.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("\t")
+                ));
             }
         }
         std::fs::write(sortie.join(format!("poses_loop{etiquette}.tsv")), lignes.join("\n")).unwrap();
@@ -5860,17 +10013,48 @@ mod tests {
     #[ignore = "données réelles locales"]
     fn judge_a_volume_with_a_held_out_stack() {
         let device = burn::tensor::Device::flex().autodiff();
-        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST")
+            .expect("MEDOXIDE_STACK_TEST")
+            .trim()
+            .parse()
+            .unwrap();
         let chemin = std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME");
         let teste = stacks_reels().remove(indice);
         let volume = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("volume illisible"));
         let un_stack = std::slice::from_ref(&teste);
-        let rapport = align::register_slices(un_stack, &SlicePoses::identity(un_stack), &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
+        let rapport = align::register_slices(
+            un_stack,
+            &SlicePoses::identity(un_stack),
+            &VolumeTensors::new(&volume, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
         // NCC de chaque coupe, à côté du volume (`<volume>.juge.tsv`), pour des comparaisons appariées entre méthodes
-        let par_coupe: Vec<String> = rapport.slices.iter().filter(|r| r.registered).map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm)).collect();
-        std::fs::write(format!("{chemin}.juge.tsv"), format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n"))).unwrap();
-        let mut ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
-        let correction = rapport.slices.iter().filter(|r| r.registered).map(|r| r.correction_rms_mm).sum::<f64>() / ncc.len() as f64;
+        let par_coupe: Vec<String> = rapport
+            .slices
+            .iter()
+            .filter(|r| r.registered)
+            .map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm))
+            .collect();
+        std::fs::write(
+            format!("{chemin}.juge.tsv"),
+            format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n")),
+        )
+        .unwrap();
+        let mut ncc: Vec<f64> = rapport
+            .slices
+            .iter()
+            .filter(|r| r.registered)
+            .map(|r| r.ncc_final)
+            .collect();
+        let correction = rapport
+            .slices
+            .iter()
+            .filter(|r| r.registered)
+            .map(|r| r.correction_rms_mm)
+            .sum::<f64>()
+            / ncc.len() as f64;
         ncc.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!(
             "JUGE stack {indice} : {} coupes ; NCC finale médiane {:.4}, moyenne {:.4}, 10e centile {:.4} ; correction moyenne {correction:.2} mm",
@@ -5885,26 +10069,67 @@ mod tests {
     #[ignore = "données locales"]
     fn judge_a_synthetic_volume_with_a_held_out_stack() {
         let device = burn::tensor::Device::flex().autodiff();
-        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let indice: usize = std::env::var("MEDOXIDE_STACK_TEST")
+            .expect("MEDOXIDE_STACK_TEST")
+            .trim()
+            .parse()
+            .unwrap();
         let chemin = std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME");
-        let amplitude: u32 = std::env::var("MEDOXIDE_AMPLITUDES").expect("MEDOXIDE_AMPLITUDES").trim().parse().unwrap();
+        let amplitude: u32 = std::env::var("MEDOXIDE_AMPLITUDES")
+            .expect("MEDOXIDE_AMPLITUDES")
+            .trim()
+            .parse()
+            .unwrap();
         let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
         let infixe = if modele == "independant" { String::new() } else { modele };
         let teste = stacks_pyrecon_modele(&infixe, amplitude).1.remove(indice);
         let volume = Volume::from_stack(&Stack::read(Path::new(&chemin)).expect("volume illisible"));
         let un_stack = std::slice::from_ref(&teste);
-        let rapport = align::register_slices(un_stack, &SlicePoses::identity(un_stack), &VolumeTensors::new(&volume, &device), RobustConfig::new(0.9), &device).unwrap();
-        let par_coupe: Vec<String> = rapport.slices.iter().filter(|r| r.registered).map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm)).collect();
-        std::fs::write(format!("{chemin}.juge.tsv"), format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n"))).unwrap();
-        let mut ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
+        let rapport = align::register_slices(
+            un_stack,
+            &SlicePoses::identity(un_stack),
+            &VolumeTensors::new(&volume, &device),
+            RobustConfig::new(0.9),
+            &device,
+        )
+        .unwrap();
+        let par_coupe: Vec<String> = rapport
+            .slices
+            .iter()
+            .filter(|r| r.registered)
+            .map(|r| format!("{indice}\t{}\t{:.6}\t{:.4}", r.slice, r.ncc_final, r.correction_rms_mm))
+            .collect();
+        std::fs::write(
+            format!("{chemin}.juge.tsv"),
+            format!("stack\tcoupe\tncc\tcorrection_mm\n{}\n", par_coupe.join("\n")),
+        )
+        .unwrap();
+        let mut ncc: Vec<f64> = rapport
+            .slices
+            .iter()
+            .filter(|r| r.registered)
+            .map(|r| r.ncc_final)
+            .collect();
         ncc.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("JUGE synthétique stack {indice} : {} coupes ; NCC moyenne {:.4}, médiane {:.4}", ncc.len(), ncc.iter().sum::<f64>() / ncc.len() as f64, ncc[ncc.len() / 2]);
+        println!(
+            "JUGE synthétique stack {indice} : {} coupes ; NCC moyenne {:.4}, médiane {:.4}",
+            ncc.len(),
+            ncc.iter().sum::<f64>() / ncc.len() as f64,
+            ncc[ncc.len() / 2]
+        );
     }
 
     /// Facteurs d'intensité par coupe tirés log-normalement : `sₖ = exp(σ · gₖ)`, `gₖ` gaussienne centrée réduite (somme de 12 uniformes − 6), graine fixe ; un vecteur par stack.
     fn facteurs_injectes(stacks: &[Stack], sigma: f64, graine: u64) -> Vec<Vec<f64>> {
         let mut alea = Alea(graine);
-        stacks.iter().map(|s| (0..s.dim().2).map(|_| (sigma * ((0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0)).exp()).collect()).collect()
+        stacks
+            .iter()
+            .map(|s| {
+                (0..s.dim().2)
+                    .map(|_| (sigma * ((0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0)).exp())
+                    .collect()
+            })
+            .collect()
     }
 
     /// CONTRÔLE (étape 4c) sur données de vérité connue : jeu pyrecon lisse ±2, vraies poses ; on multiplie chaque coupe par un facteur injecté `sₖ` (log-normal d'écart type σ = 0 ; 0,05 ;
@@ -5928,10 +10153,21 @@ mod tests {
         };
         for sigma in [0.0, 0.05, 0.10, 0.15, 0.20] {
             let facteurs = facteurs_injectes(&stacks, sigma, 4242);
-            let injectes: Vec<Stack> = stacks.iter().zip(&facteurs).map(|(s, f)| s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap()).collect();
+            let injectes: Vec<Stack> = stacks
+                .iter()
+                .zip(&facteurs)
+                .map(|(s, f)| {
+                    s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>())
+                        .unwrap()
+                })
+                .collect();
             reconstruire_et_mesurer(&format!("sigma{sigma:.2}"), &injectes);
             if (sigma - 0.15).abs() < 1e-9 {
-                let corriges: Vec<Stack> = injectes.iter().zip(&facteurs).map(|(s, f)| s.divided_by_slice_scales(f).unwrap()).collect();
+                let corriges: Vec<Stack> = injectes
+                    .iter()
+                    .zip(&facteurs)
+                    .map(|(s, f)| s.divided_by_slice_scales(f).unwrap())
+                    .collect();
                 reconstruire_et_mesurer("sigma0.15_corrige_vrai", &corriges);
             }
         }
@@ -5949,7 +10185,12 @@ mod tests {
         let moyenne = ln.iter().sum::<f64>() / ln.len() as f64;
         let ecart = (ln.iter().map(|l| (l - moyenne).powi(2)).sum::<f64>() / (ln.len() - 1) as f64).sqrt();
         let p = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize] / mediane;
-        format!("{} coupes estimées ; écart type de ln s : {ecart:.3} ; s/médiane : p5 {:.3}, médiane 1, p95 {:.3}", v.len(), p(0.05), p(0.95))
+        format!(
+            "{} coupes estimées ; écart type de ln s : {ecart:.3} ; s/médiane : p5 {:.3}, médiane 1, p95 {:.3}",
+            v.len(),
+            p(0.05),
+            p(0.95)
+        )
     }
 
     /// Lit un fichier de poses (stack, coupe, 16 valeurs en ordre colonne) pour des stacks donnés ; les coupes absentes gardent l'identité.
@@ -5986,7 +10227,11 @@ mod tests {
                     *v = (rho * *v + (1.0 - rho * rho).sqrt() * sigma * gauss()).clamp(-amplitude, amplitude);
                 }
                 let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
-                poses.set(si, coupe.index(), mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()));
+                poses.set(
+                    si,
+                    coupe.index(),
+                    mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()),
+                );
             }
         }
         poses
@@ -5994,10 +10239,17 @@ mod tests {
 
     fn lire_poses_tsv(chemin: &Path, stacks: &[Stack]) -> SlicePoses {
         let mut poses = SlicePoses::identity(stacks);
-        for ligne in std::fs::read_to_string(chemin).expect("fichier de poses absent").lines() {
+        for ligne in std::fs::read_to_string(chemin)
+            .expect("fichier de poses absent")
+            .lines()
+        {
             let c: Vec<&str> = ligne.split('\t').collect();
             let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
-            poses.set(c[0].parse().unwrap(), c[1].parse().unwrap(), Matrix4::from_iterator(valeurs.iter().copied()));
+            poses.set(
+                c[0].parse().unwrap(),
+                c[1].parse().unwrap(),
+                Matrix4::from_iterator(valeurs.iter().copied()),
+            );
         }
         poses
     }
@@ -6009,11 +10261,21 @@ mod tests {
     #[test]
     #[ignore = "données réelles locales"]
     fn diagnose_slice_scales_on_real_data() {
-        let h: usize = std::env::var("MEDOXIDE_STACK_TEST").expect("MEDOXIDE_STACK_TEST").trim().parse().unwrap();
+        let h: usize = std::env::var("MEDOXIDE_STACK_TEST")
+            .expect("MEDOXIDE_STACK_TEST")
+            .trim()
+            .parse()
+            .unwrap();
         let tous = stacks_reels();
-        let poses_tous = lire_poses_tsv(Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")), &tous);
+        let poses_tous = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
         let teste = std::slice::from_ref(&tous[h]);
-        let volume = Volume::from_stack(&Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).expect("volume illisible"));
+        let volume = Volume::from_stack(
+            &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME")))
+                .expect("volume illisible"),
+        );
         let brutes = raw_slice_scales(teste, &poses_tous.select(&[h]), &volume).unwrap();
         println!("FACTEURS réel, stack {h} : {}", dispersion_des_facteurs(&brutes[0]));
     }
@@ -6025,13 +10287,24 @@ mod tests {
     #[ignore = "données locales"]
     fn control_slice_scales_estimation_on_held_out_synthetic_stack() {
         let (_, stacks, vraies) = stacks_pyrecon_modele("", 2);
-        let volume = Volume::from_stack(&Stack::read(&PathBuf::from(format!("{}/data/atlas/results/pyrecon_mvt2/stacks_01/ours_true_poses.nii.gz", racine()))).expect("volume absent"));
+        let volume = Volume::from_stack(
+            &Stack::read(&PathBuf::from(format!(
+                "{}/data/atlas/results/pyrecon_mvt2/stacks_01/ours_true_poses.nii.gz",
+                racine()
+            )))
+            .expect("volume absent"),
+        );
         let teste = &stacks[2..3];
         for sigma in [0.0, 0.05, 0.15] {
             let facteurs = facteurs_injectes(teste, sigma, 99);
-            let injecte = teste[0].divided_by_slice_scales(&facteurs[0].iter().map(|v| 1.0 / v).collect::<Vec<_>>()).unwrap();
+            let injecte = teste[0]
+                .divided_by_slice_scales(&facteurs[0].iter().map(|v| 1.0 / v).collect::<Vec<_>>())
+                .unwrap();
             let brutes = raw_slice_scales(std::slice::from_ref(&injecte), &vraies.select(&[2]), &volume).unwrap();
-            println!("FACTEURS simulé, σ injecté {sigma:.2} : {}", dispersion_des_facteurs(&brutes[0]));
+            println!(
+                "FACTEURS simulé, σ injecté {sigma:.2} : {}",
+                dispersion_des_facteurs(&brutes[0])
+            );
         }
     }
 
@@ -6041,13 +10314,28 @@ mod tests {
     #[ignore = "données locales ; très longue"]
     fn evaluate_the_loop_on_pyrecon_data() {
         // amplitudes évaluées : variable d'environnement MEDOXIDE_AMPLITUDES (ex. « 4,6 »), par défaut ±2
-        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES").unwrap_or_else(|_| "2".into()).split(',').map(|a| a.trim().parse().unwrap()).collect();
+        let amplitudes: Vec<u32> = std::env::var("MEDOXIDE_AMPLITUDES")
+            .unwrap_or_else(|_| "2".into())
+            .split(',')
+            .map(|a| a.trim().parse().unwrap())
+            .collect();
         // modèle de mouvement : MEDOXIDE_MODELE = « independant » (défaut), « lisse » ou « lisseint »
         let modele = std::env::var("MEDOXIDE_MODELE").unwrap_or_else(|_| "independant".into());
-        let (infixe, slug) = if modele == "independant" { (String::new(), "pyrecon".to_string()) } else { (modele.clone(), format!("pyrecon_{modele}")) };
+        let (infixe, slug) = if modele == "independant" {
+            (String::new(), "pyrecon".to_string())
+        } else {
+            (modele.clone(), format!("pyrecon_{modele}"))
+        };
         for amplitude in amplitudes {
             let (atlas, stacks, vraies) = stacks_pyrecon_modele(&infixe, amplitude);
-            evaluer_la_boucle(&format!("données pyrecon ({modele})"), &slug, &atlas, &stacks, &vraies, amplitude);
+            evaluer_la_boucle(
+                &format!("données pyrecon ({modele})"),
+                &slug,
+                &atlas,
+                &stacks,
+                &vraies,
+                amplitude,
+            );
         }
     }
 
@@ -6064,17 +10352,46 @@ mod tests {
         let (stacks, vraies) = stacks_de_blobs(&t, &volume, 2.0, 77);
         let grille = reconstruction_grid(&stacks, 1.0, 6.0).unwrap();
         let device = burn::tensor::Device::flex().autodiff();
-        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles: 2, alpha: 0.01, cg_max_iterations: 100, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: 0, coarse_sigma_voxels: 0.0, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig {
+            min_stack_coverage: 1,
+            skip_unused_reconstructions: false,
+            cycles: 2,
+            alpha: 0.01,
+            cg_max_iterations: 100,
+            cg_tolerance: 1e-4,
+            robust: RobustConfig::new(0.9),
+            leave_one_stack_out_cycles: 0,
+            coarse_sigma_voxels: 0.0,
+            leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM")
+                .ok()
+                .map_or(5.0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG")
+                .ok()
+                .map_or(10.0, |v| v.trim().parse().unwrap()),
+        };
         let identite = SlicePoses::identity(&stacks);
         let mut appels = Vec::new();
-        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
-            let e = erreurs_de_pose(&stacks, poses, &vraies);
-            let mut tri = e.clone();
-            tri.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            appels.push((c, tri[tri.len() / 2], tri[tri.len() - 1], x.dim()));
-        })
-        .unwrap();
-        println!("(cycle, erreur médiane, erreur max, forme) : {appels:?} ; itérations CG {:?}", resultat.cg_iterations);
+        let resultat =
+            align::reconstruct_with_motion_correction(&grille, &stacks, &identite, config, &device, |c, x, poses| {
+                let e = erreurs_de_pose(&stacks, poses, &vraies);
+                let mut tri = e.clone();
+                tri.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                appels.push((c, tri[tri.len() / 2], tri[tri.len() - 1], x.dim()));
+            })
+            .unwrap();
+        println!(
+            "(cycle, erreur médiane, erreur max, forme) : {appels:?} ; itérations CG {:?}",
+            resultat.cg_iterations
+        );
         assert_eq!(appels.iter().map(|a| a.0).collect::<Vec<_>>(), vec![0, 1, 2]);
         assert_eq!(resultat.cycles.len(), 2);
         assert_eq!(resultat.cg_iterations.len(), 3);
@@ -6104,32 +10421,55 @@ mod tests {
     fn ecrire_image_grille(chemin: &Path, image: &Array3<f64>, grille: &GridSpec) {
         std::fs::create_dir_all(chemin.parent().unwrap()).unwrap();
         let r = grille.resolution_mm as f32;
-        WriterOptions::new(chemin).reference_header(&en_tete(&grille.affine, [r, r, r])).write_nifti(&image.mapv(|v| v as f32)).unwrap();
+        WriterOptions::new(chemin)
+            .reference_header(&en_tete(&grille.affine, [r, r, r]))
+            .write_nifti(&image.mapv(|v| v as f32))
+            .unwrap();
     }
 
     /// Évalue la boucle (voir `evaluate_the_loop_on_sta31`) sur un jeu de stacks simulés depuis `atlas` avec les vraies poses `vraies`.
-    fn evaluer_la_boucle(etiquette: &str, slug: &str, atlas: &Volume, stacks: &[Stack], vraies: &SlicePoses, amplitude: u32) {
+    fn evaluer_la_boucle(
+        etiquette: &str,
+        slug: &str,
+        atlas: &Volume,
+        stacks: &[Stack],
+        vraies: &SlicePoses,
+        amplitude: u32,
+    ) {
         let device = burn::tensor::Device::flex().autodiff();
         // flou du premier passage de recalage (voxels) : variable d'environnement MEDOXIDE_SIGMA ; 0 par défaut (recalage net seul) : à σ = 2 la boucle gagne à ±6° indépendant
         // mais perd à ±4° lisse (étude 06 §25), donc le gros-vers-fin n'est pas le comportement par défaut
-        let sigma_grossier: f64 = std::env::var("MEDOXIDE_SIGMA").ok().map_or(0.0, |v| v.trim().parse().unwrap());
+        let sigma_grossier: f64 = std::env::var("MEDOXIDE_SIGMA")
+            .ok()
+            .map_or(0.0, |v| v.trim().parse().unwrap());
         // MEDOXIDE_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (2 balayages) au lieu des poses d'en-tête ; MEDOXIDE_SUFFIXE : suffixe du fichier exporté
         let depart_stacks = std::env::var("MEDOXIDE_STACKS").map_or(false, |v| v.trim() == "1");
         let suffixe = std::env::var("MEDOXIDE_SUFFIXE").unwrap_or_default();
         // MEDOXIDE_STACKS_RETENUS : sous-ensemble de stacks (« 0,1 » : axial et coronal), tous par défaut ; MEDOXIDE_LOO_CYCLES : nombre de premiers cycles où chaque stack est recalé contre une
         // reconstruction faite sans lui (6 par défaut ; 0 : toujours la reconstruction complète). Les exports d'un sous-ensemble vont dans un sous-dossier `stacks_<indices>` (pas d'écrasement).
-        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").map_or_else(|_| (0..stacks.len()).collect(), |v| v.split(',').map(|i| i.trim().parse().unwrap()).collect());
-        let (stacks_choisis, vraies_choisies): (Vec<Stack>, SlicePoses) = (retenus.iter().map(|&i| stacks[i].clone()).collect(), vraies.select(&retenus));
+        let retenus: Vec<usize> = std::env::var("MEDOXIDE_STACKS_RETENUS").map_or_else(
+            |_| (0..stacks.len()).collect(),
+            |v| v.split(',').map(|i| i.trim().parse().unwrap()).collect(),
+        );
+        let (stacks_choisis, vraies_choisies): (Vec<Stack>, SlicePoses) = (
+            retenus.iter().map(|&i| stacks[i].clone()).collect(),
+            vraies.select(&retenus),
+        );
         let (atlas, stacks, vraies) = (atlas, &stacks_choisis[..], &vraies_choisies);
         let sous_ensemble = retenus.len() < 3;
-        let cycles_sans_le_stack: usize = std::env::var("MEDOXIDE_LOO_CYCLES").ok().map_or(6, |v| v.trim().parse().unwrap());
+        let cycles_sans_le_stack: usize = std::env::var("MEDOXIDE_LOO_CYCLES")
+            .ok()
+            .map_or(6, |v| v.trim().parse().unwrap());
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
         let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
         let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
         let mut sortie = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
         if sous_ensemble {
-            sortie = sortie.join(format!("stacks_{}", retenus.iter().map(|i| i.to_string()).collect::<String>()));
+            sortie = sortie.join(format!(
+                "stacks_{}",
+                retenus.iter().map(|i| i.to_string()).collect::<String>()
+            ));
         }
         let borne = |poses: &SlicePoses, nom: &str| {
             let p = ReconstructionProblem::with_poses(&grille, &stacks, poses, ALPHA_CHOISI).unwrap();
@@ -6140,14 +10480,45 @@ mod tests {
         let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
-        let config = align::LoopConfig { min_stack_coverage: 1, skip_unused_reconstructions: false, cycles: 6, alpha: ALPHA_CHOISI, cg_max_iterations: 300, cg_tolerance: 1e-4, robust: RobustConfig::new(0.9), leave_one_stack_out_cycles: cycles_sans_le_stack, coarse_sigma_voxels: sigma_grossier, leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES").ok().map_or(0, |v| v.trim().parse().unwrap()), leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW").ok().map_or(0, |v| v.trim().parse().unwrap()), pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM").ok().map_or(5.0, |v| v.trim().parse().unwrap()), pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG").ok().map_or(10.0, |v| v.trim().parse().unwrap()) };
+        let config = align::LoopConfig {
+            min_stack_coverage: 1,
+            skip_unused_reconstructions: false,
+            cycles: 6,
+            alpha: ALPHA_CHOISI,
+            cg_max_iterations: 300,
+            cg_tolerance: 1e-4,
+            robust: RobustConfig::new(0.9),
+            leave_one_stack_out_cycles: cycles_sans_le_stack,
+            coarse_sigma_voxels: sigma_grossier,
+            leave_one_slice_out_cycles: std::env::var("MEDOXIDE_LOSO_CYCLES")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            leave_slice_out_window: std::env::var("MEDOXIDE_LOSO_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_window: std::env::var("MEDOXIDE_POSE_WINDOW")
+                .ok()
+                .map_or(0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_mm: std::env::var("MEDOXIDE_POSE_MM")
+                .ok()
+                .map_or(5.0, |v| v.trim().parse().unwrap()),
+            pose_outlier_max_deg: std::env::var("MEDOXIDE_POSE_DEG")
+                .ok()
+                .map_or(10.0, |v| v.trim().parse().unwrap()),
+        };
         let debut = std::time::Instant::now();
         let mut psnr = Vec::new();
         let mut erreurs_par_cycle: Vec<Vec<f64>> = Vec::new();
         let depart = if depart_stacks {
             let debut_stacks = std::time::Instant::now();
-            let alignes = align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
-            println!("  alignement des stacks : désalignement entre stacks {:?} → {:?} ; {:.0} s", desalignement_entre_stacks(&stacks, &identite, &vraies), desalignement_entre_stacks(&stacks, &alignes.poses, &vraies), debut_stacks.elapsed().as_secs_f64());
+            let alignes =
+                align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+            println!(
+                "  alignement des stacks : désalignement entre stacks {:?} → {:?} ; {:.0} s",
+                desalignement_entre_stacks(&stacks, &identite, &vraies),
+                desalignement_entre_stacks(&stacks, &alignes.poses, &vraies),
+                debut_stacks.elapsed().as_secs_f64()
+            );
             alignes.poses
         } else {
             identite.clone()
@@ -6162,21 +10533,41 @@ mod tests {
             println!("    après retrait d'un mouvement rigide commun : médiane {:.2} mm (max {:.2}) ; un par stack : médiane {:.2} mm (max {:.2})", global.0, global.1, par_stack.0, par_stack.1);
         })
         .unwrap();
-        ecrire_image_grille(&sortie.join(format!("ours_loop{suffixe}.nii.gz")), &resultat.volume, &grille);
+        ecrire_image_grille(
+            &sortie.join(format!("ours_loop{suffixe}.nii.gz")),
+            &resultat.volume,
+            &grille,
+        );
         let registered: Vec<bool> = resultat.cycles[0].slices.iter().map(|r| r.registered).collect();
-        let trier = |v: &Vec<f64>| -> Vec<f64> { let mut e: Vec<f64> = v.iter().zip(&registered).filter(|(_, r)| **r).map(|(e, _)| *e).collect(); e.sort_by(|a, b| a.partial_cmp(b).unwrap()); e };
+        let trier = |v: &Vec<f64>| -> Vec<f64> {
+            let mut e: Vec<f64> = v
+                .iter()
+                .zip(&registered)
+                .filter(|(_, r)| **r)
+                .map(|(e, _)| *e)
+                .collect();
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            e
+        };
         let part = |e: &[f64], s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
         for (n, r) in resultat.cycles.iter().enumerate() {
             let relancees = r.slices.iter().filter(|s| s.runs > 1).count();
             let rec: Vec<_> = r.slices.iter().filter(|s| s.registered).collect();
-            let (moy_corr, moy_ncc) = (rec.iter().map(|s| s.correction_rms_mm).sum::<f64>() / rec.len() as f64, rec.iter().map(|s| s.ncc_final).sum::<f64>() / rec.len() as f64);
+            let (moy_corr, moy_ncc) = (
+                rec.iter().map(|s| s.correction_rms_mm).sum::<f64>() / rec.len() as f64,
+                rec.iter().map(|s| s.ncc_final).sum::<f64>() / rec.len() as f64,
+            );
             println!("  recalage {}: {relancees} coupes relancées, correction moyenne {moy_corr:.2} mm, NCC finale moyenne {moy_ncc:.3}", n + 1);
         }
         for (n, v) in erreurs_par_cycle.iter().enumerate() {
             let e = trier(v);
             println!("  erreur de pose après {n} cycle(s) (coupes recalées, {}) : médiane {:.2} mm, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} %", e.len(), e[e.len() / 2], e[(e.len() as f64 * 0.9) as usize], e[e.len() - 1], part(&e, 0.5), part(&e, 1.0));
         }
-        println!("  itérations CG {:?} ; durée {:.0} s", resultat.cg_iterations, debut.elapsed().as_secs_f64());
+        println!(
+            "  itérations CG {:?} ; durée {:.0} s",
+            resultat.cg_iterations,
+            debut.elapsed().as_secs_f64()
+        );
         let e = trier(&erreurs_par_cycle[3]);
         if amplitude == 2 {
             let (dernier, premier_cycle) = (psnr[3], psnr[1]); // état après 3 cycles
@@ -6185,7 +10576,6 @@ mod tests {
                 e[e.len() / 2] <= 0.5, part(&e, 1.0) >= 90.0, dernier >= haute.1 - 1.5, dernier >= basse.1 + 5.0, dernier > premier_cycle
             );
         }
-
     }
 
     /// DIAGNOSTIC de la boucle : le recalage fonctionne-t-il quand la référence est une **reconstruction** (et non l'atlas) ? On reconstruit avec les
@@ -6206,12 +10596,27 @@ mod tests {
         let depart = erreurs_de_pose(&stacks, &identite, &vraies);
         for tau in [0.9, 0.97] {
             let debut = std::time::Instant::now();
-            let rapport = align::register_slices(&stacks, &identite, &reference, RobustConfig::new(tau), &device).unwrap();
+            let rapport =
+                align::register_slices(&stacks, &identite, &reference, RobustConfig::new(tau), &device).unwrap();
             let apres = erreurs_de_pose(&stacks, &rapport.poses, &vraies);
-            let choisir = |v: &[f64]| -> Vec<f64> { let mut e: Vec<f64> = v.iter().zip(&rapport.slices).filter(|(_, r)| r.registered).map(|(e, _)| *e).collect(); e.sort_by(|a, b| a.partial_cmp(b).unwrap()); e };
+            let choisir = |v: &[f64]| -> Vec<f64> {
+                let mut e: Vec<f64> = v
+                    .iter()
+                    .zip(&rapport.slices)
+                    .filter(|(_, r)| r.registered)
+                    .map(|(e, _)| *e)
+                    .collect();
+                e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                e
+            };
             let (d, a) = (choisir(&depart), choisir(&apres));
             let part = |e: &[f64], s: f64| 100.0 * e.iter().filter(|&&v| v <= s).count() as f64 / e.len() as f64;
-            let ncc: Vec<f64> = rapport.slices.iter().filter(|r| r.registered).map(|r| r.ncc_final).collect();
+            let ncc: Vec<f64> = rapport
+                .slices
+                .iter()
+                .filter(|r| r.registered)
+                .map(|r| r.ncc_final)
+                .collect();
             println!(
                 "τ = {tau} : départ médiane {:.2} mm ; après recalage médiane {:.2}, p90 {:.2}, max {:.2} ; ≤ 0,5 mm {:.0} %, ≤ 1 mm {:.0} % ; {} relancées ; NCC finale moyenne {:.3} ; {:.0} s",
                 d[d.len() / 2], a[a.len() / 2], a[(a.len() as f64 * 0.9) as usize], a[a.len() - 1], part(&a, 0.5), part(&a, 1.0),

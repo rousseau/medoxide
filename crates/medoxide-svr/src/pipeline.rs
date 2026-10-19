@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use burn::prelude::Device;
-use nifti::{writer::WriterOptions, NiftiHeader};
 use ndarray::Array3;
+use nifti::{writer::WriterOptions, NiftiHeader};
 
 use crate::align::{reconstruct_with_motion_correction, LoopConfig, SliceReport};
 use crate::bias::{estimate_bias_fields, BiasConfig, BiasFields};
@@ -198,11 +198,17 @@ impl ReconstructionOutput {
     pub fn write_volume(&self, path: &Path) -> Result<(), SvrError> {
         let mut header = NiftiHeader::default();
         // `sform` ET `qform` cohérents : certains outils (MIRTK) lisent le `qform`, d'autres (nibabel, FSL) le `sform`
-        medoxide_core::definir_affine(&mut header, std::array::from_fn(|l| std::array::from_fn(|c| self.grid.affine[(l, c)])));
+        medoxide_core::definir_affine(
+            &mut header,
+            std::array::from_fn(|l| std::array::from_fn(|c| self.grid.affine[(l, c)])),
+        );
         WriterOptions::new(path)
             .reference_header(&header)
             .write_nifti(&self.volume.mapv(|v| v as f32))
-            .map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+            .map_err(|e| SvrError::Write {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })
     }
 
     /// Écrit un indicateur de qualité par coupe : une ligne `stack \t coupe \t recalée (0 ou 1) \t score_avant \t score_après \t nb_recalages \t correction_rms_mm`, dans l'ordre des stacks puis des coupes. Le score est, avec `s2s`, la
@@ -211,11 +217,24 @@ impl ReconstructionOutput {
     /// # Erreurs
     /// [`SvrError::Write`] si le fichier ne peut pas être écrit.
     pub fn write_quality(&self, path: &Path) -> Result<(), SvrError> {
-        let mut lignes = vec!["stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm".to_string()];
+        let mut lignes =
+            vec!["stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm".to_string()];
         for r in &self.slices {
-            lignes.push(format!("{}\t{}\t{}\t{:?}\t{:?}\t{}\t{:?}", r.stack, r.slice, u8::from(r.registered), r.ncc_first, r.ncc_final, r.runs, r.correction_rms_mm));
+            lignes.push(format!(
+                "{}\t{}\t{}\t{:?}\t{:?}\t{}\t{:?}",
+                r.stack,
+                r.slice,
+                u8::from(r.registered),
+                r.ncc_first,
+                r.ncc_final,
+                r.runs,
+                r.correction_rms_mm
+            ));
         }
-        std::fs::write(path, lignes.join("\n")).map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+        std::fs::write(path, lignes.join("\n")).map_err(|e| SvrError::Write {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })
     }
 
     /// Écrit le mouvement de chaque coupe : un fichier texte, une ligne par coupe, `stack \t coupe \t` puis les 16 valeurs de la matrice 4 × 4 **en ordre colonne**
@@ -235,7 +254,10 @@ impl ReconstructionOutput {
                 lines.push(format!("{s}\t{k}\t{}", values.join("\t")));
             }
         }
-        std::fs::write(path, lines.join("\n")).map_err(|e| SvrError::Write { path: path.to_path_buf(), message: e.to_string() })
+        std::fs::write(path, lines.join("\n")).map_err(|e| SvrError::Write {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })
     }
 }
 
@@ -247,7 +269,11 @@ impl ReconstructionOutput {
 /// # Erreurs
 /// [`SvrError::NotEnoughStacks`] si moins de deux stacks ; [`SvrError::NoMask`] si un stack n'a pas de masque ; celles de
 /// [`reconstruction_grid`] et de [`ReconstructionProblem::with_poses`] (réglages invalides).
-pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Device) -> Result<ReconstructionOutput, SvrError> {
+pub fn reconstruct(
+    stacks: &[Stack],
+    config: &ReconstructionConfig,
+    device: &Device,
+) -> Result<ReconstructionOutput, SvrError> {
     if stacks.len() < 2 {
         return Err(SvrError::NotEnoughStacks);
     }
@@ -257,30 +283,69 @@ pub fn reconstruct(stacks: &[Stack], config: &ReconstructionConfig, device: &Dev
         Motion::SliceToSlice => {
             if config.s2s_bias_rounds == 0 {
                 let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
-                let (poses, slices) = refine_with_slice_to_volume(stacks, rapport.poses, rapport.slices, config, device)?;
-                let volume = reconstruct_with_poses(&grid, &without_excluded_slices(stacks, &slices, config.s2s_exclude_fraction), &poses, config)?;
-                return Ok(ReconstructionOutput { grid, volume, poses, slices });
+                let (poses, slices) =
+                    refine_with_slice_to_volume(stacks, rapport.poses, rapport.slices, config, device)?;
+                let volume = reconstruct_with_poses(
+                    &grid,
+                    &without_excluded_slices(stacks, &slices, config.s2s_exclude_fraction),
+                    &poses,
+                    config,
+                )?;
+                return Ok(ReconstructionOutput {
+                    grid,
+                    volume,
+                    poses,
+                    slices,
+                });
             }
             // alternances : champ de biais estimé aux poses courantes (celles de l'en-tête au départ), stacks corrigés, recalage depuis les poses courantes ; puis une dernière estimation aux poses finales pour la reconstruction
             let biais = BiasConfig::default();
             let (mut poses, mut slices) = (header_poses, Vec::new());
             for _ in 0..config.s2s_bias_rounds {
-                let corriges = correct_stacks(stacks, &estimate_bias_fields(stacks, &poses, &biais)?, config.s2s_bias_min_reduction);
+                let corriges = correct_stacks(
+                    stacks,
+                    &estimate_bias_fields(stacks, &poses, &biais)?,
+                    config.s2s_bias_min_reduction,
+                );
                 let rapport = register_slices_s2s(&corriges, &poses, &s2s_config(config), device)?;
                 (poses, slices) = (rapport.poses, rapport.slices);
             }
-            let corriges = correct_stacks(stacks, &estimate_bias_fields(stacks, &poses, &biais)?, config.s2s_bias_min_reduction);
+            let corriges = correct_stacks(
+                stacks,
+                &estimate_bias_fields(stacks, &poses, &biais)?,
+                config.s2s_bias_min_reduction,
+            );
             let (poses, slices) = refine_with_slice_to_volume(&corriges, poses, slices, config, device)?;
-            let volume = reconstruct_with_poses(&grid, &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction), &poses, config)?;
-            Ok(ReconstructionOutput { grid, volume, poses, slices })
+            let volume = reconstruct_with_poses(
+                &grid,
+                &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
+                &poses,
+                config,
+            )?;
+            Ok(ReconstructionOutput {
+                grid,
+                volume,
+                poses,
+                slices,
+            })
         }
         Motion::SliceToVolume => {
             let loop_config = loop_config(config);
-            let result = reconstruct_with_motion_correction(&grid, stacks, &header_poses, loop_config, device, |_, _, _| {})?;
+            let result =
+                reconstruct_with_motion_correction(&grid, stacks, &header_poses, loop_config, device, |_, _, _| {})?;
             // la boucle rend une reconstruction de Tikhonov ; avec `edge_kappa > 0`, la reconstruction finale est refaite préservant les contours, aux poses finales
-            let volume = if config.edge_kappa > 0.0 { reconstruct_with_poses(&grid, stacks, &result.poses, config)? } else { result.volume };
+            let volume = if config.edge_kappa > 0.0 {
+                reconstruct_with_poses(&grid, stacks, &result.poses, config)?
+            } else {
+                result.volume
+            };
             let slices = result.cycles.last().map(|r| r.slices.clone()).unwrap_or_default();
-            Ok(ReconstructionOutput { grid, volume, poses: result.poses, slices })
+            Ok(ReconstructionOutput {
+                grid,
+                volume,
+                poses: result.poses,
+                slices,
+            })
         }
     }
 }
@@ -291,7 +356,12 @@ pub(crate) fn slices_to_exclude(slices: &[SliceReport], fraction: f64) -> Vec<(u
         return Vec::new();
     }
     let mut recalees: Vec<&SliceReport> = slices.iter().filter(|s| s.registered).collect();
-    recalees.sort_by(|a, b| a.ncc_final.partial_cmp(&b.ncc_final).unwrap_or(std::cmp::Ordering::Equal).then((a.stack, a.slice).cmp(&(b.stack, b.slice))));
+    recalees.sort_by(|a, b| {
+        a.ncc_final
+            .partial_cmp(&b.ncc_final)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then((a.stack, a.slice).cmp(&(b.stack, b.slice)))
+    });
     let n = (fraction.min(1.0) * recalees.len() as f64).floor() as usize;
     let mut exclues: Vec<(usize, usize)> = recalees.iter().take(n).map(|s| (s.stack, s.slice)).collect();
     exclues.sort_unstable();
@@ -301,17 +371,38 @@ pub(crate) fn slices_to_exclude(slices: &[SliceReport], fraction: f64) -> Vec<(u
 /// Copie des `stacks` dont les coupes désignées par [`slices_to_exclude`] sont retirées du masque (ne contribuent plus à la reconstruction) ; `stacks` copiés tels quels si `fraction <= 0`.
 pub(crate) fn without_excluded_slices(stacks: &[Stack], slices: &[SliceReport], fraction: f64) -> Vec<Stack> {
     let exclues = slices_to_exclude(slices, fraction);
-    stacks.iter().enumerate().map(|(si, s)| s.without_slices(&exclues.iter().filter(|(st, _)| *st == si).map(|(_, k)| *k).collect::<Vec<_>>())).collect()
+    stacks
+        .iter()
+        .enumerate()
+        .map(|(si, s)| {
+            s.without_slices(
+                &exclues
+                    .iter()
+                    .filter(|(st, _)| *st == si)
+                    .map(|(_, k)| *k)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }
 
 /// **Raffinement coupe-volume** après le coupe-coupe : `config.s2v_refine_cycles` cycles de la boucle coupe-volume ([`reconstruct_with_motion_correction`]) partant des `poses` du coupe-coupe, avec une reconstruction à la résolution `config.s2v_refine_resolution_mm` (grossière, pour borner le temps). Rend les poses finales et le rapport par coupe du dernier cycle
 /// (`slices` inchangé si aucun cycle n'a de rapport). Sans effet (poses et rapport rendus tels quels) si `s2v_refine_cycles = 0`.
-pub(crate) fn refine_with_slice_to_volume(stacks: &[Stack], poses: SlicePoses, slices: Vec<SliceReport>, config: &ReconstructionConfig, device: &Device) -> Result<(SlicePoses, Vec<SliceReport>), SvrError> {
+pub(crate) fn refine_with_slice_to_volume(
+    stacks: &[Stack],
+    poses: SlicePoses,
+    slices: Vec<SliceReport>,
+    config: &ReconstructionConfig,
+    device: &Device,
+) -> Result<(SlicePoses, Vec<SliceReport>), SvrError> {
     if config.s2v_refine_cycles == 0 {
         return Ok((poses, slices));
     }
     let grille = reconstruction_grid(stacks, config.s2v_refine_resolution_mm, config.margin_mm)?;
-    let reglages = loop_config(&ReconstructionConfig { s2v_cycles: config.s2v_refine_cycles, ..config.clone() });
+    let reglages = loop_config(&ReconstructionConfig {
+        s2v_cycles: config.s2v_refine_cycles,
+        ..config.clone()
+    });
     let resultat = reconstruct_with_motion_correction(&grille, stacks, &poses, reglages, device, |_, _, _| {})?;
     let slices = resultat.cycles.last().map(|r| r.slices.clone()).unwrap_or(slices);
     Ok((resultat.poses, slices))
@@ -322,7 +413,11 @@ pub(crate) fn correct_stacks(stacks: &[Stack], champs: &BiasFields, min_reductio
     if champs.inconsistency_reduction() < min_reduction {
         return stacks.to_vec();
     }
-    stacks.iter().enumerate().map(|(s, stack)| stack.divided_by_log_field(|x| champs.log_field(s, x))).collect()
+    stacks
+        .iter()
+        .enumerate()
+        .map(|(s, stack)| stack.divided_by_log_field(|x| champs.log_field(s, x)))
+        .collect()
 }
 
 /// Réglages de la boucle coupe-volume correspondant à `config` ; les options expérimentales non retenues (flou grossier, rejet des poses aberrantes) sont désactivées.
@@ -335,7 +430,12 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
         alpha: config.alpha,
         cg_max_iterations: config.cg_max_iterations,
         cg_tolerance: config.cg_tolerance,
-        robust: RobustConfig { extra_starts: config.s2v_extra_starts, start_amplitude_mm: config.s2v_start_amplitude_mm, batched: config.s2v_batched, ..RobustConfig::new(config.s2v_suspect_ncc) },
+        robust: RobustConfig {
+            extra_starts: config.s2v_extra_starts,
+            start_amplitude_mm: config.s2v_start_amplitude_mm,
+            batched: config.s2v_batched,
+            ..RobustConfig::new(config.s2v_suspect_ncc)
+        },
         leave_one_stack_out_cycles: if config.s2v_leave_slice_out { 0 } else { cycles },
         coarse_sigma_voxels: 0.0,
         leave_one_slice_out_cycles: if config.s2v_leave_slice_out { cycles } else { 0 },
@@ -347,13 +447,29 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
 }
 
 /// Volume reconstruit sur `grid` avec des poses données : gradient conjugué (réglages `alpha`, `cg_max_iterations` et `cg_tolerance` de `config`) depuis l'adjoint normalisé.
-pub(crate) fn reconstruct_with_poses(grid: &GridSpec, stacks: &[Stack], poses: &SlicePoses, config: &ReconstructionConfig) -> Result<Array3<f64>, SvrError> {
-    let mut problem = ReconstructionProblem::with_poses_covered(grid, stacks, poses, config.alpha, config.min_stack_coverage)?;
+pub(crate) fn reconstruct_with_poses(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    config: &ReconstructionConfig,
+) -> Result<Array3<f64>, SvrError> {
+    let mut problem =
+        ReconstructionProblem::with_poses_covered(grid, stacks, poses, config.alpha, config.min_stack_coverage)?;
     let x0 = problem.initial_guess();
     if config.edge_kappa > 0.0 {
-        Ok(problem.conjugate_gradient_edge_preserving(&x0, config.cg_max_iterations, config.cg_tolerance, config.edge_outer, config.edge_kappa).x)
+        Ok(problem
+            .conjugate_gradient_edge_preserving(
+                &x0,
+                config.cg_max_iterations,
+                config.cg_tolerance,
+                config.edge_outer,
+                config.edge_kappa,
+            )
+            .x)
     } else {
-        Ok(problem.conjugate_gradient(&x0, config.cg_max_iterations, config.cg_tolerance).x)
+        Ok(problem
+            .conjugate_gradient(&x0, config.cg_max_iterations, config.cg_tolerance)
+            .x)
     }
 }
 
@@ -371,7 +487,10 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         temporal_robust_mm: config.s2s_temporal_robust_mm,
         temporal_robust_start_mm: config.s2s_temporal_robust_start_mm,
         temporal_info_exponent: config.s2s_temporal_info_exponent,
-        intersection: crate::s2s::IntersectionConfig { highpass_sigma_mm: config.s2s_highpass_mm, ..Default::default() },
+        intersection: crate::s2s::IntersectionConfig {
+            highpass_sigma_mm: config.s2s_highpass_mm,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

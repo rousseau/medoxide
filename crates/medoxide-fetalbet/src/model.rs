@@ -36,7 +36,10 @@
 #![allow(dead_code)]
 
 extern crate alloc;
-use burn::prelude::*;
+use burn::nn::conv::Conv2d;
+use burn::nn::conv::Conv2dConfig;
+use burn::nn::conv::ConvTranspose2d;
+use burn::nn::conv::ConvTranspose2dConfig;
 use burn::nn::BatchNorm;
 use burn::nn::BatchNormConfig;
 use burn::nn::InstanceNorm;
@@ -44,14 +47,10 @@ use burn::nn::InstanceNormConfig;
 use burn::nn::PRelu;
 use burn::nn::PReluConfig;
 use burn::nn::PaddingConfig2d;
-use burn::nn::conv::Conv2d;
-use burn::nn::conv::Conv2dConfig;
-use burn::nn::conv::ConvTranspose2d;
-use burn::nn::conv::ConvTranspose2dConfig;
+use burn::prelude::*;
 use burn::tensor::Bytes;
 use burn_store::BurnpackStore;
 use burn_store::ModuleSnapshot;
-
 
 #[derive(Module, Debug)]
 pub struct Model {
@@ -102,7 +101,6 @@ pub struct Model {
     device: Device,
 }
 
-
 extern crate std;
 
 impl Model {
@@ -112,9 +110,7 @@ impl Model {
         let mut store = BurnpackStore::from_file(&file);
         model
             .load_from(&mut store)
-            .unwrap_or_else(|e| {
-                panic!("Failed to load burnpack file {}: {e}", file.as_ref().display())
-            });
+            .unwrap_or_else(|e| panic!("Failed to load burnpack file {}: {e}", file.as_ref().display()));
         model
     }
 
@@ -458,9 +454,7 @@ impl Model {
         let conv2d10_out1 = self.conv2d10.forward(relu9_out1);
         let relu10_out1 = burn::tensor::activation::relu(conv2d10_out1);
         let convtranspose2d1_out1 = self.convtranspose2d1.forward(relu10_out1);
-        let batchnormalization1_out1 = self
-            .batchnormalization1
-            .forward(convtranspose2d1_out1);
+        let batchnormalization1_out1 = self.batchnormalization1.forward(convtranspose2d1_out1);
         let relu11_out1 = burn::tensor::activation::relu(batchnormalization1_out1);
         let conv2d11_out1 = self.conv2d11.forward(relu11_out1.clone());
         let conv2d12_out1 = self.conv2d12.forward(relu8_out1.clone());
@@ -471,14 +465,10 @@ impl Model {
         let mul1_out1 = relu8_out1.mul(sigmoid1_out1);
         let concat1_out1 = burn::tensor::Tensor::cat([mul1_out1, relu11_out1].into(), 1);
         let conv2d14_out1 = self.conv2d14.forward(concat1_out1);
-        let instancenormalization1_out1 = self
-            .instancenormalization1
-            .forward(conv2d14_out1);
+        let instancenormalization1_out1 = self.instancenormalization1.forward(conv2d14_out1);
         let prelu1_out1 = self.prelu1.forward(instancenormalization1_out1);
         let convtranspose2d2_out1 = self.convtranspose2d2.forward(prelu1_out1);
-        let batchnormalization2_out1 = self
-            .batchnormalization2
-            .forward(convtranspose2d2_out1);
+        let batchnormalization2_out1 = self.batchnormalization2.forward(convtranspose2d2_out1);
         let relu13_out1 = burn::tensor::activation::relu(batchnormalization2_out1);
         let conv2d15_out1 = self.conv2d15.forward(relu13_out1.clone());
         let conv2d16_out1 = self.conv2d16.forward(relu6_out1.clone());
@@ -489,14 +479,10 @@ impl Model {
         let mul2_out1 = relu6_out1.mul(sigmoid2_out1);
         let concat2_out1 = burn::tensor::Tensor::cat([mul2_out1, relu13_out1].into(), 1);
         let conv2d18_out1 = self.conv2d18.forward(concat2_out1);
-        let instancenormalization2_out1 = self
-            .instancenormalization2
-            .forward(conv2d18_out1);
+        let instancenormalization2_out1 = self.instancenormalization2.forward(conv2d18_out1);
         let prelu2_out1 = self.prelu2.forward(instancenormalization2_out1);
         let convtranspose2d3_out1 = self.convtranspose2d3.forward(prelu2_out1);
-        let batchnormalization3_out1 = self
-            .batchnormalization3
-            .forward(convtranspose2d3_out1);
+        let batchnormalization3_out1 = self.batchnormalization3.forward(convtranspose2d3_out1);
         let relu15_out1 = burn::tensor::activation::relu(batchnormalization3_out1);
         let conv2d19_out1 = self.conv2d19.forward(relu15_out1.clone());
         let conv2d20_out1 = self.conv2d20.forward(relu4_out1.clone());
@@ -507,14 +493,10 @@ impl Model {
         let mul3_out1 = relu4_out1.mul(sigmoid3_out1);
         let concat3_out1 = burn::tensor::Tensor::cat([mul3_out1, relu15_out1].into(), 1);
         let conv2d22_out1 = self.conv2d22.forward(concat3_out1);
-        let instancenormalization3_out1 = self
-            .instancenormalization3
-            .forward(conv2d22_out1);
+        let instancenormalization3_out1 = self.instancenormalization3.forward(conv2d22_out1);
         let prelu3_out1 = self.prelu3.forward(instancenormalization3_out1);
         let convtranspose2d4_out1 = self.convtranspose2d4.forward(prelu3_out1);
-        let batchnormalization4_out1 = self
-            .batchnormalization4
-            .forward(convtranspose2d4_out1);
+        let batchnormalization4_out1 = self.batchnormalization4.forward(convtranspose2d4_out1);
         let relu17_out1 = burn::tensor::activation::relu(batchnormalization4_out1);
         let conv2d23_out1 = self.conv2d23.forward(relu17_out1.clone());
         let conv2d24_out1 = self.conv2d24.forward(relu2_out1.clone());
@@ -525,9 +507,7 @@ impl Model {
         let mul4_out1 = relu2_out1.mul(sigmoid4_out1);
         let concat4_out1 = burn::tensor::Tensor::cat([mul4_out1, relu17_out1].into(), 1);
         let conv2d26_out1 = self.conv2d26.forward(concat4_out1);
-        let instancenormalization4_out1 = self
-            .instancenormalization4
-            .forward(conv2d26_out1);
+        let instancenormalization4_out1 = self.instancenormalization4.forward(conv2d26_out1);
         let prelu4_out1 = self.prelu4.forward(instancenormalization4_out1);
         let conv2d27_out1 = self.conv2d27.forward(prelu4_out1);
         conv2d27_out1

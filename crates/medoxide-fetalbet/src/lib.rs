@@ -80,18 +80,13 @@ impl std::error::Error for MaskError {}
 pub fn normalize_slices(volume: &mut Array3<f32>) {
     for mut coupe in volume.axis_iter_mut(Axis(2)) {
         // Somme en f64 : plus précise que le f32 de la référence.
-        let positifs: Vec<f64> = coupe
-            .iter()
-            .filter(|&&v| v > 0.0)
-            .map(|&v| f64::from(v))
-            .collect();
+        let positifs: Vec<f64> = coupe.iter().filter(|&&v| v > 0.0).map(|&v| f64::from(v)).collect();
         let n = positifs.len();
         if n < 2 {
             continue;
         }
         let moyenne = positifs.iter().sum::<f64>() / n as f64;
-        let variance =
-            positifs.iter().map(|v| (v - moyenne).powi(2)).sum::<f64>() / (n - 1) as f64;
+        let variance = positifs.iter().map(|v| (v - moyenne).powi(2)).sum::<f64>() / (n - 1) as f64;
         let ecart_type = variance.sqrt() as f32;
         coupe.mapv_inplace(|v| if v > 0.0 { v / ecart_type } else { v });
     }
@@ -227,7 +222,11 @@ fn window_plan(size: usize, roi: usize, overlap: f64) -> AxisWindows {
             start - (start + roi).saturating_sub(padded_len)
         })
         .collect();
-    AxisWindows { pad_before, padded_len, starts }
+    AxisWindows {
+        pad_before,
+        padded_len,
+        starts,
+    }
 }
 
 /// Côté des fenêtres d'inférence (celui du modèle Fetal-BET).
@@ -262,7 +261,9 @@ fn infer_logits(model: &model::Model, device: &Device, volume: &Array3<f32>) -> 
     let mut compte = Array2::<f32>::zeros((px, py));
     for &sx in &plan_x.starts {
         for &sy in &plan_y.starts {
-            compte.slice_mut(s![sx..sx + ROI, sy..sy + ROI]).mapv_inplace(|c| c + 1.0);
+            compte
+                .slice_mut(s![sx..sx + ROI, sy..sy + ROI])
+                .mapv_inplace(|c| c + 1.0);
         }
     }
 
@@ -316,7 +317,8 @@ fn argmax_mask(logits: &Array4<f32>) -> Array3<u8> {
 
 /// Adresse des poids par défaut : le dépôt Hugging Face du projet, épinglé sur la
 /// révision qui contient ce fichier (le contenu à cette adresse ne change jamais).
-const MODEL_URL: &str = "https://huggingface.co/rousseau/medoxide-fetalbet/resolve/645902a2e04be584e3c7acc5faeeb52dab5579eb/attunet.bpk";
+const MODEL_URL: &str =
+    "https://huggingface.co/rousseau/medoxide-fetalbet/resolve/645902a2e04be584e3c7acc5faeeb52dab5579eb/attunet.bpk";
 /// Empreinte SHA-256 attendue pour ces poids.
 const MODEL_SHA256: &str = "a70bcbe8da5f791b751c293a851505eb1aa9aa44c50def0afc41fd34bd60c3c2";
 /// Nom du fichier de poids dans le dossier de cache.
@@ -343,9 +345,7 @@ fn cache_dir_from(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> O
 /// la bonne : un téléchargement interrompu ou corrompu ne laisse jamais un faux
 /// fichier de poids. Une progression par tranche de 10 % est écrite sur stderr.
 fn download_verified(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), MaskError> {
-    let echec = |contexte: &str, e: &dyn std::fmt::Display| {
-        MaskError::ModelDownload(format!("{contexte} : {e}"))
-    };
+    let echec = |contexte: &str, e: &dyn std::fmt::Display| MaskError::ModelDownload(format!("{contexte} : {e}"));
     let partiel = dest.with_extension("part");
 
     let resultat = (|| {
@@ -409,22 +409,16 @@ fn download_verified(url: &str, dest: &Path, expected_sha256: &str) -> Result<()
 /// le téléchargement, l'écriture ou la vérification échoue. Hors ligne, utiliser
 /// un fichier local (`--model`).
 pub fn default_model_path() -> Result<PathBuf, MaskError> {
-    let dossier = cache_dir_from(
-        std::env::var_os("XDG_CACHE_HOME"),
-        std::env::var_os("HOME"),
-    )
-    .ok_or_else(|| {
+    let dossier = cache_dir_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME")).ok_or_else(|| {
         MaskError::ModelDownload(
-            "aucun dossier de cache (ni XDG_CACHE_HOME ni HOME) ; indiquez les poids avec --model"
-                .to_string(),
+            "aucun dossier de cache (ni XDG_CACHE_HOME ni HOME) ; indiquez les poids avec --model".to_string(),
         )
     })?;
     let chemin = dossier.join(MODEL_FILE);
     if chemin.exists() {
         return Ok(chemin);
     }
-    std::fs::create_dir_all(&dossier)
-        .map_err(|e| MaskError::ModelDownload(format!("{} : {e}", dossier.display())))?;
+    std::fs::create_dir_all(&dossier).map_err(|e| MaskError::ModelDownload(format!("{} : {e}", dossier.display())))?;
     eprintln!(
         "Téléchargement des poids du modèle (121 Mo) vers {}\n  depuis {MODEL_URL}",
         chemin.display()
@@ -455,11 +449,7 @@ pub fn default_model_path() -> Result<PathBuf, MaskError> {
 /// si l'entrée est invalide ; `MaskError::ModelDownload` si le téléchargement des
 /// poids par défaut échoue. Un fichier de poids présent mais invalide fait
 /// paniquer le chargement du modèle (code généré).
-pub fn segment(
-    input_path: &Path,
-    output_path: &Path,
-    model_path: Option<&Path>,
-) -> Result<(), MaskError> {
+pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>) -> Result<(), MaskError> {
     if let Some(chemin) = model_path {
         if !chemin.exists() {
             return Err(MaskError::ModelNotFound(chemin.to_path_buf()));
@@ -525,10 +515,7 @@ mod tests {
 
         assert_eq!(lu.len(), attendu.len());
         let max_logit = attendu.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-        let max_ecart = lu
-            .iter()
-            .zip(&attendu)
-            .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+        let max_ecart = lu.iter().zip(&attendu).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
         let relatif = max_ecart / max_logit;
 
         // Sortie [1, 2, 256, 256] : canal 0 = fond, canal 1 = cerveau.
@@ -549,10 +536,7 @@ mod tests {
     fn normalize_slices_matches_reference() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
-            let mut volume = read_volume(Path::new(&format!(
-                "{racine}/data/sourcedata/fetus_{nom}.nii.gz"
-            )))
-            .unwrap();
+            let mut volume = read_volume(Path::new(&format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz"))).unwrap();
             normalize_slices(&mut volume);
             let attendu = lire_f32(&format!("{racine}/data/reference/fetus_{nom}_raw_norm.f32"));
             assert_eq!(volume.len(), attendu.len(), "fetus_{nom} : taille");
@@ -580,10 +564,7 @@ mod tests {
             let attendu = lire_f32(&chemin);
             assert_eq!(lu.len(), attendu.len(), "fetus_{nom} : taille {:?}", lu.dim());
             let max_valeur = attendu.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-            let max_ecart = lu
-                .iter()
-                .zip(&attendu)
-                .fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
+            let max_ecart = lu.iter().zip(&attendu).fold(0.0_f32, |m, (a, b)| m.max((a - b).abs()));
             max_ecart / max_valeur
         };
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
@@ -592,17 +573,9 @@ mod tests {
             let volume = read_volume(Path::new(&chemin)).unwrap();
 
             let mut prep = resample_in_plane(&volume, [info.spacing[0], info.spacing[1]]);
-            let rel_rech = ecart_relatif(
-                &prep,
-                format!("{racine}/data/reference/fetus_{nom}_resampled.f32"),
-                nom,
-            );
+            let rel_rech = ecart_relatif(&prep, format!("{racine}/data/reference/fetus_{nom}_resampled.f32"), nom);
             normalize_slices(&mut prep);
-            let rel_prep = ecart_relatif(
-                &prep,
-                format!("{racine}/data/reference/fetus_{nom}_prep.f32"),
-                nom,
-            );
+            let rel_prep = ecart_relatif(&prep, format!("{racine}/data/reference/fetus_{nom}_prep.f32"), nom);
             println!(
                 "fetus_{nom} {:?} : rééchantillonné {rel_rech:.2e} ; prétraité {rel_prep:.2e}",
                 prep.dim()
@@ -630,7 +603,15 @@ mod tests {
         ];
         for (taille, pad_before, padded_len, starts) in attendu {
             let plan = window_plan(taille, 256, 0.5);
-            assert_eq!(plan, AxisWindows { pad_before, padded_len, starts }, "taille {taille}");
+            assert_eq!(
+                plan,
+                AxisWindows {
+                    pad_before,
+                    padded_len,
+                    starts
+                },
+                "taille {taille}"
+            );
         }
     }
 
@@ -638,7 +619,10 @@ mod tests {
     fn dice(a: &Array3<u8>, b: &[u8]) -> f64 {
         assert_eq!(a.len(), b.len());
         let inter = a.iter().zip(b).filter(|(&x, &y)| x == 1 && y == 1).count();
-        let (na, nb) = (a.iter().filter(|&&x| x == 1).count(), b.iter().filter(|&&y| y == 1).count());
+        let (na, nb) = (
+            a.iter().filter(|&&x| x == 1).count(),
+            b.iter().filter(|&&y| y == 1).count(),
+        );
         2.0 * inter as f64 / (na + nb) as f64
     }
 
@@ -651,8 +635,7 @@ mod tests {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
         let chemin = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
         let info = volume_info(Path::new(&chemin)).unwrap();
-        let masque_monai =
-            std::fs::read(format!("{racine}/data/reference/fetus_{nom}_mask1mm.u8")).unwrap();
+        let masque_monai = std::fs::read(format!("{racine}/data/reference/fetus_{nom}_mask1mm.u8")).unwrap();
 
         // Prétraitement Rust ; sa grille donne aussi la forme du volume à 1 mm.
         let mut prep = resample_in_plane(
@@ -687,7 +670,10 @@ mod tests {
         // (2) Entrée issue du prétraitement Rust.
         let dice_rust = dice(&argmax_mask(&infer_logits(modele, device, &prep)), &masque_monai);
         println!("{message} ; Dice (prétraitement Rust) {dice_rust:.5}");
-        assert!(dice_rust >= 0.99, "fetus_{nom} : Dice (prétraitement Rust) {dice_rust:.5}");
+        assert!(
+            dice_rust >= 0.99,
+            "fetus_{nom} : Dice (prétraitement Rust) {dice_rust:.5}"
+        );
     }
 
     /// Étape 6b, version rapide (~1 min) : fetus_06, dont l'axe 240 est complété
@@ -742,7 +728,10 @@ mod tests {
             let officiel: Vec<u8> = officiel.iter().map(|&v| v as u8).collect();
             let diff = masque.iter().zip(&officiel).filter(|(a, b)| a != b).count();
             let d = dice(&masque, &officiel);
-            println!("fetus_{nom} : Dice {d:.6} ; voxels différents {diff}/{}", officiel.len());
+            println!(
+                "fetus_{nom} : Dice {d:.6} ; voxels différents {diff}/{}",
+                officiel.len()
+            );
             assert!(d >= 0.9999, "fetus_{nom} : Dice {d:.6}");
         }
     }
@@ -760,14 +749,10 @@ mod tests {
             .unwrap()
             .mapv(|v| v as u8);
 
-            let sortie = std::env::temp_dir()
-                .join(format!("medoxide_test_{}_{nom}.nii.gz", std::process::id()));
+            let sortie = std::env::temp_dir().join(format!("medoxide_test_{}_{nom}.nii.gz", std::process::id()));
             write_mask(&sortie, &masque, Path::new(&entree)).unwrap();
 
-            let (info_in, info_out) = (
-                volume_info(Path::new(&entree)).unwrap(),
-                volume_info(&sortie).unwrap(),
-            );
+            let (info_in, info_out) = (volume_info(Path::new(&entree)).unwrap(), volume_info(&sortie).unwrap());
             let relu = read_volume(&sortie).unwrap();
             std::fs::remove_file(&sortie).unwrap();
 
@@ -835,7 +820,10 @@ mod tests {
         let r = download_verified(url, &dest, &"0".repeat(64));
         let reste = std::fs::read_dir(&dossier).unwrap().count();
         std::fs::remove_dir_all(&dossier).unwrap();
-        assert!(matches!(r, Err(MaskError::ModelDownload(ref m)) if m.contains("SHA-256")), "{r:?}");
+        assert!(
+            matches!(r, Err(MaskError::ModelDownload(ref m)) if m.contains("SHA-256")),
+            "{r:?}"
+        );
         assert_eq!(reste, 0, "fichier résiduel après un échec");
     }
 

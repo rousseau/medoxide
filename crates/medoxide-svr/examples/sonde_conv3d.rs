@@ -25,7 +25,9 @@ fn main() {
         "wgpu" => Device::wgpu(DeviceKind::DefaultDevice),
         autre => panic!("backend inconnu : {autre} (wgpu ou flex)"),
     };
-    let conv: Conv3d = Conv3dConfig::new([canaux, canaux], [3, 3, 3]).with_padding(PaddingConfig3d::Same).init(&device);
+    let conv: Conv3d = Conv3dConfig::new([canaux, canaux], [3, 3, 3])
+        .with_padding(PaddingConfig3d::Same)
+        .init(&device);
 
     // amorçage (compilation des noyaux GPU) sur un petit cube, non chronométré
     let petit = Tensor::<5>::random([1, canaux, 16, 16, 16], Distribution::Default, &device);

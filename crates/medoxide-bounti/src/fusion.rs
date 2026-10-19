@@ -48,7 +48,12 @@ pub fn logits_fusionnes(image: Tensor<5>, reseaux: &[&dyn Fn(Tensor<5>) -> Tenso
 /// Étiquette de chaque voxel : le canal de plus grand logit, en ordre `[X, Y, Z]` (ordre C) pour un exemple (`[1, 20, X, Y, Z]`).
 pub fn etiquettes(logits: Tensor<5>) -> Vec<u8> {
     let indices = logits.argmax(1).into_data().convert::<i64>();
-    indices.try_to_vec::<i64>().expect("indices entiers").into_iter().map(|c| c as u8).collect()
+    indices
+        .try_to_vec::<i64>()
+        .expect("indices entiers")
+        .into_iter()
+        .map(|c| c as u8)
+        .collect()
 }
 
 #[cfg(test)]
@@ -80,17 +85,30 @@ mod tests {
         let device = Device::default();
         let (x, y, z) = (3usize, 2usize, 2usize);
         let valeur = |c: usize, i: usize, j: usize, k: usize| (((c * x + i) * y + j) * z + k) as f32;
-        let donnees: Vec<f32> = (0..CANAUX).flat_map(|c| (0..x).flat_map(move |i| (0..y).flat_map(move |j| (0..z).map(move |k| valeur(c, i, j, k))))).collect();
+        let donnees: Vec<f32> = (0..CANAUX)
+            .flat_map(|c| (0..x).flat_map(move |i| (0..y).flat_map(move |j| (0..z).map(move |k| valeur(c, i, j, k)))))
+            .collect();
         let entree = Tensor::<5>::from_data(TensorData::new(donnees, [1, CANAUX, x, y, z]), &device);
-        let echange = echanger_gauche_droite(entree.clone(), &device).into_data().try_to_vec::<f32>().unwrap();
+        let echange = echanger_gauche_droite(entree.clone(), &device)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         let retourne = retourner_x(entree).into_data().try_to_vec::<f32>().unwrap();
         for c in 0..CANAUX {
             for i in 0..x {
                 for j in 0..y {
                     for k in 0..z {
                         let position = ((c * x + i) * y + j) * z + k;
-                        assert_eq!(echange[position], valeur(PARTENAIRE[c] as usize, i, j, k), "échange c={c} i={i} j={j} k={k}");
-                        assert_eq!(retourne[position], valeur(c, x - 1 - i, j, k), "retournement c={c} i={i} j={j} k={k}");
+                        assert_eq!(
+                            echange[position],
+                            valeur(PARTENAIRE[c] as usize, i, j, k),
+                            "échange c={c} i={i} j={j} k={k}"
+                        );
+                        assert_eq!(
+                            retourne[position],
+                            valeur(c, x - 1 - i, j, k),
+                            "retournement c={c} i={i} j={j} k={k}"
+                        );
                     }
                 }
             }
@@ -104,7 +122,12 @@ mod tests {
         let device = Device::default();
         let (x, y, z) = (3usize, 2usize, 2usize);
         let image_donnees: Vec<f32> = (0..x * y * z).map(|v| 0.1 + 0.07 * v as f32).collect();
-        let coefficients = |graine: f32| -> (Vec<f32>, Vec<f32>) { ((0..CANAUX).map(|c| graine + 0.3 * c as f32).collect(), (0..CANAUX).map(|c| 0.5 - graine * 0.2 * c as f32).collect()) };
+        let coefficients = |graine: f32| -> (Vec<f32>, Vec<f32>) {
+            (
+                (0..CANAUX).map(|c| graine + 0.3 * c as f32).collect(),
+                (0..CANAUX).map(|c| 0.5 - graine * 0.2 * c as f32).collect(),
+            )
+        };
         let (a1, b1) = coefficients(1.0);
         let (a2, b2) = coefficients(2.5);
         let fabriquer = |a: Vec<f32>, b: Vec<f32>| {
@@ -124,7 +147,10 @@ mod tests {
         };
         let (r1, r2) = (fabriquer(a1.clone(), b1.clone()), fabriquer(a2.clone(), b2.clone()));
         let image = Tensor::<5>::from_data(TensorData::new(image_donnees.clone(), [1, 1, x, y, z]), &device);
-        let fusion = logits_fusionnes(image, &[&r1, &r2], &device).into_data().try_to_vec::<f32>().unwrap();
+        let fusion = logits_fusionnes(image, &[&r1, &r2], &device)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         let pixel = |i: usize, j: usize, k: usize| image_donnees[(i * y + j) * z + k];
         for c in 0..CANAUX {
             let p = PARTENAIRE[c] as usize;
@@ -140,7 +166,10 @@ mod tests {
                         }
                         attendu /= 4.0;
                         let obtenu = fusion[((c * x + i) * y + j) * z + k];
-                        assert!((obtenu - attendu).abs() <= 1e-5, "c={c} i={i} j={j} k={k} : {obtenu} contre {attendu}");
+                        assert!(
+                            (obtenu - attendu).abs() <= 1e-5,
+                            "c={c} i={i} j={j} k={k} : {obtenu} contre {attendu}"
+                        );
                     }
                 }
             }

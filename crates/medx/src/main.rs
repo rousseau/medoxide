@@ -186,9 +186,21 @@ enum Command {
 }
 
 /// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit le volume (et les poses si demandé).
-fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path, poses: Option<&std::path::Path>, qualite: Option<&std::path::Path>, device: Option<DeviceArg>, config: &ReconstructionConfig) -> ExitCode {
+fn svr_recon(
+    entrees: &[PathBuf],
+    masques: &[PathBuf],
+    sortie: &std::path::Path,
+    poses: Option<&std::path::Path>,
+    qualite: Option<&std::path::Path>,
+    device: Option<DeviceArg>,
+    config: &ReconstructionConfig,
+) -> ExitCode {
     if masques.len() != entrees.len() {
-        eprintln!("medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), entrees.len());
+        eprintln!(
+            "medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack",
+            masques.len(),
+            entrees.len()
+        );
         return ExitCode::FAILURE;
     }
     let debut = std::time::Instant::now();
@@ -198,11 +210,26 @@ fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path,
             s.set_brain_mask(m)?;
         }
         let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
-        let kind = device.map_or_else(|| medoxide_svr::pipeline::default_device_kind(config.motion), DeviceKind::from);
+        let kind = device.map_or_else(
+            || medoxide_svr::pipeline::default_device_kind(config.motion),
+            DeviceKind::from,
+        );
         // sur GPU, le recalage coupe-volume se fait par lots (bien plus rapide) ; sur CPU, le lot n'apporte rien
-        let config = &ReconstructionConfig { s2v_batched: kind == DeviceKind::Wgpu, ..config.clone() };
-        eprintln!("{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}", stacks.len(), config.motion, match kind { DeviceKind::Wgpu => "GPU (wgpu)", DeviceKind::Cpu => "CPU (flex)" });
-        let sortie_reconstruction = medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
+        let config = &ReconstructionConfig {
+            s2v_batched: kind == DeviceKind::Wgpu,
+            ..config.clone()
+        };
+        eprintln!(
+            "{} stacks, {n_coupes} coupes ; mouvement {:?}, calculs {}",
+            stacks.len(),
+            config.motion,
+            match kind {
+                DeviceKind::Wgpu => "GPU (wgpu)",
+                DeviceKind::Cpu => "CPU (flex)",
+            }
+        );
+        let sortie_reconstruction =
+            medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
         sortie_reconstruction.write_volume(sortie)?;
         if let Some(p) = poses {
             sortie_reconstruction.write_poses(&stacks, p)?;
@@ -228,7 +255,11 @@ fn svr_recon(entrees: &[PathBuf], masques: &[PathBuf], sortie: &std::path::Path,
 /// Avec des masques cérébraux, repère aussi les groupes de stacks qui partagent un repère.
 fn svr_info(chemins: &[PathBuf], masques: &[PathBuf], ecart_mm: f64) -> ExitCode {
     if !masques.is_empty() && masques.len() != chemins.len() {
-        eprintln!("medx svr info : {} masque(s) pour {} stack(s) : il en faut un par stack", masques.len(), chemins.len());
+        eprintln!(
+            "medx svr info : {} masque(s) pour {} stack(s) : il en faut un par stack",
+            masques.len(),
+            chemins.len()
+        );
         return ExitCode::FAILURE;
     }
     let mut stacks = match medoxide_svr::read_stacks(chemins) {
@@ -254,8 +285,18 @@ fn svr_info(chemins: &[PathBuf], masques: &[PathBuf], ecart_mm: f64) -> ExitCode
         println!("stack {}/{} : {}", n + 1, stacks.len(), s.path().display());
         println!("  dimensions   {nx} x {ny} x {nz} voxels ({nz} coupes)");
         println!("  espacement   {:.3} x {:.3} x {:.3} mm", sp[0], sp[1], sp[2]);
-        println!("  normale      ({:+.3}, {:+.3}, {:+.3})  sens des coupes croissantes", normale.x, normale.y, normale.z);
-        println!("  repère       {}", if gauche { "main gauche (déterminant < 0)" } else { "main droite (déterminant > 0)" });
+        println!(
+            "  normale      ({:+.3}, {:+.3}, {:+.3})  sens des coupes croissantes",
+            normale.x, normale.y, normale.z
+        );
+        println!(
+            "  repère       {}",
+            if gauche {
+                "main gauche (déterminant < 0)"
+            } else {
+                "main droite (déterminant > 0)"
+            }
+        );
         println!("  boîte monde  {}", format_boite(&b));
         ensemble = Some(match ensemble {
             Some(e) => e.union(&b),
@@ -268,14 +309,19 @@ fn svr_info(chemins: &[PathBuf], masques: &[PathBuf], ecart_mm: f64) -> ExitCode
     if !masques.is_empty() {
         match medoxide_svr::group_stacks(&stacks, ecart_mm) {
             Ok(g) => {
-                println!("\ngroupes de stacks (écart entre barycentres de masques <= {ecart_mm} mm, de proche en proche) :");
+                println!(
+                    "\ngroupes de stacks (écart entre barycentres de masques <= {ecart_mm} mm, de proche en proche) :"
+                );
                 for (n, groupe) in g.groups.iter().enumerate() {
                     let noms: Vec<String> = groupe.iter().map(|i| (i + 1).to_string()).collect();
                     println!("  groupe {} : stacks {}", n + 1, noms.join(", "));
                 }
                 println!("distances entre barycentres (mm), stacks numérotés comme ci-dessus :");
                 for ligne in &g.distances {
-                    println!("  {}", ligne.iter().map(|d| format!("{d:7.1}")).collect::<Vec<_>>().join(" "));
+                    println!(
+                        "  {}",
+                        ligne.iter().map(|d| format!("{d:7.1}")).collect::<Vec<_>>().join(" ")
+                    );
                 }
             }
             Err(e) => {
@@ -299,10 +345,83 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Svr { action: SvrAction::Info { input, mask, group_gap_mm } } => svr_info(&input, &mask, group_gap_mm),
-        Command::Svr { action: SvrAction::Recon { input, mask, output, quality, poses, motion, device, resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2s_exclude_fraction, s2v_cycles } } => {
-            let config = ReconstructionConfig { motion: motion.into(), resolution_mm, alpha, min_stack_coverage, edge_kappa, s2s_sweeps, s2s_coarse_sigma_pixels: s2s_coarse_sigma, s2s_coarse_sweeps, s2s_coarse_levels, s2s_highpass_mm, s2s_block_levels, s2s_block_sweeps, s2s_block_search_mm, s2s_bias_rounds, s2s_bias_min_reduction, s2s_temporal_weight, s2s_temporal_robust_mm, s2s_temporal_robust_start_mm, s2s_temporal_info_exponent, s2v_refine_cycles, s2v_refine_resolution_mm, s2s_exclude_fraction, s2v_cycles, ..Default::default() };
-            svr_recon(&input, &mask, &output, poses.as_deref(), quality.as_deref(), device, &config)
+        Command::Svr {
+            action:
+                SvrAction::Info {
+                    input,
+                    mask,
+                    group_gap_mm,
+                },
+        } => svr_info(&input, &mask, group_gap_mm),
+        Command::Svr {
+            action:
+                SvrAction::Recon {
+                    input,
+                    mask,
+                    output,
+                    quality,
+                    poses,
+                    motion,
+                    device,
+                    resolution_mm,
+                    alpha,
+                    min_stack_coverage,
+                    edge_kappa,
+                    s2s_sweeps,
+                    s2s_coarse_sigma,
+                    s2s_coarse_sweeps,
+                    s2s_coarse_levels,
+                    s2s_highpass_mm,
+                    s2s_block_levels,
+                    s2s_block_sweeps,
+                    s2s_block_search_mm,
+                    s2s_bias_rounds,
+                    s2s_bias_min_reduction,
+                    s2s_temporal_weight,
+                    s2s_temporal_robust_mm,
+                    s2s_temporal_robust_start_mm,
+                    s2s_temporal_info_exponent,
+                    s2v_refine_cycles,
+                    s2v_refine_resolution_mm,
+                    s2s_exclude_fraction,
+                    s2v_cycles,
+                },
+        } => {
+            let config = ReconstructionConfig {
+                motion: motion.into(),
+                resolution_mm,
+                alpha,
+                min_stack_coverage,
+                edge_kappa,
+                s2s_sweeps,
+                s2s_coarse_sigma_pixels: s2s_coarse_sigma,
+                s2s_coarse_sweeps,
+                s2s_coarse_levels,
+                s2s_highpass_mm,
+                s2s_block_levels,
+                s2s_block_sweeps,
+                s2s_block_search_mm,
+                s2s_bias_rounds,
+                s2s_bias_min_reduction,
+                s2s_temporal_weight,
+                s2s_temporal_robust_mm,
+                s2s_temporal_robust_start_mm,
+                s2s_temporal_info_exponent,
+                s2v_refine_cycles,
+                s2v_refine_resolution_mm,
+                s2s_exclude_fraction,
+                s2v_cycles,
+                ..Default::default()
+            };
+            svr_recon(
+                &input,
+                &mask,
+                &output,
+                poses.as_deref(),
+                quality.as_deref(),
+                device,
+                &config,
+            )
         }
         Command::Fetalbet { input, output, model } => {
             // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;

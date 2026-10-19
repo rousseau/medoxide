@@ -47,11 +47,20 @@ impl InstanceNormConfig {
     /// Construit la normalisation sur `device`.
     pub fn init(&self, device: &Device) -> InstanceNorm {
         let (gamma, beta) = if self.affine {
-            (Some(Initializer::Ones.init([self.num_channels], device)), Some(Initializer::Zeros.init([self.num_channels], device)))
+            (
+                Some(Initializer::Ones.init([self.num_channels], device)),
+                Some(Initializer::Zeros.init([self.num_channels], device)),
+            )
         } else {
             (None, None)
         };
-        InstanceNorm { gamma, beta, num_channels: self.num_channels, epsilon: self.epsilon, affine: self.affine }
+        InstanceNorm {
+            gamma,
+            beta,
+            num_channels: self.num_channels,
+            epsilon: self.epsilon,
+            affine: self.affine,
+        }
     }
 }
 
@@ -73,7 +82,9 @@ impl InstanceNorm {
             (Some(gamma), Some(beta)) => {
                 let mut forme = [1usize; D];
                 forme[1] = self.num_channels;
-                normalisee.mul(gamma.val().reshape(forme)).add(beta.val().reshape(forme))
+                normalisee
+                    .mul(gamma.val().reshape(forme))
+                    .add(beta.val().reshape(forme))
             }
             _ => normalisee,
         }

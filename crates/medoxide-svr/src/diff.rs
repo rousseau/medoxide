@@ -49,7 +49,11 @@ pub fn trilinear_sample(volume: &Tensor<1>, dims: [usize; 3], coords: Tensor<2>)
         let c = axe(a);
         let max = (dims[a] - 1) as f64;
         // 1 si 0 <= c <= n-1 : produit des indicateurs des axes.
-        let dedans = c.clone().greater_equal_elem(0.0).bool_and(c.clone().lower_equal_elem(max)).float();
+        let dedans = c
+            .clone()
+            .greater_equal_elem(0.0)
+            .bool_and(c.clone().lower_equal_elem(max))
+            .float();
         inside = inside * dedans;
         // Ramené au bord pour que la lecture reste valide ; les points dehors sont ignorés par `inside`.
         let c = c.clamp(0.0, max);
@@ -78,7 +82,10 @@ pub fn trilinear_sample(volume: &Tensor<1>, dims: [usize; 3], coords: Tensor<2>)
         }
         valeurs = valeurs + poids * volume.clone().select(0, indice);
     }
-    TrilinearSample { values: valeurs, inside }
+    TrilinearSample {
+        values: valeurs,
+        inside,
+    }
 }
 
 /// Résultat de [`trilinear_sample_batch`] : une valeur et un indicateur « dans la grille » par coupe et par point.
@@ -107,10 +114,20 @@ pub fn trilinear_sample_batch(volumes: &Tensor<1>, dims: [usize; 3], coords: Ten
 ///
 /// # Panics
 /// Si un axe de `dims` est nul ou si `volumes` n'a pas `n_volumes·nx·ny·nz` éléments.
-pub(crate) fn trilinear_sample_rows(volumes: &Tensor<1>, dims: [usize; 3], n_volumes: usize, coords: Tensor<3>, volume_of_row: Tensor<1, Int>) -> TrilinearSampleBatch {
+pub(crate) fn trilinear_sample_rows(
+    volumes: &Tensor<1>,
+    dims: [usize; 3],
+    n_volumes: usize,
+    coords: Tensor<3>,
+    volume_of_row: Tensor<1, Int>,
+) -> TrilinearSampleBatch {
     assert!(dims.iter().all(|&n| n > 0), "chaque axe doit avoir au moins un voxel");
     let [s, p, _] = coords.dims();
-    assert_eq!(volumes.dims()[0], n_volumes * dims[0] * dims[1] * dims[2], "il faut un volume par coupe, de dimensions `dims`");
+    assert_eq!(
+        volumes.dims()[0],
+        n_volumes * dims[0] * dims[1] * dims[2],
+        "il faut un volume par coupe, de dimensions `dims`"
+    );
     let device = coords.device();
     let taille = (dims[0] * dims[1] * dims[2]) as i64;
 
@@ -122,7 +139,11 @@ pub(crate) fn trilinear_sample_rows(volumes: &Tensor<1>, dims: [usize; 3], n_vol
     for a in 0..3 {
         let c = axe(a);
         let max = (dims[a] - 1) as f64;
-        let dedans = c.clone().greater_equal_elem(0.0).bool_and(c.clone().lower_equal_elem(max)).float();
+        let dedans = c
+            .clone()
+            .greater_equal_elem(0.0)
+            .bool_and(c.clone().lower_equal_elem(max))
+            .float();
         inside = inside * dedans;
         let c = c.clamp(0.0, max);
         let plancher = c.clone().floor();
@@ -140,14 +161,21 @@ pub(crate) fn trilinear_sample_rows(volumes: &Tensor<1>, dims: [usize; 3], n_vol
         let mut poids = Tensor::<2>::ones([s, p], &device);
         for a in 0..3 {
             let haut_a = (coin >> (2 - a)) & 1 == 1;
-            let (i, w) = if haut_a { (haut[a].clone(), frac[a].clone()) } else { (bas[a].clone(), frac[a].clone().neg() + 1.0) };
+            let (i, w) = if haut_a {
+                (haut[a].clone(), frac[a].clone())
+            } else {
+                (bas[a].clone(), frac[a].clone().neg() + 1.0)
+            };
             indice = indice + i * pas[a];
             poids = poids * w;
         }
         let lus = volumes.clone().select(0, indice.reshape([s * p])).reshape([s, p]);
         valeurs = valeurs + poids * lus;
     }
-    TrilinearSampleBatch { values: valeurs, inside }
+    TrilinearSampleBatch {
+        values: valeurs,
+        inside,
+    }
 }
 
 /// Au-dessous de ce `θ²` (rad²), [`rotation_matrix`] utilise la série de Taylor : en `f32`, `1 − cos θ` y perd presque toute
@@ -177,7 +205,9 @@ pub fn rotation_matrix(omega: Tensor<1>) -> Tensor<2> {
         ),
         &device,
     );
-    let k: Tensor<2> = (generateurs * omega.clone().reshape([3, 1, 1])).sum_dim(0).reshape([3, 3]);
+    let k: Tensor<2> = (generateurs * omega.clone().reshape([3, 1, 1]))
+        .sum_dim(0)
+        .reshape([3, 3]);
 
     let th2 = (omega.clone() * omega).sum(); // forme [1]
     let petit = th2.clone().lower_elem(ROTATION_SERIES_THETA2);
@@ -191,7 +221,10 @@ pub fn rotation_matrix(omega: Tensor<1>) -> Tensor<2> {
     let a = a_exacte.mask_where(petit.clone(), a_serie).reshape([1, 1]);
     let b = b_exacte.mask_where(petit, b_serie).reshape([1, 1]);
 
-    let identite = Tensor::<2>::from_floats(TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [3, 3]), &device);
+    let identite = Tensor::<2>::from_floats(
+        TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [3, 3]),
+        &device,
+    );
     identite + a * k.clone() + b * k.clone().matmul(k)
 }
 
@@ -228,11 +261,15 @@ pub fn rotation_matrix_batch(omega: Tensor<2>) -> Tensor<3> {
         &device,
     );
     // K[r] = somme des omega[r, i] · E_i : forme [R, 3, 3]
-    let k: Tensor<3> = (generateurs * omega.clone().reshape([r, 3, 1, 1])).sum_dim(1).reshape([r, 3, 3]);
+    let k: Tensor<3> = (generateurs * omega.clone().reshape([r, 3, 1, 1]))
+        .sum_dim(1)
+        .reshape([r, 3, 3]);
 
     let th2 = (omega.clone() * omega).sum_dim(1); // [R, 1]
     let petit = th2.clone().lower_elem(ROTATION_SERIES_THETA2);
-    let th2_sur = th2.clone().mask_where(petit.clone(), Tensor::<2>::ones([r, 1], &device));
+    let th2_sur = th2
+        .clone()
+        .mask_where(petit.clone(), Tensor::<2>::ones([r, 1], &device));
     let th = th2_sur.clone().sqrt();
     let a_exacte = th.clone().sin() / th.clone();
     let b_exacte = (th.cos().neg() + 1.0) / th2_sur;
@@ -242,12 +279,20 @@ pub fn rotation_matrix_batch(omega: Tensor<2>) -> Tensor<3> {
     let a = a_exacte.mask_where(petit.clone(), a_serie).reshape([r, 1, 1]);
     let b = b_exacte.mask_where(petit, b_serie).reshape([r, 1, 1]);
 
-    let identite = Tensor::<3>::from_floats(TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [1, 3, 3]), &device);
+    let identite = Tensor::<3>::from_floats(
+        TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [1, 3, 3]),
+        &device,
+    );
     identite + a * k.clone() + b * k.clone().matmul(k)
 }
 
 /// Comme [`apply_pose`], pour `R` lignes à la fois : `points` `[R, P, 3]`, `pivot` `[R, 3]`, `params` `[R, 6]`, `rotation_scale_mm` `[R, 1]` (une échelle de rotation par ligne). Rend `[R, P, 3]`.
-pub fn apply_pose_batch(points: Tensor<3>, pivot: Tensor<2>, params: Tensor<2>, rotation_scale_mm: Tensor<2>) -> Tensor<3> {
+pub fn apply_pose_batch(
+    points: Tensor<3>,
+    pivot: Tensor<2>,
+    params: Tensor<2>,
+    rotation_scale_mm: Tensor<2>,
+) -> Tensor<3> {
     let r = points.dims()[0];
     let phi = params.clone().narrow(1, 0, 3);
     let t = params.narrow(1, 3, 3).reshape([r, 1, 3]);
@@ -286,7 +331,10 @@ impl VolumeTensors {
         let (nx, ny, nz) = volume.dim();
         let voxels: Vec<f32> = volume.data().iter().copied().collect(); // ordre standard : k varie le plus vite
         let inverse = &volume.inverse;
-        let lineaire: Vec<f32> = (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| inverse[(r, c)] as f32).collect();
+        let lineaire: Vec<f32> = (0..3)
+            .flat_map(|r| (0..3).map(move |c| (r, c)))
+            .map(|(r, c)| inverse[(r, c)] as f32)
+            .collect();
         let decalage: Vec<f32> = (0..3).map(|r| inverse[(r, 3)] as f32).collect();
         VolumeTensors {
             data: Tensor::<1>::from_floats(voxels.as_slice(), device),
@@ -319,9 +367,14 @@ pub fn slice_ncc(
     let p = points.dims()[0];
     let deplaces = apply_pose(points, pivot, params, rotation_scale_mm);
     // monde -> indices de voxel : x_vox = A⁻¹ x ; pour des lignes de points, x.matmul(Mᵀ) + b
-    let voxels = deplaces.matmul(volume.inverse_linear.clone().transpose()) + volume.inverse_offset.clone().reshape([1, 3]);
+    let voxels =
+        deplaces.matmul(volume.inverse_linear.clone().transpose()) + volume.inverse_offset.clone().reshape([1, 3]);
     let lecture = trilinear_sample(&volume.data, volume.dims, voxels);
-    ncc(intensities.reshape([1, p]), lecture.values.reshape([1, p]), (mask * lecture.inside).reshape([1, p]))
+    ncc(
+        intensities.reshape([1, p]),
+        lecture.values.reshape([1, p]),
+        (mask * lecture.inside).reshape([1, p]),
+    )
 }
 
 /// Les 6 paramètres de pose, dans un `Module` : c'est ce que les optimiseurs de Burn savent mettre à jour. Un `Param` est un tenseur
@@ -369,10 +422,20 @@ pub fn register_slice(
 ) -> RegistrationResult {
     let device = points.device();
     let depart: Vec<f32> = config.initial.iter().map(|&v| v as f32).collect();
-    let mut module = PoseModule { params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)) };
+    let mut module = PoseModule {
+        params: Param::from_tensor(Tensor::<1>::from_floats(depart.as_slice(), &device)),
+    };
     let mut optimiseur = AdamConfig::new().init();
     let evaluer = |pose: Tensor<1>| {
-        slice_ncc(volume, points.clone(), pivot.clone(), pose, rotation_scale_mm, intensities.clone(), mask.clone())
+        slice_ncc(
+            volume,
+            points.clone(),
+            pivot.clone(),
+            pose,
+            rotation_scale_mm,
+            intensities.clone(),
+            mask.clone(),
+        )
     };
     let mut historique = Vec::with_capacity(config.iterations + 1);
     let mut pas = config.learning_rate;
@@ -380,15 +443,20 @@ pub fn register_slice(
         let ncc = evaluer(module.params.val());
         historique.push(f64::from(ncc.clone().into_data().try_to_vec::<f32>().unwrap()[0]));
         let gradients = ncc.neg().sum().backward(); // perte = −NCC
-        // `from_grads` emprunte `module` ; `step` le consomme et rend le module mis à jour : deux instructions, dans cet ordre.
+                                                    // `from_grads` emprunte `module` ; `step` le consomme et rend le module mis à jour : deux instructions, dans cet ordre.
         let gradients = GradientsParams::from_grads(gradients, &module);
         module = optimiseur.step(pas, module, gradients);
         pas *= config.lr_decay;
     }
     let finale = module.params.val();
-    historique.push(f64::from(evaluer(finale.clone()).into_data().try_to_vec::<f32>().unwrap()[0]));
+    historique.push(f64::from(
+        evaluer(finale.clone()).into_data().try_to_vec::<f32>().unwrap()[0],
+    ));
     let params: Vec<f32> = finale.into_data().try_to_vec::<f32>().unwrap();
-    RegistrationResult { params: std::array::from_fn(|i| f64::from(params[i])), ncc_history: historique }
+    RegistrationResult {
+        params: std::array::from_fn(|i| f64::from(params[i])),
+        ncc_history: historique,
+    }
 }
 
 /// Les `n` volumes de référence d'un lot de coupes (un par coupe, de même grille), sur le `Device` : voxels de tous les volumes mis bout à bout, et l'inverse de l'affine (monde → indices de voxel) commun.
@@ -407,9 +475,16 @@ impl BatchVolumes {
     /// Si `voxels` n'a pas `count` fois le nombre de voxels de `geometry`.
     pub fn new(voxels: &[f32], count: usize, geometry: &Volume, device: &Device) -> BatchVolumes {
         let (nx, ny, nz) = geometry.dim();
-        assert_eq!(voxels.len(), count * nx * ny * nz, "il faut `count` volumes de la taille de la géométrie");
+        assert_eq!(
+            voxels.len(),
+            count * nx * ny * nz,
+            "il faut `count` volumes de la taille de la géométrie"
+        );
         let inverse = &geometry.inverse;
-        let lineaire: Vec<f32> = (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).map(|(r, c)| inverse[(r, c)] as f32).collect();
+        let lineaire: Vec<f32> = (0..3)
+            .flat_map(|r| (0..3).map(move |c| (r, c)))
+            .map(|(r, c)| inverse[(r, c)] as f32)
+            .collect();
         let decalage: Vec<f32> = (0..3).map(|r| inverse[(r, 3)] as f32).collect();
         BatchVolumes {
             data: Tensor::<1>::from_floats(voxels, device),
@@ -450,10 +525,17 @@ impl BatchSlices {
     pub fn new(slices: &[BatchSlice], device: &Device) -> BatchSlices {
         let r = slices.len();
         let p = slices.iter().map(|s| s.points.len()).max().unwrap_or(0);
-        let (mut pts, mut ints, mut poids) = (Vec::with_capacity(r * p * 3), Vec::with_capacity(r * p), Vec::with_capacity(r * p));
+        let (mut pts, mut ints, mut poids) = (
+            Vec::with_capacity(r * p * 3),
+            Vec::with_capacity(r * p),
+            Vec::with_capacity(r * p),
+        );
         let (mut pivots, mut echelles) = (Vec::with_capacity(r * 3), Vec::with_capacity(r));
         for s in slices {
-            assert!(!s.points.is_empty() && s.points.len() == s.intensities.len(), "une coupe doit avoir autant de positions que d'intensités, et au moins un pixel");
+            assert!(
+                !s.points.is_empty() && s.points.len() == s.intensities.len(),
+                "une coupe doit avoir autant de positions que d'intensités, et au moins un pixel"
+            );
             for n in 0..p {
                 let reel = n < s.points.len();
                 let q = if reel { &s.points[n] } else { &s.points[0] };
@@ -499,12 +581,36 @@ pub(crate) struct PoseBatchModule {
 }
 
 /// NCC de chaque ligne `[R]` pour les poses `params` `[R, 6]` : la chaîne de [`slice_ncc`] pour `R` lignes à la fois ; la ligne `r` lit le volume `volume_of_row[r]`.
-fn batch_ncc(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row: &Tensor<1, Int>, params: Tensor<2>) -> Tensor<1> {
+fn batch_ncc(
+    volumes: &BatchVolumes,
+    slices: &BatchSlices,
+    volume_of_row: &Tensor<1, Int>,
+    params: Tensor<2>,
+) -> Tensor<1> {
     let [r, p, _] = slices.points.dims();
-    let deplaces = apply_pose_batch(slices.points.clone(), slices.pivot.clone(), params, slices.scale.clone());
-    let voxels = deplaces.reshape([r * p, 3]).matmul(volumes.inverse_linear.clone().transpose()).reshape([r, p, 3]) + volumes.inverse_offset.clone().reshape([1, 1, 3]);
-    let lecture = trilinear_sample_rows(&volumes.data, volumes.dims, volumes.count, voxels, volume_of_row.clone());
-    ncc(slices.intensities.clone(), lecture.values, slices.weights.clone() * lecture.inside)
+    let deplaces = apply_pose_batch(
+        slices.points.clone(),
+        slices.pivot.clone(),
+        params,
+        slices.scale.clone(),
+    );
+    let voxels = deplaces
+        .reshape([r * p, 3])
+        .matmul(volumes.inverse_linear.clone().transpose())
+        .reshape([r, p, 3])
+        + volumes.inverse_offset.clone().reshape([1, 1, 3]);
+    let lecture = trilinear_sample_rows(
+        &volumes.data,
+        volumes.dims,
+        volumes.count,
+        voxels,
+        volume_of_row.clone(),
+    );
+    ncc(
+        slices.intensities.clone(),
+        lecture.values,
+        slices.weights.clone() * lecture.inside,
+    )
 }
 
 /// **Recale `R` lignes à la fois** (Adam sur un seul tenseur `[R, 6]`) : la ligne `r` part de `initial[r]` et cherche la pose de NCC maximale contre le volume `volume_of_row[r]`, avec les réglages `config` (hors `initial`).
@@ -512,13 +618,27 @@ fn batch_ncc(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row: &Tenso
 ///
 /// # Panics
 /// Si `initial` et `volume_of_row` n'ont pas autant d'éléments que `slices` de coupes.
-pub fn register_rows(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row: &[usize], initial: &[[f64; 6]], config: RegistrationConfig) -> (Vec<[f64; 6]>, Vec<f64>) {
+pub fn register_rows(
+    volumes: &BatchVolumes,
+    slices: &BatchSlices,
+    volume_of_row: &[usize],
+    initial: &[[f64; 6]],
+    config: RegistrationConfig,
+) -> (Vec<[f64; 6]>, Vec<f64>) {
     let r = slices.len();
-    assert!(initial.len() == r && volume_of_row.len() == r, "une pose de départ et un volume par ligne");
+    assert!(
+        initial.len() == r && volume_of_row.len() == r,
+        "une pose de départ et un volume par ligne"
+    );
     let device = slices.points.device();
     let depart: Vec<f32> = initial.iter().flat_map(|p| p.iter().map(|&v| v as f32)).collect();
-    let mut module = PoseBatchModule { params: Param::from_tensor(Tensor::<2>::from_floats(TensorData::new(depart, [r, 6]), &device)) };
-    let volume_idx = Tensor::<1, Int>::from_ints(volume_of_row.iter().map(|&v| v as i64).collect::<Vec<_>>().as_slice(), &device);
+    let mut module = PoseBatchModule {
+        params: Param::from_tensor(Tensor::<2>::from_floats(TensorData::new(depart, [r, 6]), &device)),
+    };
+    let volume_idx = Tensor::<1, Int>::from_ints(
+        volume_of_row.iter().map(|&v| v as i64).collect::<Vec<_>>().as_slice(),
+        &device,
+    );
     let mut optimiseur = AdamConfig::new().init();
     let mut pas = config.learning_rate;
     for _ in 0..config.iterations {
@@ -529,20 +649,36 @@ pub fn register_rows(volumes: &BatchVolumes, slices: &BatchSlices, volume_of_row
         pas *= config.lr_decay;
     }
     let finales = module.params.val();
-    let ncc_finale: Vec<f32> = batch_ncc(volumes, slices, &volume_idx, finales.clone()).into_data().try_to_vec::<f32>().unwrap();
+    let ncc_finale: Vec<f32> = batch_ncc(volumes, slices, &volume_idx, finales.clone())
+        .into_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     let params: Vec<f32> = finales.into_data().try_to_vec::<f32>().unwrap();
-    let poses = (0..r).map(|i| std::array::from_fn(|c| f64::from(params[i * 6 + c]))).collect();
+    let poses = (0..r)
+        .map(|i| std::array::from_fn(|c| f64::from(params[i * 6 + c])))
+        .collect();
     (poses, ncc_finale.iter().map(|&v| f64::from(v)).collect())
 }
 
 /// **Recalage robuste de `R` coupes à la fois** : comme [`register_slice_robust`] pour chaque coupe (premier recalage depuis `config.base.initial` ; si sa NCC finale est inférieure à `config.suspect_ncc`, relance depuis les
 /// `config.extra_starts` poses de départ déterministes, et garde la pose de NCC finale la plus haute), mais le premier recalage de toutes les coupes forme un lot, puis les relances de toutes les coupes suspectes en forment un autre.
 /// La coupe `r` lit le volume `r` de `volumes`. Rend un [`RobustResult`] par coupe.
-pub fn register_slices_robust_batch(volumes: &BatchVolumes, slices: &BatchSlices, config: RobustConfig) -> Vec<RobustResult> {
+pub fn register_slices_robust_batch(
+    volumes: &BatchVolumes,
+    slices: &BatchSlices,
+    config: RobustConfig,
+) -> Vec<RobustResult> {
     let r = slices.len();
     let toutes: Vec<usize> = (0..r).collect();
     let (poses, nccs) = register_rows(volumes, slices, &toutes, &vec![config.base.initial; r], config.base);
-    let mut resultats: Vec<RobustResult> = (0..r).map(|i| RobustResult { params: poses[i], ncc: nccs[i], first_ncc: nccs[i], runs: 1 }).collect();
+    let mut resultats: Vec<RobustResult> = (0..r)
+        .map(|i| RobustResult {
+            params: poses[i],
+            ncc: nccs[i],
+            first_ncc: nccs[i],
+            runs: 1,
+        })
+        .collect();
     let suspectes: Vec<usize> = (0..r).filter(|&i| nccs[i] < config.suspect_ncc).collect();
     let departs = departs_deterministes(config.extra_starts, config.start_amplitude_mm, config.seed);
     if suspectes.is_empty() || departs.is_empty() {
@@ -610,7 +746,9 @@ fn departs_deterministes(n: usize, amplitude_mm: f64, graine: u64) -> Vec<[f64; 
         etat ^= etat << 17;
         (etat >> 11) as f64 / (1u64 << 53) as f64
     };
-    (0..n).map(|_| std::array::from_fn(|_| (suivant() * 2.0 - 1.0) * amplitude_mm)).collect()
+    (0..n)
+        .map(|_| std::array::from_fn(|_| (suivant() * 2.0 - 1.0) * amplitude_mm))
+        .collect()
 }
 
 /// **Recalage robuste d'une coupe** : [`register_slice`] depuis `config.base.initial` ; si la NCC finale est inférieure à
@@ -628,9 +766,22 @@ pub fn register_slice_robust(
     config: RobustConfig,
 ) -> RobustResult {
     let finale = |r: &RegistrationResult| *r.ncc_history.last().unwrap();
-    let premier = register_slice(volume, points.clone(), pivot.clone(), rotation_scale_mm, intensities.clone(), mask.clone(), config.base);
+    let premier = register_slice(
+        volume,
+        points.clone(),
+        pivot.clone(),
+        rotation_scale_mm,
+        intensities.clone(),
+        mask.clone(),
+        config.base,
+    );
     let first_ncc = finale(&premier);
-    let mut meilleur = RobustResult { params: premier.params, ncc: first_ncc, first_ncc, runs: 1 };
+    let mut meilleur = RobustResult {
+        params: premier.params,
+        ncc: first_ncc,
+        first_ncc,
+        runs: 1,
+    };
     if first_ncc >= config.suspect_ncc {
         return meilleur;
     }
@@ -642,7 +793,10 @@ pub fn register_slice_robust(
             rotation_scale_mm,
             intensities.clone(),
             mask.clone(),
-            RegistrationConfig { initial: depart, ..config.base },
+            RegistrationConfig {
+                initial: depart,
+                ..config.base
+            },
         );
         meilleur.runs += 1;
         if finale(&essai) > meilleur.ncc {
@@ -668,14 +822,26 @@ pub fn pose_to_matrix(params: &[f64; 6], pivot: &Vector3<f64>, rotation_scale_mm
 impl RegistrationConfig {
     /// Réglages par défaut du recalage d'une coupe : pas 0,3 mm, 150 itérations, pas constant, départ en pose nulle (retenus à la sous-étape 5
     /// de l'étape 3a : les cinq combinaisons essayées donnaient le même minimum).
-    pub const DEFAULT: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0, initial: [0.0; 6] };
+    pub const DEFAULT: RegistrationConfig = RegistrationConfig {
+        learning_rate: 0.3,
+        iterations: 150,
+        lr_decay: 1.0,
+        initial: [0.0; 6],
+    };
 }
 
 impl RobustConfig {
     /// Recalage robuste par défaut : `RegistrationConfig::DEFAULT`, relance depuis 6 départs dans ±5 mm si la NCC finale est inférieure à
     /// `suspect_ncc`, graine 8675309 (celle du diagnostic). Le seuil dépend du montage : voir [`RobustConfig::suspect_ncc`].
     pub fn new(suspect_ncc: f64) -> RobustConfig {
-        RobustConfig { base: RegistrationConfig::DEFAULT, suspect_ncc, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309, batched: false }
+        RobustConfig {
+            base: RegistrationConfig::DEFAULT,
+            suspect_ncc,
+            extra_starts: 6,
+            start_amplitude_mm: 5.0,
+            seed: 8675309,
+            batched: false,
+        }
     }
 }
 
@@ -719,7 +885,14 @@ mod tests {
     fn sujets_de_test() -> Vec<String> {
         std::env::var("MEDOXIDE_SUJETS")
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| ["sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14"].iter().map(|s| s.to_string()).collect())
+            .unwrap_or_else(|_| {
+                [
+                    "sub-S01", "sub-S02", "sub-S03", "sub-S05", "sub-S09", "sub-S10", "sub-S11", "sub-S13", "sub-S14",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+            })
     }
 
     /// Générateur pseudo-aléatoire (xorshift64) déterministe, valeurs dans [0, 1[.
@@ -778,7 +951,9 @@ mod tests {
                     (false, _) => alea.suivant() * (n[a] as f64 + 3.0) - 2.0,
                 });
                 // Les points à moins de 1e-3 voxel d'une limite sont écartés (sauf le cas exact d'un axe d'un seul voxel).
-                if (0..3).all(|a| n[a] == 1 && c[a] == 0.0 || (c[a] - 0.0).abs() > 1e-3 && (c[a] - (n[a] - 1) as f64).abs() > 1e-3) {
+                if (0..3).all(|a| {
+                    n[a] == 1 && c[a] == 0.0 || (c[a] - 0.0).abs() > 1e-3 && (c[a] - (n[a] - 1) as f64).abs() > 1e-3
+                }) {
                     coords.push(c);
                 }
             }
@@ -793,7 +968,10 @@ mod tests {
                     pire = pire.max((f64::from(valeurs[m]) - f64::from(a)).abs());
                 }
             }
-            println!("dims {dims:?} : {n_dedans} points dedans sur {} ; écart max {pire:.2e}", coords.len());
+            println!(
+                "dims {dims:?} : {n_dedans} points dedans sur {} ; écart max {pire:.2e}",
+                coords.len()
+            );
             assert!(pire < 1e-5, "dims {dims:?} : {pire:.2e}");
         }
     }
@@ -808,7 +986,11 @@ mod tests {
         let (valeurs, dedans) = (vers_vec(sortie.values), vers_vec(sortie.inside));
         for (m, c) in coins.iter().enumerate() {
             assert_eq!(dedans[m], 1.0, "{c:?}");
-            assert_eq!(valeurs[m], volume.data()[[c[0] as usize, c[1] as usize, c[2] as usize]], "{c:?}");
+            assert_eq!(
+                valeurs[m],
+                volume.data()[[c[0] as usize, c[1] as usize, c[2] as usize]],
+                "{c:?}"
+            );
         }
     }
 
@@ -821,7 +1003,9 @@ mod tests {
     #[test]
     fn tensor_sampling_is_exact_for_a_linear_function() {
         let dims = (6, 5, 4);
-        let data = Array3::from_shape_fn(dims, |(i, j, k)| (1.0 + 2.0 * i as f64 - 3.0 * j as f64 + 0.5 * k as f64) as f32);
+        let data = Array3::from_shape_fn(dims, |(i, j, k)| {
+            (1.0 + 2.0 * i as f64 - 3.0 * j as f64 + 0.5 * k as f64) as f32
+        });
         let coords = [[0.0, 0.0, 0.0], [5.0, 4.0, 3.0], [1.5, 0.25, 2.75], [4.9, 3.1, 0.3]];
         let sortie = trilinear_sample(&aplati(&data), [6, 5, 4], points(&coords));
         let valeurs = vers_vec(sortie.values);
@@ -865,9 +1049,14 @@ mod tests {
             let r = matrice_depuis(rotation_matrix(tenseur_1d(&[w.x, w.y, w.z], &device())));
             let attendue = Rotation3::from_scaled_axis(*w).into_inner();
             pire = pire.max((r - attendue).abs().max());
-            pire_ortho = pire_ortho.max((r.transpose() * r - Matrix3::identity()).abs().max()).max((r.determinant() - 1.0).abs());
+            pire_ortho = pire_ortho
+                .max((r.transpose() * r - Matrix3::identity()).abs().max())
+                .max((r.determinant() - 1.0).abs());
         }
-        println!("{} rotations : écart max à nalgebra {pire:.2e} ; orthonormalité/déterminant {pire_ortho:.2e}", vecteurs.len());
+        println!(
+            "{} rotations : écart max à nalgebra {pire:.2e} ; orthonormalité/déterminant {pire_ortho:.2e}",
+            vecteurs.len()
+        );
         assert!(pire < 1e-5, "{pire:.2e}");
         assert!(pire_ortho < 1e-5, "{pire_ortho:.2e}");
     }
@@ -878,11 +1067,16 @@ mod tests {
             let (u1, u2) = (alea.suivant().max(1e-12), alea.suivant());
             (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
         };
-        (0..n).map(|_| Vector3::new(gauss(), gauss(), gauss()) * 17.3 + Vector3::new(10.0, -20.0, 5.0)).collect()
+        (0..n)
+            .map(|_| Vector3::new(gauss(), gauss(), gauss()) * 17.3 + Vector3::new(10.0, -20.0, 5.0))
+            .collect()
     }
 
     fn tenseur_points(points: &[Vector3<f64>], device: &Device) -> Tensor<2> {
-        let v: Vec<f32> = points.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+        let v: Vec<f32> = points
+            .iter()
+            .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+            .collect();
         Tensor::<2>::from_floats(TensorData::new(v, [points.len(), 3]), device)
     }
 
@@ -891,7 +1085,9 @@ mod tests {
         let somme: f64 = avant
             .iter()
             .enumerate()
-            .map(|(i, p)| (Vector3::new(f64::from(v[3 * i]), f64::from(v[3 * i + 1]), f64::from(v[3 * i + 2])) - p).norm_squared())
+            .map(|(i, p)| {
+                (Vector3::new(f64::from(v[3 * i]), f64::from(v[3 * i + 1]), f64::from(v[3 * i + 2])) - p).norm_squared()
+            })
             .sum();
         (somme / avant.len() as f64).sqrt()
     }
@@ -904,19 +1100,35 @@ mod tests {
         let points = nuage_isotrope(4000, &mut alea);
         let pivot = points.iter().sum::<Vector3<f64>>() / points.len() as f64;
         let echelle = rotation_scale_mm(&points, &pivot).unwrap();
-        let (tp, tc) = (tenseur_points(&points, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device));
+        let (tp, tc) = (
+            tenseur_points(&points, &device),
+            tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+        );
         // pivot : invariant sans translation, déplacé de t avec
         let seul = tenseur_points(&[pivot], &device);
-        let tourne = apply_pose(seul.clone(), tc.clone(), tenseur_1d(&[3.0, -2.0, 5.0, 0.0, 0.0, 0.0], &device), echelle);
+        let tourne = apply_pose(
+            seul.clone(),
+            tc.clone(),
+            tenseur_1d(&[3.0, -2.0, 5.0, 0.0, 0.0, 0.0], &device),
+            echelle,
+        );
         assert!(deplacement_rms(&[pivot], tourne) < 1e-4, "le pivot doit rester fixe");
-        let decale = apply_pose(seul, tc.clone(), tenseur_1d(&[3.0, -2.0, 5.0, 1.0, 2.0, -3.0], &device), echelle);
+        let decale = apply_pose(
+            seul,
+            tc.clone(),
+            tenseur_1d(&[3.0, -2.0, 5.0, 1.0, 2.0, -3.0], &device),
+            echelle,
+        );
         assert!((deplacement_rms(&[pivot], decale) - (1.0f64 + 4.0 + 9.0).sqrt()).abs() < 1e-4);
         // sensibilité : 1 unité de chaque paramètre déplace de ≈ 1 mm (rms) ; rotation moyennée sur les 3 axes
         let mut rotations = Vec::new();
         for a in 0..6 {
             let mut p = [0.0; 6];
             p[a] = 1.0;
-            let d = deplacement_rms(&points, apply_pose(tp.clone(), tc.clone(), tenseur_1d(&p, &device), echelle));
+            let d = deplacement_rms(
+                &points,
+                apply_pose(tp.clone(), tc.clone(), tenseur_1d(&p, &device), echelle),
+            );
             println!("paramètre {a} = 1 : déplacement quadratique moyen {d:.4} mm");
             if a >= 3 {
                 assert!((d - 1.0).abs() < 1e-4, "translation : {d}");
@@ -935,7 +1147,11 @@ mod tests {
         let p = Vector3::new(1.0, 2.0, 3.0);
         assert!(rotation_scale_mm(&[p, p], &p).is_none(), "tous les points au pivot");
         // deux points à 3 mm du pivot : r_rms = 3, échelle = 3 √(2/3)
-        let e = rotation_scale_mm(&[Vector3::new(3.0, 0.0, 0.0), Vector3::new(0.0, -3.0, 0.0)], &Vector3::zeros()).unwrap();
+        let e = rotation_scale_mm(
+            &[Vector3::new(3.0, 0.0, 0.0), Vector3::new(0.0, -3.0, 0.0)],
+            &Vector3::zeros(),
+        )
+        .unwrap();
         assert!((e - 3.0 * (2.0f64 / 3.0).sqrt()).abs() < 1e-12);
     }
 
@@ -943,7 +1159,10 @@ mod tests {
     fn cout_f64(p: &[f64; 6], x: &[Vector3<f64>], y: &[Vector3<f64>], pivot: &Vector3<f64>, echelle: f64) -> f64 {
         let r = Rotation3::from_scaled_axis(Vector3::new(p[0], p[1], p[2]) / echelle);
         let t = Vector3::new(p[3], p[4], p[5]);
-        x.iter().zip(y).map(|(x, y)| (pivot + r * (x - pivot) + t - y).norm_squared()).sum()
+        x.iter()
+            .zip(y)
+            .map(|(x, y)| (pivot + r * (x - pivot) + t - y).norm_squared())
+            .sum()
     }
 
     /// Critère 4 : le gradient automatique de Burn (f32) égale les différences finies centrées (f64), en ω = 0 comme ailleurs.
@@ -958,16 +1177,40 @@ mod tests {
         let vraie = Rotation3::from_scaled_axis(Vector3::new(0.02, -0.03, 0.01));
         let y: Vec<Vector3<f64>> = x
             .iter()
-            .map(|p| pivot + vraie * (p - pivot) + Vector3::new(1.0, -2.0, 1.5) + Vector3::new(alea.suivant() - 0.5, alea.suivant() - 0.5, alea.suivant() - 0.5) * 0.4)
+            .map(|p| {
+                pivot
+                    + vraie * (p - pivot)
+                    + Vector3::new(1.0, -2.0, 1.5)
+                    + Vector3::new(alea.suivant() - 0.5, alea.suivant() - 0.5, alea.suivant() - 0.5) * 0.4
+            })
             .collect();
-        let (tx, ty, tc) = (tenseur_points(&x, &device), tenseur_points(&y, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device));
-        for p0 in [[0.0; 6], [1.5, -2.0, 0.7, 0.4, -0.3, 0.9], [20.0, -10.0, 15.0, 0.0, 0.0, 0.0]] {
+        let (tx, ty, tc) = (
+            tenseur_points(&x, &device),
+            tenseur_points(&y, &device),
+            tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+        );
+        for p0 in [
+            [0.0; 6],
+            [1.5, -2.0, 0.7, 0.4, -0.3, 0.9],
+            [20.0, -10.0, 15.0, 0.0, 0.0, 0.0],
+        ] {
             let params = tenseur_1d(&p0, &device).require_grad();
             let ecart = apply_pose(tx.clone(), tc.clone(), params.clone(), echelle) - ty.clone();
             let perte = (ecart.clone() * ecart).sum();
             let grads = perte.backward();
-            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
-            assert!(g_auto.iter().all(|v| v.is_finite()), "gradient non fini en {p0:?} : {g_auto:?}");
+            let g_auto: Vec<f64> = params
+                .grad(&grads)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .map(|&v| f64::from(v))
+                .collect();
+            assert!(
+                g_auto.iter().all(|v| v.is_finite()),
+                "gradient non fini en {p0:?} : {g_auto:?}"
+            );
             let h = 1e-4;
             let g_diff: Vec<f64> = (0..6)
                 .map(|a| {
@@ -978,7 +1221,13 @@ mod tests {
                 })
                 .collect();
             let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let erreur = g_auto.iter().zip(&g_diff).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+            let erreur = g_auto
+                .iter()
+                .zip(&g_diff)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+                / norme;
             println!("p0 = {p0:?} : |g| = {norme:.1}, écart relatif autodiff / différences finies {erreur:.2e}");
             assert!(erreur < 1e-3, "{erreur:.2e} en {p0:?}");
         }
@@ -992,7 +1241,13 @@ mod tests {
 
     fn ncc_de(a: &[&[f64]], b: &[&[f64]], w: &[&[f64]]) -> Vec<f64> {
         let d = device();
-        ncc(tenseur_2d(a, &d), tenseur_2d(b, &d), tenseur_2d(w, &d)).into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect()
+        ncc(tenseur_2d(a, &d), tenseur_2d(b, &d), tenseur_2d(w, &d))
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect()
     }
 
     const A8: [f64; 8] = [0.3, 1.2, -0.5, 2.0, 0.9, 1.7, -1.1, 0.4];
@@ -1022,8 +1277,14 @@ mod tests {
         // invariance aux changements d'échelle et de décalage de chaque image
         let base = ncc_de(&[&A8], &[&B8], &w)[0];
         for (alpha, beta) in [(2.5, 0.0), (0.4, 3.0), (10.0, -5.0)] {
-            assert!((ncc_de(&[&A8], &[&affine(alpha, beta)], &w)[0] - base).abs() < 1e-5, "b -> {alpha} b + {beta}");
-            assert!((ncc_de(&[&A8.map(|v| alpha * v + beta)], &[&B8], &w)[0] - base).abs() < 1e-5, "a -> {alpha} a + {beta}");
+            assert!(
+                (ncc_de(&[&A8], &[&affine(alpha, beta)], &w)[0] - base).abs() < 1e-5,
+                "b -> {alpha} b + {beta}"
+            );
+            assert!(
+                (ncc_de(&[&A8.map(|v| alpha * v + beta)], &[&B8], &w)[0] - base).abs() < 1e-5,
+                "a -> {alpha} a + {beta}"
+            );
         }
         // un pixel de poids nul n'a aucun effet, quelle que soit sa valeur
         let (mut a_bis, mut b_bis) = (A8, B8);
@@ -1048,8 +1309,14 @@ mod tests {
         let lot = ncc_de(&[&A8, &a2], &[&B8, &b2], &[&W8, &[1.0; 8]]);
         let seul1 = ncc_de(&[&A8], &[&B8], &[&W8])[0];
         let seul2 = ncc_de(&[&a2], &[&b2], &[&[1.0; 8]])[0];
-        assert!((lot[0] - seul1).abs() < 1e-7 && (lot[1] - seul2).abs() < 1e-7, "{lot:?} contre {seul1}, {seul2}");
-        assert!((lot[0] - lot[1]).abs() > 0.1, "les deux coupes de test doivent différer");
+        assert!(
+            (lot[0] - seul1).abs() < 1e-7 && (lot[1] - seul2).abs() < 1e-7,
+            "{lot:?} contre {seul1}, {seul2}"
+        );
+        assert!(
+            (lot[0] - lot[1]).abs() > 0.1,
+            "les deux coupes de test doivent différer"
+        );
     }
 
     /// Critère 4 : coupe constante, masque vide : NCC nulle, valeur et gradient finis.
@@ -1082,9 +1349,21 @@ mod tests {
             cov / (va * vb + NCC_EPS).sqrt()
         };
         let device = device().autodiff();
-        let (a, b, w) = (tenseur_2d(&[&A8], &device), tenseur_2d(&[&B8], &device).require_grad(), tenseur_2d(&[&W8], &device));
+        let (a, b, w) = (
+            tenseur_2d(&[&A8], &device),
+            tenseur_2d(&[&B8], &device).require_grad(),
+            tenseur_2d(&[&W8], &device),
+        );
         let grads = ncc(a, b.clone(), w).sum().backward();
-        let g_auto: Vec<f64> = b.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+        let g_auto: Vec<f64> = b
+            .grad(&grads)
+            .unwrap()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect();
         let h = 1e-6;
         let g_diff: Vec<f64> = (0..8)
             .map(|i| {
@@ -1095,7 +1374,13 @@ mod tests {
             })
             .collect();
         let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let erreur = g_auto.iter().zip(&g_diff).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() / norme;
+        let erreur = g_auto
+            .iter()
+            .zip(&g_diff)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / norme;
         println!("|g| = {norme:.3}, écart relatif autodiff / différences finies {erreur:.2e}");
         assert!(erreur < 1e-3, "{erreur:.2e}");
         // un pixel de poids nul a un gradient nul
@@ -1110,7 +1395,9 @@ mod tests {
     /// centré en (0, 0, 0), le volume reste donc autour de l'origine.
     fn atlas() -> Volume {
         let chemin = format!("{}/../../data/atlas/gholipour/STA21.nii.gz", env!("CARGO_MANIFEST_DIR"));
-        let original = Volume::from_stack(&Stack::read(std::path::Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"));
+        let original = Volume::from_stack(
+            &Stack::read(std::path::Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"),
+        );
         let rotation = Rotation3::from_euler_angles(0.3, -0.2, 0.5).to_homogeneous();
         Volume::new(original.data().clone(), rotation * original.affine()).unwrap()
     }
@@ -1118,7 +1405,10 @@ mod tests {
     /// Une coupe de 56 × 56 pixels de 1 mm, oblique, au milieu de l'atlas : centres de pixels dans le monde.
     fn pixels_de_coupe() -> Vec<Vector3<f64>> {
         let r = Rotation3::from_euler_angles(0.5, -0.4, 0.8);
-        (0..56).flat_map(|j| (0..56).map(move |i| (i, j))).map(|(i, j)| r * Vector3::new(i as f64 - 27.5, j as f64 - 27.5, 0.0) + Vector3::new(1.0, -2.0, 3.0)).collect()
+        (0..56)
+            .flat_map(|j| (0..56).map(move |i| (i, j)))
+            .map(|(i, j)| r * Vector3::new(i as f64 - 27.5, j as f64 - 27.5, 0.0) + Vector3::new(1.0, -2.0, 3.0))
+            .collect()
     }
 
     /// Cas de test : atlas, pixels, intensités simulées à la pose vraie (échelle et décalage d'intensité arbitraires), masque, pivot.
@@ -1141,7 +1431,9 @@ mod tests {
 
     /// Pose appliquée en `f64` (référence) : `c + R (x − c) + t`.
     fn deplace(p: &[f64; 6], x: &Vector3<f64>, pivot: &Vector3<f64>, echelle: f64) -> Vector3<f64> {
-        pivot + Rotation3::from_scaled_axis(Vector3::new(p[0], p[1], p[2]) / echelle) * (x - pivot) + Vector3::new(p[3], p[4], p[5])
+        pivot
+            + Rotation3::from_scaled_axis(Vector3::new(p[0], p[1], p[2]) / echelle) * (x - pivot)
+            + Vector3::new(p[3], p[4], p[5])
     }
 
     fn cas() -> Cas {
@@ -1157,7 +1449,14 @@ mod tests {
             intensites.push(3.0 * v.unwrap_or(0.0) + 10.0);
             masque.push(f64::from(u8::from(v.is_some_and(|v| v > 150.0))));
         }
-        Cas { volume, points, intensites, masque, pivot, echelle }
+        Cas {
+            volume,
+            points,
+            intensites,
+            masque,
+            pivot,
+            echelle,
+        }
     }
 
     /// Coût de référence en f64 : pose de nalgebra, `Volume::sample` (validé contre scipy et SimpleITK), NCC pondérée.
@@ -1200,7 +1499,15 @@ mod tests {
     }
 
     fn ncc_tenseurs(c: &Cas, t: &Tenseurs, params: Tensor<1>) -> Tensor<1> {
-        slice_ncc(&t.volume, t.points.clone(), t.pivot.clone(), params, c.echelle, t.intensites.clone(), t.masque.clone())
+        slice_ncc(
+            &t.volume,
+            t.points.clone(),
+            t.pivot.clone(),
+            params,
+            c.echelle,
+            t.intensites.clone(),
+            t.masque.clone(),
+        )
     }
 
     /// L'échantillonneur `f64` de référence rend la même valeur que `Volume::sample` à l'arrondi `f32` près.
@@ -1225,11 +1532,30 @@ mod tests {
         let c = cas();
         let device = device();
         let t = en_tenseurs(&c, &device);
-        println!("{} pixels, dont {} dans le masque ; échelle de rotation {:.1} mm", c.points.len(), c.masque.iter().sum::<f64>(), c.echelle);
-        assert!(c.masque.iter().sum::<f64>() > 1000.0, "le masque doit contenir assez de pixels");
+        println!(
+            "{} pixels, dont {} dans le masque ; échelle de rotation {:.1} mm",
+            c.points.len(),
+            c.masque.iter().sum::<f64>(),
+            c.echelle
+        );
+        assert!(
+            c.masque.iter().sum::<f64>() > 1000.0,
+            "le masque doit contenir assez de pixels"
+        );
         let mut pire = 0.0_f64;
-        for p in [[0.0; 6], POSE_VRAIE, [2.0, 1.0, -3.0, 0.5, 0.5, -1.0], [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5], [0.0, 0.0, 0.0, 45.0, 0.0, 0.0]] {
-            let n = f64::from(ncc_tenseurs(&c, &t, tenseur_1d(&p, &device)).into_data().try_to_vec::<f32>().unwrap()[0]);
+        for p in [
+            [0.0; 6],
+            POSE_VRAIE,
+            [2.0, 1.0, -3.0, 0.5, 0.5, -1.0],
+            [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5],
+            [0.0, 0.0, 0.0, 45.0, 0.0, 0.0],
+        ] {
+            let n = f64::from(
+                ncc_tenseurs(&c, &t, tenseur_1d(&p, &device))
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()[0],
+            );
             let r = ncc_reference(&c, &p);
             println!("pose {p:?} : NCC tenseurs {n:.6}, référence f64 {r:.6}");
             pire = pire.max((n - r).abs());
@@ -1243,10 +1569,22 @@ mod tests {
         let c = cas();
         let device = device().autodiff();
         let t = en_tenseurs(&c, &device);
-        for p0 in [[0.0; 6], [2.0, 1.0, -3.0, 0.5, 0.5, -1.0], [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5]] {
+        for p0 in [
+            [0.0; 6],
+            [2.0, 1.0, -3.0, 0.5, 0.5, -1.0],
+            [-6.0, 5.0, 4.0, 3.0, -2.0, 2.5],
+        ] {
             let params = tenseur_1d(&p0, &device).require_grad();
             let grads = ncc_tenseurs(&c, &t, params.clone()).sum().backward();
-            let g_auto: Vec<f64> = params.grad(&grads).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v)).collect();
+            let g_auto: Vec<f64> = params
+                .grad(&grads)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .map(|&v| f64::from(v))
+                .collect();
             assert!(g_auto.iter().all(|v| v.is_finite()), "{g_auto:?}");
             // Pas 1e-6 : l'interpolation trilinéaire est affine par morceaux, donc l'écart des différences finies décroît
             // comme le pas (sauts de voxel dans la fenêtre : 1,4e-2 à 1e-2, 1,4e-3 à 1e-4, 2e-6 à 1e-6, limite de l'autodiff `f32`).
@@ -1260,7 +1598,13 @@ mod tests {
                 })
                 .collect();
             let norme = g_diff.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let erreur = g_auto.iter().zip(&g_diff).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt() / norme;
+            let erreur = g_auto
+                .iter()
+                .zip(&g_diff)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+                / norme;
             println!("p0 = {p0:?} : |g| = {norme:.4}\n   autodiff {g_auto:.4?}\n   diff. finies {g_diff:.4?}\n   écart relatif {erreur:.2e}");
             assert!(erreur < 1e-3, "{erreur:.2e} en {p0:?}");
         }
@@ -1273,11 +1617,27 @@ mod tests {
         let c = cas();
         let device = device().autodiff();
         let t = en_tenseurs(&c, &device);
-        let valeur = |p: &[f64; 6]| f64::from(ncc_tenseurs(&c, &t, tenseur_1d(p, &device)).into_data().try_to_vec::<f32>().unwrap()[0]);
+        let valeur = |p: &[f64; 6]| {
+            f64::from(
+                ncc_tenseurs(&c, &t, tenseur_1d(p, &device))
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()[0],
+            )
+        };
         let gradient = |p: &[f64; 6]| -> f64 {
             let params = tenseur_1d(p, &device).require_grad();
             let g = ncc_tenseurs(&c, &t, params.clone()).sum().backward();
-            params.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap().iter().map(|&v| f64::from(v).powi(2)).sum::<f64>().sqrt()
+            params
+                .grad(&g)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .map(|&v| f64::from(v).powi(2))
+                .sum::<f64>()
+                .sqrt()
         };
         let a_la_verite = valeur(&POSE_VRAIE);
         let (g_vrai, g_loin) = (gradient(&POSE_VRAIE), gradient(&[0.0; 6]));
@@ -1291,13 +1651,28 @@ mod tests {
                     let mut p = POSE_VRAIE;
                     p[a] += signe * f64::from(pas);
                     let v = valeur(&p);
-                    assert!(v < precedent + 1e-6 || signe < 0.0, "paramètre {a}, pas {}", signe * f64::from(pas));
+                    assert!(
+                        v < precedent + 1e-6 || signe < 0.0,
+                        "paramètre {a}, pas {}",
+                        signe * f64::from(pas)
+                    );
                     if signe > 0.0 {
                         precedent = v;
                     }
                 }
             }
-            let (plus5, moins5) = ({ let mut p = POSE_VRAIE; p[a] += 5.0; valeur(&p) }, { let mut p = POSE_VRAIE; p[a] -= 5.0; valeur(&p) });
+            let (plus5, moins5) = (
+                {
+                    let mut p = POSE_VRAIE;
+                    p[a] += 5.0;
+                    valeur(&p)
+                },
+                {
+                    let mut p = POSE_VRAIE;
+                    p[a] -= 5.0;
+                    valeur(&p)
+                },
+            );
             println!("paramètre {a} : NCC à ±5 : {plus5:.4} / {moins5:.4}");
             assert!(plus5 < a_la_verite - 0.001 && moins5 < a_la_verite - 0.001);
         }
@@ -1330,8 +1705,20 @@ mod tests {
         h.srow_x = std::array::from_fn(|c| affine[(0, c)] as f32);
         h.srow_y = std::array::from_fn(|c| affine[(1, c)] as f32);
         h.srow_z = std::array::from_fn(|c| affine[(2, c)] as f32);
-        h.pixdim = [1.0, PIXEL_MM as f32, PIXEL_MM as f32, EPAISSEUR_MM as f32, 1.0, 1.0, 1.0, 1.0];
-        WriterOptions::new(&chemin).reference_header(&h).write_nifti(&Array3::<f32>::zeros((N_PIXELS, N_PIXELS, 1))).unwrap();
+        h.pixdim = [
+            1.0,
+            PIXEL_MM as f32,
+            PIXEL_MM as f32,
+            EPAISSEUR_MM as f32,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        ];
+        WriterOptions::new(&chemin)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::zeros((N_PIXELS, N_PIXELS, 1)))
+            .unwrap();
         let stack = Stack::read(&chemin).unwrap();
         let _ = std::fs::remove_file(&chemin);
         stack
@@ -1376,7 +1763,12 @@ mod tests {
                 masque.push(f64::from(u8::from(sim.coverage[[i, j]] >= 0.99 && v > 150.0)));
             }
         }
-        let tissu: Vec<f64> = intensites.iter().zip(&masque).filter(|(_, &m)| m > 0.0).map(|(&v, _)| v).collect();
+        let tissu: Vec<f64> = intensites
+            .iter()
+            .zip(&masque)
+            .filter(|(_, &m)| m > 0.0)
+            .map(|(&v, _)| v)
+            .collect();
         let moyenne = tissu.iter().sum::<f64>() / tissu.len() as f64;
         let mut alea = Alea(0xBEEF ^ tissu.len() as u64);
         for v in &mut intensites {
@@ -1384,13 +1776,21 @@ mod tests {
             let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0;
             *v = 0.5 * (*v + bruit * moyenne * gauss) + 100.0;
         }
-        Experience { points, intensites, masque, verite }
+        Experience {
+            points,
+            intensites,
+            masque,
+            verite,
+        }
     }
 
     /// Mouvement tiré comme dans la simulation de pyrecon : chaque angle et chaque translation uniformes dans ±amplitude.
     fn mouvement_aleatoire(alea: &mut Alea, degres: f64, mm: f64) -> (Vector3<f64>, Vector3<f64>) {
         let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
-        (Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians), Vector3::new(tire(mm), tire(mm), tire(mm)))
+        (
+            Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians),
+            Vector3::new(tire(mm), tire(mm), tire(mm)),
+        )
     }
 
     /// Erreur quadratique moyenne (TRE) sur les points masqués entre la pose estimée et le mouvement vrai.
@@ -1409,38 +1809,87 @@ mod tests {
 
     /// Recale une expérience et rend (TRE avant, TRE après, NCC finale), ou `None` si la coupe a moins de 500 pixels de masque
     /// (elle est sortie du tissu : le recalage serait sans objet, et c'est le cas que le pipeline devra écarter et signaler).
-    fn recaler(volume: &VolumeTensors, e: &Experience, config: RegistrationConfig, robuste: Option<RobustConfig>, device: &Device) -> Option<(f64, f64, f64)> {
-        let masques: Vec<Vector3<f64>> = e.points.iter().zip(&e.masque).filter(|(_, &m)| m > 0.0).map(|(x, _)| *x).collect();
+    fn recaler(
+        volume: &VolumeTensors,
+        e: &Experience,
+        config: RegistrationConfig,
+        robuste: Option<RobustConfig>,
+        device: &Device,
+    ) -> Option<(f64, f64, f64)> {
+        let masques: Vec<Vector3<f64>> = e
+            .points
+            .iter()
+            .zip(&e.masque)
+            .filter(|(_, &m)| m > 0.0)
+            .map(|(x, _)| *x)
+            .collect();
         if masques.len() < 500 {
             return None;
         }
         let pivot = masques.iter().sum::<Vector3<f64>>() / masques.len() as f64;
         let echelle = rotation_scale_mm(&masques, &pivot).unwrap();
-        let (points, tp, ti, tm) = (tenseur_points(&e.points, device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], device), tenseur_1d(&e.intensites, device), tenseur_1d(&e.masque, device));
+        let (points, tp, ti, tm) = (
+            tenseur_points(&e.points, device),
+            tenseur_1d(&[pivot.x, pivot.y, pivot.z], device),
+            tenseur_1d(&e.intensites, device),
+            tenseur_1d(&e.masque, device),
+        );
         let (params, ncc) = match robuste {
             None => {
                 let r = register_slice(volume, points, tp, echelle, ti, tm, config);
                 (r.params, *r.ncc_history.last().unwrap())
             }
             Some(cfg) => {
-                let r = register_slice_robust(volume, points, tp, echelle, ti, tm, RobustConfig { base: config, ..cfg });
+                let r = register_slice_robust(
+                    volume,
+                    points,
+                    tp,
+                    echelle,
+                    ti,
+                    tm,
+                    RobustConfig { base: config, ..cfg },
+                );
                 (r.params, r.ncc)
             }
         };
-        Some((tre(e, &[0.0; 6], &pivot, echelle), tre(e, &params, &pivot, echelle), ncc))
+        Some((
+            tre(e, &[0.0; 6], &pivot, echelle),
+            tre(e, &params, &pivot, echelle),
+            ncc,
+        ))
     }
 
-    const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig { learning_rate: 0.3, iterations: 150, lr_decay: 1.0, initial: [0.0; 6] };
+    const CONFIG_RECALAGE: RegistrationConfig = RegistrationConfig {
+        learning_rate: 0.3,
+        iterations: 150,
+        lr_decay: 1.0,
+        initial: [0.0; 6],
+    };
 
     /// Série de poses tirées avec une graine, évaluée par `recaler` : (TRE avant, TRE après, NCC finale) par pose.
-    fn serie(volume: &Volume, graine: u64, n: usize, degres: f64, mm: f64, bruit: f64, robuste: Option<RobustConfig>, etiquette: &str) -> Vec<(f64, f64, f64)> {
+    fn serie(
+        volume: &Volume,
+        graine: u64,
+        n: usize,
+        degres: f64,
+        mm: f64,
+        bruit: f64,
+        robuste: Option<RobustConfig>,
+        etiquette: &str,
+    ) -> Vec<(f64, f64, f64)> {
         let device = device().autodiff();
         let vt = VolumeTensors::new(volume, &device);
         let mut alea = Alea(graine);
         (0..n)
             .filter_map(|k| {
                 let (omega, t) = mouvement_aleatoire(&mut alea, degres, mm);
-                recaler(&vt, &experience(volume, &omega, &t, bruit, &format!("{etiquette}{k}")), CONFIG_RECALAGE, robuste, &device)
+                recaler(
+                    &vt,
+                    &experience(volume, &omega, &t, bruit, &format!("{etiquette}{k}")),
+                    CONFIG_RECALAGE,
+                    robuste,
+                    &device,
+                )
             })
             .collect()
     }
@@ -1464,8 +1913,15 @@ mod tests {
         let (succes, mediane, pire) = resume(&res);
         println!("20 poses : TRE moyenne avant {avant:.2} mm ; après : médiane {mediane:.2}, pire {pire:.2} mm ; succès (≤ 0,5 mm) {:.0} %", succes * 100.0);
         assert!(succes >= 0.95, "taux de succès {succes}");
-        assert_eq!(res.len(), 20, "toutes les coupes de l'évaluation doivent avoir un masque");
-        assert!(res.iter().all(|r| r.1 < r.0), "le recalage ne doit jamais dégrader la pose");
+        assert_eq!(
+            res.len(),
+            20,
+            "toutes les coupes de l'évaluation doivent avoir un masque"
+        );
+        assert!(
+            res.iter().all(|r| r.1 < r.0),
+            "le recalage ne doit jamais dégrader la pose"
+        );
     }
 
     /// Version courte du critère, dans la suite par défaut : les deux premières poses de la série d'évaluation.
@@ -1477,7 +1933,10 @@ mod tests {
         for (avant, apres, ncc) in &res {
             println!("TRE {avant:.2} → {apres:.2} mm, NCC finale {ncc:.4}");
             // NCC finale rapportée, sans seuil : la coupe simulée avec PSF n'égale jamais un échantillonnage ponctuel (≈ 0,98).
-            assert!(*apres <= 0.5 && apres < avant, "TRE {avant} → {apres} (NCC finale {ncc})");
+            assert!(
+                *apres <= 0.5 && apres < avant,
+                "TRE {avant} → {apres} (NCC finale {ncc})"
+            );
         }
     }
 
@@ -1492,8 +1951,14 @@ mod tests {
                 let res = serie(&volume, 1618, 30, amplitude, amplitude, bruit, None, "capture");
                 let avant = res.iter().map(|r| r.0).sum::<f64>() / res.len() as f64;
                 let (succes, mediane, pire) = resume(&res);
-                println!("bruit {bruit} ±{amplitude}°/mm : {} coupes sur 30 avec masque ; TRE avant",res.len());
-                println!("   TRE avant {avant:.1} → après médiane {mediane:.2}, pire {pire:.2} ; succès {:.0} %", succes * 100.0);
+                println!(
+                    "bruit {bruit} ±{amplitude}°/mm : {} coupes sur 30 avec masque ; TRE avant",
+                    res.len()
+                );
+                println!(
+                    "   TRE avant {avant:.1} → après médiane {mediane:.2}, pire {pire:.2} ; succès {:.0} %",
+                    succes * 100.0
+                );
             }
         }
     }
@@ -1501,14 +1966,26 @@ mod tests {
 
     /// Premier fichier `sub-X/ses-*/anat/*acq-<acq>_run-1_T2w.nii.gz` du jeu de développement, et le masque cérébral associé.
     fn stack_reel(sujet: &str, acq: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let racine = std::path::PathBuf::from(format!("{}/../../data/svr/jeu_reel_tru_haste", env!("CARGO_MANIFEST_DIR")));
-        let mut sessions: Vec<_> = std::fs::read_dir(racine.join(sujet)).unwrap().flatten().map(|e| e.path()).collect();
+        let racine = std::path::PathBuf::from(format!(
+            "{}/../../data/svr/jeu_reel_tru_haste",
+            env!("CARGO_MANIFEST_DIR")
+        ));
+        let mut sessions: Vec<_> = std::fs::read_dir(racine.join(sujet))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
         sessions.sort();
         for ses in sessions {
             let nom = format!("{sujet}_{}_acq-{acq}_run-1", ses.file_name().unwrap().to_string_lossy());
             let image = ses.join("anat").join(format!("{nom}_T2w.nii.gz"));
             if image.exists() {
-                let masque = racine.join("derivatives/medx-fetalbet").join(sujet).join(ses.file_name().unwrap()).join("anat").join(format!("{nom}_desc-brain_mask.nii.gz"));
+                let masque = racine
+                    .join("derivatives/medx-fetalbet")
+                    .join(sujet)
+                    .join(ses.file_name().unwrap())
+                    .join("anat")
+                    .join(format!("{nom}_desc-brain_mask.nii.gz"));
                 return (image, masque);
             }
         }
@@ -1529,7 +2006,12 @@ mod tests {
     }
 
     /// Recale les coupes retenues d'un stack (masque cérébral requis) contre un volume de référence, une par une.
-    fn recaler_stack(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device) -> Vec<CoupeRecalee> {
+    fn recaler_stack(
+        mobile: &Stack,
+        retenues: &[usize],
+        reference: &VolumeTensors,
+        device: &Device,
+    ) -> Vec<CoupeRecalee> {
         let masque = mobile.brain_mask().unwrap().voxels();
         retenues
             .iter()
@@ -1557,12 +2039,17 @@ mod tests {
                     tenseur_1d(&vec![1.0; points.len()], device),
                     CONFIG_RECALAGE,
                 );
-                let deplacements: Vec<Vector3<f64>> = points.iter().map(|x| deplace(&resultat.params, x, &pivot, echelle) - x).collect();
+                let deplacements: Vec<Vector3<f64>> = points
+                    .iter()
+                    .map(|x| deplace(&resultat.params, x, &pivot, echelle) - x)
+                    .collect();
                 CoupeRecalee {
                     ncc_avant: resultat.ncc_history[0],
                     ncc_apres: *resultat.ncc_history.last().unwrap(),
                     deplacement_moyen: deplacements.iter().sum::<Vector3<f64>>() / deplacements.len() as f64,
-                    deplacement_rms: (deplacements.iter().map(|d| d.norm_squared()).sum::<f64>() / deplacements.len() as f64).sqrt(),
+                    deplacement_rms: (deplacements.iter().map(|d| d.norm_squared()).sum::<f64>()
+                        / deplacements.len() as f64)
+                        .sqrt(),
                 }
             })
             .collect()
@@ -1582,9 +2069,22 @@ mod tests {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
-            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let aires: Vec<usize> = (0..mobile.dim().2)
+                .map(|k| {
+                    mobile
+                        .brain_mask()
+                        .unwrap()
+                        .voxels()
+                        .index_axis(ndarray::Axis(2), k)
+                        .iter()
+                        .filter(|&&v| v)
+                        .count()
+                })
+                .collect();
             let max_aire = *aires.iter().max().unwrap();
-            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            let retenues: Vec<usize> = (0..aires.len())
+                .filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64)
+                .collect();
             let refs: Vec<Vec<CoupeRecalee>> = ["trufiax", "trufisag"]
                 .iter()
                 .map(|acq| {
@@ -1601,7 +2101,10 @@ mod tests {
                     r.iter().map(|c| c.deplacement_moyen - med).collect()
                 })
                 .collect();
-            let offsets: Vec<Vector3<f64>> = refs.iter().map(|r| Vector3::from_fn(|a, _| mediane(r.iter().map(|c| c.deplacement_moyen[a]).collect()))).collect();
+            let offsets: Vec<Vector3<f64>> = refs
+                .iter()
+                .map(|r| Vector3::from_fn(|a, _| mediane(r.iter().map(|c| c.deplacement_moyen[a]).collect())))
+                .collect();
             let (mut d2, mut v2) = (0.0, 0.0);
             for k in 0..retenues.len() {
                 d2 += (residus[0][k] - residus[1][k]).norm_squared();
@@ -1640,7 +2143,11 @@ mod tests {
         println!("--- {n_v} coupes par référence ({n_coupes} recalages)");
         for (m, nom) in ["axial", "sagittal"].iter().enumerate() {
             let hausse = toutes_ncc[m].iter().filter(|(a, b)| b > a).count() as f64 / toutes_ncc[m].len() as f64;
-            println!("M1 référence {nom} : NCC en hausse pour {:.1} % des coupes ({} baisses)", hausse * 100.0, n_baisse[m]);
+            println!(
+                "M1 référence {nom} : NCC en hausse pour {:.1} % des coupes ({} baisses)",
+                hausse * 100.0,
+                n_baisse[m]
+            );
         }
         println!("M2 amplitude du déplacement estimé (RMS sur le masque) : médiane {:.2}, p90 {:.2}, max {:.2} mm ; {:.1} % des recalages > 6 mm", q(0.5), q(0.9), q(1.0), 100.0 * n_grand as f64 / n_coupes as f64);
         println!("M3 écart entre références / mouvement relatif : {rapport:.2} (critère ≤ 0,5)");
@@ -1648,12 +2155,18 @@ mod tests {
     /// Résultat d'un recalage d'une coupe depuis un départ donné.
     struct Depart {
         ncc: f64,
-        deplacement_rms: f64, // RMS, sur le masque, de T(x) − x
+        deplacement_rms: f64,     // RMS, sur le masque, de T(x) − x
         distance_au_premier: f64, // RMS de T(x) − T_premier(x) (le premier départ est la pose nulle)
     }
 
     /// Recale chaque coupe retenue depuis chacun des `departs` (le premier doit être la pose nulle) ; une `Vec<Depart>` par coupe.
-    fn recaler_multi_departs(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device, departs: &[[f64; 6]]) -> Vec<Vec<Depart>> {
+    fn recaler_multi_departs(
+        mobile: &Stack,
+        retenues: &[usize],
+        reference: &VolumeTensors,
+        device: &Device,
+        departs: &[[f64; 6]],
+    ) -> Vec<Vec<Depart>> {
         let masque = mobile.brain_mask().unwrap().voxels();
         retenues
             .iter()
@@ -1681,10 +2194,29 @@ mod tests {
                 let mut poses: Vec<[f64; 6]> = Vec::new();
                 let mut sorties: Vec<Depart> = Vec::new();
                 for depart in departs {
-                    let config = RegistrationConfig { initial: *depart, ..CONFIG_RECALAGE };
-                    let r = register_slice(reference, tp.clone(), tc.clone(), echelle, ti.clone(), tm.clone(), config);
+                    let config = RegistrationConfig {
+                        initial: *depart,
+                        ..CONFIG_RECALAGE
+                    };
+                    let r = register_slice(
+                        reference,
+                        tp.clone(),
+                        tc.clone(),
+                        echelle,
+                        ti.clone(),
+                        tm.clone(),
+                        config,
+                    );
                     let rms_depuis = |autre: &[f64; 6]| {
-                        (points.iter().map(|x| (deplace(&r.params, x, &pivot, echelle) - deplace(autre, x, &pivot, echelle)).norm_squared()).sum::<f64>() / points.len() as f64).sqrt()
+                        (points
+                            .iter()
+                            .map(|x| {
+                                (deplace(&r.params, x, &pivot, echelle) - deplace(autre, x, &pivot, echelle))
+                                    .norm_squared()
+                            })
+                            .sum::<f64>()
+                            / points.len() as f64)
+                            .sqrt()
                     };
                     sorties.push(Depart {
                         ncc: *r.ncc_history.last().unwrap(),
@@ -1717,21 +2249,56 @@ mod tests {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
-            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let aires: Vec<usize> = (0..mobile.dim().2)
+                .map(|k| {
+                    mobile
+                        .brain_mask()
+                        .unwrap()
+                        .voxels()
+                        .index_axis(ndarray::Axis(2), k)
+                        .iter()
+                        .filter(|&&v| v)
+                        .count()
+                })
+                .collect();
             let max_aire = *aires.iter().max().unwrap();
-            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            let retenues: Vec<usize> = (0..aires.len())
+                .filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64)
+                .collect();
             for acq in ["trufiax", "trufisag"] {
                 let (chemin, _) = stack_reel(sujet, acq);
                 let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
-                let resultats = recaler_multi_departs(&mobile, &retenues, &VolumeTensors::new(&volume, &device), &device, &departs);
+                let resultats = recaler_multi_departs(
+                    &mobile,
+                    &retenues,
+                    &VolumeTensors::new(&volume, &device),
+                    &device,
+                    &departs,
+                );
                 let avant = lignes.len();
                 for (r, k) in resultats.iter().zip(&retenues) {
                     // une ligne par coupe, lisible par un script d'analyse : sujet, référence, coupe, NCC du départ nul, NCC du meilleur, amplitude
                     let meilleur_ncc = r.iter().map(|d| d.ncc).fold(f64::MIN, f64::max);
-                    println!("SLICE\t{sujet}\t{acq}\t{k}\t{:.5}\t{:.5}\t{:.3}", r[0].ncc, meilleur_ncc, r[0].deplacement_rms);
-                    let meilleur = r.iter().enumerate().max_by(|a, b| a.1.ncc.partial_cmp(&b.1.ncc).unwrap()).unwrap();
+                    println!(
+                        "SLICE\t{sujet}\t{acq}\t{k}\t{:.5}\t{:.5}\t{:.3}",
+                        r[0].ncc, meilleur_ncc, r[0].deplacement_rms
+                    );
+                    let meilleur = r
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.ncc.partial_cmp(&b.1.ncc).unwrap())
+                        .unwrap();
                     let proches = r.iter().filter(|d| d.ncc >= meilleur.1.ncc - 0.005).count();
-                    lignes.push((r[0].deplacement_rms, meilleur.1.ncc - r[0].ncc, if meilleur.0 == 0 { 0.0 } else { meilleur.1.distance_au_premier }, proches));
+                    lignes.push((
+                        r[0].deplacement_rms,
+                        meilleur.1.ncc - r[0].ncc,
+                        if meilleur.0 == 0 {
+                            0.0
+                        } else {
+                            meilleur.1.distance_au_premier
+                        },
+                        proches,
+                    ));
                 }
                 let gains: Vec<f64> = lignes[avant..].iter().map(|l| l.1).collect();
                 println!("{sujet} {acq} : {} coupes ; gain de NCC du meilleur départ : médiane {:.3}, max {:.3} ; > 0,02 pour {} coupes", gains.len(), mediane(gains.clone()), gains.iter().cloned().fold(0.0, f64::max), gains.iter().filter(|&&g| g > 0.02).count());
@@ -1741,12 +2308,31 @@ mod tests {
         let part = |seuil: f64| lignes.iter().filter(|l| l.1 > seuil).count() as f64 / n * 100.0;
         println!("--- {} recalages de coupe (9 sujets, 2 références)", lignes.len());
         println!("part des coupes dont le meilleur départ gagne plus de 0,005 / 0,02 / 0,05 de NCC : {:.1} % / {:.1} % / {:.1} %", part(0.005), part(0.02), part(0.05));
-        println!("gain de NCC : médiane {:.4}, p90 {:.3}, max {:.3}", mediane(lignes.iter().map(|l| l.1).collect()), { let mut g: Vec<f64> = lignes.iter().map(|l| l.1).collect(); g.sort_by(|a, b| a.partial_cmp(b).unwrap()); g[(g.len() as f64 * 0.9) as usize] }, lignes.iter().map(|l| l.1).fold(0.0, f64::max));
-        for (nom, bas, haut) in [("correction ≤ 3 mm", 0.0, 3.0), ("3 à 6 mm", 3.0, 6.0), ("> 6 mm", 6.0, f64::MAX)] {
+        println!(
+            "gain de NCC : médiane {:.4}, p90 {:.3}, max {:.3}",
+            mediane(lignes.iter().map(|l| l.1).collect()),
+            {
+                let mut g: Vec<f64> = lignes.iter().map(|l| l.1).collect();
+                g.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                g[(g.len() as f64 * 0.9) as usize]
+            },
+            lignes.iter().map(|l| l.1).fold(0.0, f64::max)
+        );
+        for (nom, bas, haut) in [
+            ("correction ≤ 3 mm", 0.0, 3.0),
+            ("3 à 6 mm", 3.0, 6.0),
+            ("> 6 mm", 6.0, f64::MAX),
+        ] {
             let groupe: Vec<&(f64, f64, f64, usize)> = lignes.iter().filter(|l| l.0 > bas && l.0 <= haut).collect();
-            if groupe.is_empty() { continue; }
+            if groupe.is_empty() {
+                continue;
+            }
             let part2 = groupe.iter().filter(|l| l.1 > 0.02).count() as f64 / groupe.len() as f64 * 100.0;
-            println!("  {nom} (départ nul) : {} coupes, {:.1} % avec un gain > 0,02", groupe.len(), part2);
+            println!(
+                "  {nom} (départ nul) : {} coupes, {:.1} % avec un gain > 0,02",
+                groupe.len(),
+                part2
+            );
         }
         let ameliorees: Vec<&(f64, f64, f64, usize)> = lignes.iter().filter(|l| l.1 > 0.02).collect();
         if !ameliorees.is_empty() {
@@ -1765,12 +2351,23 @@ mod tests {
         for d in &departs {
             for &v in d {
                 assert!(v.abs() <= 5.0);
-                assert_eq!(v, (alea.suivant() * 2.0 - 1.0) * 5.0, "doit redonner exactement les départs du diagnostic");
+                assert_eq!(
+                    v,
+                    (alea.suivant() * 2.0 - 1.0) * 5.0,
+                    "doit redonner exactement les départs du diagnostic"
+                );
             }
         }
     }
 
-    const ROBUSTE_REEL: RobustConfig = RobustConfig { base: CONFIG_RECALAGE, suspect_ncc: 0.64, extra_starts: 6, start_amplitude_mm: 5.0, seed: 8675309, batched: false };
+    const ROBUSTE_REEL: RobustConfig = RobustConfig {
+        base: CONFIG_RECALAGE,
+        suspect_ncc: 0.64,
+        extra_starts: 6,
+        start_amplitude_mm: 5.0,
+        seed: 8675309,
+        batched: false,
+    };
 
     /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est
     /// jamais inférieure à celle du premier recalage.
@@ -1782,18 +2379,43 @@ mod tests {
         let mut alea = Alea(271828);
         let (omega, t) = mouvement_aleatoire(&mut alea, 3.0, 3.0);
         let e = experience(&volume, &omega, &t, 0.0, "robuste");
-        let masques: Vec<Vector3<f64>> = e.points.iter().zip(&e.masque).filter(|(_, &m)| m > 0.0).map(|(x, _)| *x).collect();
+        let masques: Vec<Vector3<f64>> = e
+            .points
+            .iter()
+            .zip(&e.masque)
+            .filter(|(_, &m)| m > 0.0)
+            .map(|(x, _)| *x)
+            .collect();
         let pivot = masques.iter().sum::<Vector3<f64>>() / masques.len() as f64;
         let echelle = rotation_scale_mm(&masques, &pivot).unwrap();
         let lancer = |cfg: RobustConfig| {
-            register_slice_robust(&vt, tenseur_points(&e.points, &device), tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device), echelle, tenseur_1d(&e.intensites, &device), tenseur_1d(&e.masque, &device), cfg)
+            register_slice_robust(
+                &vt,
+                tenseur_points(&e.points, &device),
+                tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+                echelle,
+                tenseur_1d(&e.intensites, &device),
+                tenseur_1d(&e.masque, &device),
+                cfg,
+            )
         };
         let calme = lancer(ROBUSTE_REEL);
         assert_eq!(calme.runs, 1, "NCC {} ≥ 0,64 : pas de relance", calme.first_ncc);
-        let force = lancer(RobustConfig { suspect_ncc: 1.5, ..ROBUSTE_REEL });
+        let force = lancer(RobustConfig {
+            suspect_ncc: 1.5,
+            ..ROBUSTE_REEL
+        });
         assert_eq!(force.runs, 7);
-        assert!(force.ncc >= force.first_ncc - 1e-12, "{} contre {}", force.ncc, force.first_ncc);
-        assert!((force.first_ncc - calme.first_ncc).abs() < 1e-12, "le premier recalage est le même");
+        assert!(
+            force.ncc >= force.first_ncc - 1e-12,
+            "{} contre {}",
+            force.ncc,
+            force.first_ncc
+        );
+        assert!(
+            (force.first_ncc - calme.first_ncc).abs() < 1e-12,
+            "le premier recalage est le même"
+        );
     }
     /// Évaluation synthétique (vérité connue) de la stratégie robuste, sur les mêmes 30 poses par amplitude que la courbe de capture
     /// (graine 1618). `tau = 0,9` a été fixé **avant** cette évaluation sur une graine de réglage distincte (99) : succès de NCC finale
@@ -1803,7 +2425,12 @@ mod tests {
     #[ignore = "exploration lente en debug"]
     fn robust_registration_on_synthetic_motion() {
         let volume = atlas();
-        let robuste = |tau: f64| Some(RobustConfig { suspect_ncc: tau, ..ROBUSTE_REEL });
+        let robuste = |tau: f64| {
+            Some(RobustConfig {
+                suspect_ncc: tau,
+                ..ROBUSTE_REEL
+            })
+        };
         let mut taux = Vec::new();
         for amplitude in [3.0, 6.0, 10.0, 15.0] {
             let simple = serie(&volume, 1618, 30, amplitude, amplitude, 0.0, None, "rs");
@@ -1824,13 +2451,26 @@ mod tests {
             taux.push((amplitude, s_simple, s_tau, s_force));
         }
         for (a, simple, tau, force) in &taux {
-            assert!(*tau >= simple - 1e-9 && *force >= simple - 1e-9, "±{a} : le taux de succès ne doit pas baisser ({simple} → {tau} / {force})");
+            assert!(
+                *tau >= simple - 1e-9 && *force >= simple - 1e-9,
+                "±{a} : le taux de succès ne doit pas baisser ({simple} → {tau} / {force})"
+            );
         }
         let a10 = taux.iter().find(|t| t.0 == 10.0).unwrap();
-        assert!(a10.3 > a10.1, "à ±10, le robuste forcé doit améliorer le taux de succès ({} → {})", a10.1, a10.3);
+        assert!(
+            a10.3 > a10.1,
+            "à ±10, le robuste forcé doit améliorer le taux de succès ({} → {})",
+            a10.1,
+            a10.3
+        );
     }
     /// Recalage robuste des coupes retenues d'un stack réel contre une référence : un `RobustResult` par coupe.
-    fn recaler_stack_robuste(mobile: &Stack, retenues: &[usize], reference: &VolumeTensors, device: &Device) -> Vec<RobustResult> {
+    fn recaler_stack_robuste(
+        mobile: &Stack,
+        retenues: &[usize],
+        reference: &VolumeTensors,
+        device: &Device,
+    ) -> Vec<RobustResult> {
         let masque = mobile.brain_mask().unwrap().voxels();
         retenues
             .iter()
@@ -1870,17 +2510,33 @@ mod tests {
     #[ignore = "données locales ; longue (≈ 5 min en release)"]
     fn robust_registration_on_real_stacks() {
         let device = device().autodiff();
-        let departs: Vec<[f64; 6]> = std::iter::once([0.0; 6]).chain(departs_deterministes(6, 5.0, 8675309)).collect();
+        let departs: Vec<[f64; 6]> = std::iter::once([0.0; 6])
+            .chain(departs_deterministes(6, 5.0, 8675309))
+            .collect();
         let sujets = sujets_de_test();
-        let (mut n, mut relancees, mut recalages, mut bloquees, mut recuperees, mut pires) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut n, mut relancees, mut recalages, mut bloquees, mut recuperees, mut pires) =
+            (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         let (mut gain_total, mut gain_recupere) = (0.0, 0.0);
         for sujet in &sujets {
             let (chemin_b, masque_b) = stack_reel(sujet, "truficor");
             let mut mobile = Stack::read(&chemin_b).unwrap();
             mobile.set_brain_mask(&masque_b).unwrap();
-            let aires: Vec<usize> = (0..mobile.dim().2).map(|k| mobile.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k).iter().filter(|&&v| v).count()).collect();
+            let aires: Vec<usize> = (0..mobile.dim().2)
+                .map(|k| {
+                    mobile
+                        .brain_mask()
+                        .unwrap()
+                        .voxels()
+                        .index_axis(ndarray::Axis(2), k)
+                        .iter()
+                        .filter(|&&v| v)
+                        .count()
+                })
+                .collect();
             let max_aire = *aires.iter().max().unwrap();
-            let retenues: Vec<usize> = (0..aires.len()).filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64).collect();
+            let retenues: Vec<usize> = (0..aires.len())
+                .filter(|&k| aires[k] as f64 >= 0.25 * max_aire as f64)
+                .collect();
             for acq in ["trufiax", "trufisag"] {
                 let (chemin, _) = stack_reel(sujet, acq);
                 let volume = Volume::from_stack(&Stack::read(&chemin).unwrap());
@@ -1903,12 +2559,23 @@ mod tests {
                 }
             }
         }
-        println!("{n} recalages de coupe ; relancées {relancees} ({:.1} %) ; coût moyen {:.2} recalages", 100.0 * relancees as f64 / n as f64, recalages as f64 / n as f64);
+        println!(
+            "{n} recalages de coupe ; relancées {relancees} ({:.1} %) ; coût moyen {:.2} recalages",
+            100.0 * relancees as f64 / n as f64,
+            recalages as f64 / n as f64
+        );
         println!("bloquées (gain > 0,02 avec le meilleur des 7 départs) : {bloquees} ; récupérées à 0,005 près : {recuperees} ({:.1} %)", 100.0 * recuperees as f64 / bloquees as f64);
         println!("gain de NCC total récupéré : {:.1} % ; coupes dont la NCC finale est inférieure à celle du premier recalage : {pires}", 100.0 * gain_recupere / gain_total);
         assert_eq!(pires, 0);
-        assert!(recuperees as f64 >= 0.75 * bloquees as f64, "{recuperees} sur {bloquees}");
-        assert!(recalages as f64 / n as f64 <= 2.3, "coût moyen {}", recalages as f64 / n as f64);
+        assert!(
+            recuperees as f64 >= 0.75 * bloquees as f64,
+            "{recuperees} sur {bloquees}"
+        );
+        assert!(
+            recalages as f64 / n as f64 <= 2.3,
+            "coût moyen {}",
+            recalages as f64 / n as f64
+        );
     }
     /// Cas connu (graine 1618, ±6°/mm, 3ᵉ pose) : le recalage simple reste bloqué à plus de 10 mm, le robuste retrouve la pose vraie.
     /// Éprouve la relance elle-même : sans elle (ou avec des départs identiques), la NCC ne progresse pas.
@@ -1924,10 +2591,26 @@ mod tests {
         }
         let e = experience(&volume, &pose.0, &pose.1, 0.0, "sauvee");
         let (_, tre_simple, ncc_simple) = recaler(&vt, &e, CONFIG_RECALAGE, None, &device).unwrap();
-        let (_, tre_robuste, ncc_robuste) = recaler(&vt, &e, CONFIG_RECALAGE, Some(RobustConfig { suspect_ncc: 0.9, ..ROBUSTE_REEL }), &device).unwrap();
+        let (_, tre_robuste, ncc_robuste) = recaler(
+            &vt,
+            &e,
+            CONFIG_RECALAGE,
+            Some(RobustConfig {
+                suspect_ncc: 0.9,
+                ..ROBUSTE_REEL
+            }),
+            &device,
+        )
+        .unwrap();
         println!("simple : TRE {tre_simple:.2} mm, NCC {ncc_simple:.3} ; robuste : TRE {tre_robuste:.2} mm, NCC {ncc_robuste:.3}");
-        assert!(tre_simple > 5.0 && ncc_simple < 0.5, "le cas doit être bloqué en recalage simple");
-        assert!(tre_robuste <= 0.5 && ncc_robuste > 0.95, "TRE {tre_robuste}, NCC {ncc_robuste}");
+        assert!(
+            tre_simple > 5.0 && ncc_simple < 0.5,
+            "le cas doit être bloqué en recalage simple"
+        );
+        assert!(
+            tre_robuste <= 0.5 && ncc_robuste > 0.95,
+            "TRE {tre_robuste}, NCC {ncc_robuste}"
+        );
     }
     /// `pose_to_matrix` (f64) applique la même transformation que `apply_pose` (tenseurs f32) ; et composer deux matrices revient à appliquer les
     /// poses l'une après l'autre.
@@ -1935,13 +2618,27 @@ mod tests {
     fn pose_matrix_matches_apply_pose_and_composes() {
         let device = device();
         let mut alea = Alea(5150);
-        let points: Vec<Vector3<f64>> = (0..50).map(|_| Vector3::new(alea.suivant() * 80.0 - 40.0, alea.suivant() * 80.0 - 40.0, alea.suivant() * 80.0 - 40.0)).collect();
+        let points: Vec<Vector3<f64>> = (0..50)
+            .map(|_| {
+                Vector3::new(
+                    alea.suivant() * 80.0 - 40.0,
+                    alea.suivant() * 80.0 - 40.0,
+                    alea.suivant() * 80.0 - 40.0,
+                )
+            })
+            .collect();
         let pivot = Vector3::new(3.0, -4.0, 7.0);
         let echelle = 22.0;
         let params1 = [2.5, -1.5, 3.0, 1.2, -0.8, 2.0];
         let params2 = [-1.0, 2.0, 0.5, -0.7, 0.4, 1.1];
-        let (m1, m2) = (pose_to_matrix(&params1, &pivot, echelle), pose_to_matrix(&params2, &pivot, echelle));
-        assert!((m1.fixed_view::<3, 3>(0, 0).determinant() - 1.0).abs() < 1e-12, "rotation propre");
+        let (m1, m2) = (
+            pose_to_matrix(&params1, &pivot, echelle),
+            pose_to_matrix(&params2, &pivot, echelle),
+        );
+        assert!(
+            (m1.fixed_view::<3, 3>(0, 0).determinant() - 1.0).abs() < 1e-12,
+            "rotation propre"
+        );
         let tp = tenseur_points(&points, &device);
         let tc = tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device);
         let vers_vec = |t: Tensor<2>| t.into_data().try_to_vec::<f32>().unwrap();
@@ -1949,7 +2646,11 @@ mod tests {
         let mut pire = 0.0_f64;
         for (i, x) in points.iter().enumerate() {
             let m = (m1 * x.push(1.0)).xyz();
-            let t = Vector3::new(f64::from(sortie[3 * i]), f64::from(sortie[3 * i + 1]), f64::from(sortie[3 * i + 2]));
+            let t = Vector3::new(
+                f64::from(sortie[3 * i]),
+                f64::from(sortie[3 * i + 1]),
+                f64::from(sortie[3 * i + 2]),
+            );
             pire = pire.max((m - t).norm());
             // composition : m2 après m1
             let compose = ((m2 * m1) * x.push(1.0)).xyz();
@@ -1974,13 +2675,26 @@ mod tests {
             .map(|n| {
                 let (c, r) = (n / taille, n % taille);
                 let (i, j, k) = (r / (dims[1] * dims[2]), (r / dims[2]) % dims[1], r % dims[2]);
-                ((0.09 * i as f32 + 0.3 * c as f32).sin() + (0.13 * j as f32).cos() + (0.07 * k as f32 + 0.1 * c as f32).sin()) as f32
+                ((0.09 * i as f32 + 0.3 * c as f32).sin()
+                    + (0.13 * j as f32).cos()
+                    + (0.07 * k as f32 + 0.1 * c as f32).sin()) as f32
             })
             .collect();
-        let coords: Vec<f32> = (0..s * p * 3).map(|n| (alea.suivant() * (dims[n % 3] as f64 - 1.0)) as f32).collect();
+        let coords: Vec<f32> = (0..s * p * 3)
+            .map(|n| (alea.suivant() * (dims[n % 3] as f64 - 1.0)) as f32)
+            .collect();
         let intensites: Vec<f32> = (0..s * p).map(|_| alea.suivant() as f32).collect();
-        for (nom, device, critere) in [("flex (CPU)", burn::tensor::Device::flex().autodiff(), true), ("wgpu (GPU)", burn::tensor::Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff(), false)] {
-            let vols_separes: Vec<Tensor<1>> = (0..s).map(|c| Tensor::<1>::from_floats(&volumes[c * taille..(c + 1) * taille], &device)).collect();
+        for (nom, device, critere) in [
+            ("flex (CPU)", burn::tensor::Device::flex().autodiff(), true),
+            (
+                "wgpu (GPU)",
+                burn::tensor::Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff(),
+                false,
+            ),
+        ] {
+            let vols_separes: Vec<Tensor<1>> = (0..s)
+                .map(|c| Tensor::<1>::from_floats(&volumes[c * taille..(c + 1) * taille], &device))
+                .collect();
             let vols_lot = Tensor::<1>::from_floats(volumes.as_slice(), &device);
             let y_lot = Tensor::<2>::from_floats(TensorData::new(intensites.clone(), [s, p]), &device);
             let lire = |t: Tensor<1>| t.into_data().try_to_vec::<f32>().unwrap();
@@ -1988,10 +2702,18 @@ mod tests {
             let sequence = || {
                 let (mut valeurs, mut grads) = (Vec::new(), Vec::new());
                 for c in 0..s {
-                    let pts = Tensor::<2>::from_floats(TensorData::new(coords[c * p * 3..(c + 1) * p * 3].to_vec(), [p, 3]), &device).require_grad();
+                    let pts = Tensor::<2>::from_floats(
+                        TensorData::new(coords[c * p * 3..(c + 1) * p * 3].to_vec(), [p, 3]),
+                        &device,
+                    )
+                    .require_grad();
                     let lecture = trilinear_sample(&vols_separes[c], dims, pts.clone());
                     let y = y_lot.clone().narrow(0, c, 1);
-                    let correlation = ncc(y, lecture.values.clone().reshape([1, p]), lecture.inside.clone().reshape([1, p]));
+                    let correlation = ncc(
+                        y,
+                        lecture.values.clone().reshape([1, p]),
+                        lecture.inside.clone().reshape([1, p]),
+                    );
                     let g = correlation.neg().sum().backward();
                     valeurs.extend(lire(lecture.values));
                     grads.extend(pts.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap());
@@ -2003,25 +2725,57 @@ mod tests {
                 let lecture = trilinear_sample_batch(&vols_lot, dims, pts.clone());
                 let correlation = ncc(y_lot.clone(), lecture.values.clone(), lecture.inside.clone());
                 let g = correlation.neg().sum().backward();
-                (lire(lecture.values.reshape([s * p])), pts.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap())
+                (
+                    lire(lecture.values.reshape([s * p])),
+                    pts.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap(),
+                )
             };
             let chronometrer = |f: &dyn Fn() -> (Vec<f32>, Vec<f32>)| {
                 let _ = f(); // échauffement
-                let mut durees: Vec<f64> = (0..5).map(|_| { let t = std::time::Instant::now(); let _ = f(); t.elapsed().as_secs_f64() }).collect();
+                let mut durees: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        let _ = f();
+                        t.elapsed().as_secs_f64()
+                    })
+                    .collect();
                 durees.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 durees[2]
             };
             let (t_seq, t_lot) = (chronometrer(&sequence), chronometrer(&lot));
             let ((v_seq, g_seq), (v_lot, g_lot)) = (sequence(), lot());
             let maxi = v_seq.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
-            let ecart = v_seq.iter().zip(&v_lot).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max) / maxi;
-            let (pscal, n1, n2) = g_seq.iter().zip(&g_lot).fold((0.0_f64, 0.0_f64, 0.0_f64), |(a, b, c), (x, y)| (a + f64::from(*x) * f64::from(*y), b + f64::from(*x).powi(2), c + f64::from(*y).powi(2)));
+            let ecart = v_seq
+                .iter()
+                .zip(&v_lot)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max)
+                / maxi;
+            let (pscal, n1, n2) = g_seq
+                .iter()
+                .zip(&g_lot)
+                .fold((0.0_f64, 0.0_f64, 0.0_f64), |(a, b, c), (x, y)| {
+                    (
+                        a + f64::from(*x) * f64::from(*y),
+                        b + f64::from(*x).powi(2),
+                        c + f64::from(*y).powi(2),
+                    )
+                });
             let cosinus = pscal / (n1.sqrt() * n2.sqrt());
             println!("{nom} : séquence {:.0} ms, lot {:.0} ms, rapport {:.1} ; écart des valeurs {ecart:.2e} ; cosinus des gradients {cosinus:.6}", 1e3 * t_seq, 1e3 * t_lot, t_seq / t_lot);
             assert!(ecart <= 1e-5, "{nom} : écart des valeurs {ecart}");
             assert!(cosinus >= 0.9999, "{nom} : cosinus {cosinus}");
             // critère (c) : constaté NON atteint sur le CPU (rapport 1,0) ; on affiche le verdict au lieu de l'asserter pour pouvoir mesurer aussi le GPU
-            println!("{nom} : critère « lot ≥ 5 fois plus rapide » {}", if t_seq / t_lot >= 5.0 { "atteint" } else if critere { "NON atteint (CPU)" } else { "non atteint" });
+            println!(
+                "{nom} : critère « lot ≥ 5 fois plus rapide » {}",
+                if t_seq / t_lot >= 5.0 {
+                    "atteint"
+                } else if critere {
+                    "NON atteint (CPU)"
+                } else {
+                    "non atteint"
+                }
+            );
         }
     }
 
@@ -2036,8 +2790,23 @@ mod tests {
         let pivots: Vec<f32> = (0..r * 3).map(|_| (alea.suivant() * 10.0 - 5.0) as f32).collect();
         let echelles: Vec<f32> = (0..r).map(|i| 20.0 + 7.0 * i as f32).collect();
         // lignes : nulle, minuscule, juste sous le seuil de la série (θ² = 9e-3), puis ordinaires
-        let rotations = [[0.0_f32; 3], [1e-4, -2e-4, 1e-4], [0.06, 0.05, 0.04], [0.3, -0.2, 0.5], [1.0, 0.4, -0.7], [0.02, 0.0, 0.0]];
-        let params: Vec<f32> = (0..r).flat_map(|i| rotations[i].iter().map(|v| v * echelles[i]).chain([1.5 - i as f32, -2.0 + 0.5 * i as f32, 0.3 * i as f32]).collect::<Vec<f32>>()).collect();
+        let rotations = [
+            [0.0_f32; 3],
+            [1e-4, -2e-4, 1e-4],
+            [0.06, 0.05, 0.04],
+            [0.3, -0.2, 0.5],
+            [1.0, 0.4, -0.7],
+            [0.02, 0.0, 0.0],
+        ];
+        let params: Vec<f32> = (0..r)
+            .flat_map(|i| {
+                rotations[i]
+                    .iter()
+                    .map(|v| v * echelles[i])
+                    .chain([1.5 - i as f32, -2.0 + 0.5 * i as f32, 0.3 * i as f32])
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
         let pts3 = Tensor::<3>::from_floats(TensorData::new(points.clone(), [r, p, 3]), &device);
         let lot = apply_pose_batch(
             pts3,
@@ -2049,7 +2818,10 @@ mod tests {
         let mut pire = 0.0_f32;
         for i in 0..r {
             let seul = apply_pose(
-                Tensor::<2>::from_floats(TensorData::new(points[i * p * 3..(i + 1) * p * 3].to_vec(), [p, 3]), &device),
+                Tensor::<2>::from_floats(
+                    TensorData::new(points[i * p * 3..(i + 1) * p * 3].to_vec(), [p, 3]),
+                    &device,
+                ),
                 Tensor::<1>::from_floats(&pivots[i * 3..(i + 1) * 3], &device),
                 Tensor::<1>::from_floats(&params[i * 6..(i + 1) * 6], &device),
                 f64::from(echelles[i]),
@@ -2071,6 +2843,9 @@ mod tests {
         );
         let g = sortie.powf_scalar(2.0).sum().backward();
         let g = pa.grad(&g).unwrap().into_data().try_to_vec::<f32>().unwrap();
-        assert!(g.iter().all(|v| v.is_finite()) && g.iter().any(|v| v.abs() > 1e-3), "gradient : {g:?}");
+        assert!(
+            g.iter().all(|v| v.is_finite()) && g.iter().any(|v| v.abs() > 1e-3),
+            "gradient : {g:?}"
+        );
     }
 }
