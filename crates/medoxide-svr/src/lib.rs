@@ -12,6 +12,19 @@
 //!   gauche » : c'est le cas courant, y compris des 96 stacks du jeu de développement) :
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
+// Lints de style de clippy écartés pour tout le crate : le code est numérique, et ces règles n'y apportent rien (aucun effet sur le calcul).
+// - `needless_range_loop` : les boucles sur un indice (axe 0..3, voxel, coupe) indexent souvent plusieurs tableaux en parallèle ; la forme indexée est plus claire que `iter().enumerate()` ;
+// - `neg_cmp_op_on_partial_ord` : `!(x > 0.0)` est voulu, il traite NaN comme un échec de la condition (`x <= 0.0` serait faux pour NaN : la garde le laisserait passer) ;
+// - `too_many_arguments` et `type_complexity` : signatures des noyaux de calcul, qui reçoivent explicitement grille, poses, options et tampons plutôt que des structures créées pour l'occasion ;
+// - `field_reassign_with_default` : dans les tests, on part des réglages par défaut et on change un ou deux champs, ce qui se lit mieux que la syntaxe `..Default::default()`.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::field_reassign_with_default
+)]
+
 pub mod align;
 pub mod bias;
 pub mod diff;
@@ -1312,6 +1325,9 @@ mod tests {
     /// décimales : mêmes valeurs que dans `medoxide-core`, lues cette fois par `Stack`.
     #[test]
     fn reads_fetal_bet_volumes_with_nibabel_affines() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine()))) {
+            return;
+        }
         let attendu: [(&str, [[f64; 4]; 3]); 3] = [
             (
                 "fetus_03",
@@ -1368,6 +1384,9 @@ mod tests {
     /// valide (orthogonale, pixdim cohérent). Données locales (`data/`, hors de Git).
     #[test]
     fn reads_all_development_stacks_even_left_handed() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
@@ -1443,13 +1462,12 @@ mod tests {
                 let (stack, reference) = l.split_once('\t').unwrap();
                 let octets = std::fs::read(format!("{racine}/{reference}")).unwrap();
                 let valeurs: Vec<f64> = octets
-                    .chunks_exact(8)
-                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| f64::from_le_bytes(*c))
                     .collect();
-                let lignes = valeurs
-                    .chunks_exact(9)
-                    .map(|r| <[f64; 9]>::try_from(r).unwrap())
-                    .collect();
+                let lignes = valeurs.as_chunks::<9>().0.to_vec();
                 (PathBuf::from(format!("{racine}/{stack}")), lignes)
             })
             .collect()
@@ -1464,6 +1482,9 @@ mod tests {
     /// l'ordre du trois-millième de voxel avec l'affine stockée (qu'applique nibabel, et nous).
     #[test]
     fn world_coordinates_match_nibabel_and_simpleitk() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let refs = references();
         assert_eq!(refs.len(), 104, "8 volumes de Fetal-BET + 96 stacks");
         let (mut pire_nib, mut pire_itk) = (0.0_f64, 0.0_f64);
@@ -1493,6 +1514,9 @@ mod tests {
     /// Critère 3 : invariants géométriques de chaque stack, sans référence externe.
     #[test]
     fn slice_invariants_hold_on_all_stacks() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let refs = references();
         let mut n_coupes = 0;
         for (chemin, _) in &refs {
@@ -1575,6 +1599,9 @@ mod tests {
     /// dans la table de références (calcul indépendant), donnent la boîte attendue (< 1e-6 mm).
     #[test]
     fn bounding_boxes_match_nibabel_corners() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let mut pire = 0.0_f64;
         for (chemin, lignes) in references() {
             let stack = Stack::read(&chemin).unwrap();
@@ -1600,6 +1627,9 @@ mod tests {
     /// cohérence entre stacks : voir l'étude 02.)
     #[test]
     fn reads_each_development_subject_as_a_set() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
@@ -1798,6 +1828,9 @@ mod tests {
     /// Version rapide (un stack sur 8) de l'étape 1d.
     #[test]
     fn mask_cleaning_and_pivots_match_scipy_and_numpy_sampled() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/pivots.tsv", racine()))) {
+            return;
+        }
         verifier_masques_et_pivots(8);
     }
 
@@ -1947,6 +1980,9 @@ mod tests {
     /// Version rapide : les sujets à plusieurs groupes et les deux premiers autres.
     #[test]
     fn stack_groups_match_python_reference_sampled() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/masques.tsv", racine()))) {
+            return;
+        }
         let mut autres = 0;
         verifier_groupes(|_, _, n_groupes| {
             if n_groupes > 1 {
@@ -2071,9 +2107,13 @@ mod tests {
     /// - contre SimpleITK (`EvaluateAtPhysicalPoint`, qui valide aussi l'orientation) : < 1e-3. Seuil moins strict car
     ///   ITK construit sa géométrie avec `pixdim` et une direction orthonormalisée (écart de 2,6e-4 mm mesuré à
     ///   l'étape 1b) : avec un fort gradient d'intensité, cela change la valeur échantillonnée.
+    ///
     /// Le domaine « dans la grille » de Rust doit aussi être celui de la référence, point par point.
     #[test]
     fn trilinear_sampling_matches_scipy_and_simpleitk() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/sampling/index.tsv", racine()))) {
+            return;
+        }
         let racine = racine();
         let index = std::fs::read_to_string(format!("{racine}/data/reference/sampling/index.tsv"))
             .expect("références absentes : lancer scripts/make_reference_sampling.py");
@@ -2086,8 +2126,10 @@ mod tests {
             let pas: usize = c[3].parse().unwrap();
             let octets = std::fs::read(format!("{racine}/{}", c[4])).unwrap();
             let ref_vals: Vec<f32> = octets
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             let contraste = {
                 let d = volume.data();
@@ -2377,6 +2419,9 @@ mod tests {
     /// normale égale à σ_normale² (la normale est un axe propre de la PSF). Données locales.
     #[test]
     fn psf_of_all_development_stacks_follows_slice_axes() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
@@ -2720,8 +2765,10 @@ mod tests {
                 (c[3].parse().unwrap(), c[4].parse().unwrap(), c[5].parse().unwrap());
             let octets = std::fs::read(format!("{racine}/{}", c[6])).unwrap();
             let ref_vals: Vec<f32> = octets
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             assert_eq!(ref_vals.len(), ks.len() * 2 * bloc * bloc);
             let sp = stack.spacing();

@@ -491,7 +491,9 @@ mod tests {
     fn lire_f32(chemin: &str) -> Vec<f32> {
         let octets = std::fs::read(chemin).expect(chemin);
         octets
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -504,6 +506,9 @@ mod tests {
         use burn::tensor::{Device, Tensor, TensorData};
 
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/reference/slice_input.f32"))) {
+            return;
+        }
         let entree = lire_f32(&format!("{racine}/data/reference/slice_input.f32"));
         let attendu = lire_f32(&format!("{racine}/data/reference/slice_logits.f32"));
 
@@ -535,6 +540,9 @@ mod tests {
     #[test]
     fn normalize_slices_matches_reference() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_03.nii.gz"))) {
+            return;
+        }
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
             let mut volume = read_volume(Path::new(&format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz"))).unwrap();
             normalize_slices(&mut volume);
@@ -560,6 +568,9 @@ mod tests {
     #[test]
     fn preprocessing_matches_monai() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_03.nii.gz"))) {
+            return;
+        }
         let ecart_relatif = |lu: &Array3<f32>, chemin: String, nom: &str| {
             let attendu = lire_f32(&chemin);
             assert_eq!(lu.len(), attendu.len(), "fetus_{nom} : taille {:?}", lu.dim());
@@ -681,6 +692,9 @@ mod tests {
     #[test]
     fn tiled_inference_matches_monai_fast() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/models/attunet.bpk"))) {
+            return;
+        }
         let device = Device::default();
         let modele = model::Model::from_file(format!("{racine}/models/attunet.bpk"), &device);
         verifier_inference("06", &modele, &device);
@@ -706,6 +720,9 @@ mod tests {
     #[test]
     fn logits_to_mask_matches_fetal_bet() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_03.nii.gz"))) {
+            return;
+        }
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
             let chemin = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
             let info = volume_info(Path::new(&chemin)).unwrap();
@@ -741,6 +758,11 @@ mod tests {
     #[test]
     fn write_mask_roundtrip_keeps_header() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!(
+            "{racine}/data/derivatives/fetal-bet/fetus_03_predicted_mask.nii.gz"
+        ))) {
+            return;
+        }
         for nom in ["03", "06", "12"] {
             let entree = format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz");
             let masque: Array3<u8> = read_volume(Path::new(&format!(
@@ -779,6 +801,9 @@ mod tests {
     #[test]
     fn segment_fails_early_when_output_dir_is_missing() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/models/attunet.bpk"))) {
+            return;
+        }
         let r = segment(
             Path::new("n_existe_pas.nii.gz"),
             Path::new("/dossier_inexistant_medoxide/masque.nii.gz"),
@@ -856,6 +881,10 @@ mod tests {
     /// Étape 8, version rapide : fetus_06 (une fenêtre par coupe).
     #[test]
     fn segment_end_to_end_fast() {
+        let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_06.nii.gz"))) {
+            return;
+        }
         verifier_segment("06");
     }
 

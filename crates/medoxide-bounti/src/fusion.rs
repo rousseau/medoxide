@@ -81,6 +81,8 @@ mod tests {
 
     /// `echanger_gauche_droite` : le canal `c` du résultat est le canal `PARTENAIRE[c]` de l'entrée (valeurs distinctes par canal et par position) ; `retourner_x` renverse exactement l'ordre sur l'axe x et laisse y et z intacts.
     #[test]
+    // les indices (c, i, j, k) servent aussi à calculer la position attendue : la forme indexée est la plus claire
+    #[allow(clippy::needless_range_loop)]
     fn the_swap_and_the_flip_move_exactly_what_they_should() {
         let device = Device::default();
         let (x, y, z) = (3usize, 2usize, 2usize);
@@ -136,9 +138,9 @@ mod tests {
                 let canaux = Tensor::cat(vec![image; CANAUX], 1);
                 let poids_a = Tensor::<5>::from_data(TensorData::new(a.clone(), [1, CANAUX, 1, 1, 1]), &device);
                 let mut pos = Vec::with_capacity(CANAUX * x);
-                for c in 0..CANAUX {
+                for coefficient in &b {
                     for i in 0..x {
-                        pos.push(b[c] * (i + 1) as f32);
+                        pos.push(coefficient * (i + 1) as f32);
                     }
                 }
                 let terme = Tensor::<5>::from_data(TensorData::new(pos, [1, CANAUX, x, 1, 1]), &device);

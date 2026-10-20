@@ -560,6 +560,11 @@ impl BatchSlices {
         self.points.dims()[0]
     }
 
+    /// Vrai si le lot ne contient aucune coupe.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Les coupes `rows` (avec répétitions possibles) comme un nouveau lot : sert à lancer plusieurs départs d'une même coupe.
     fn select(&self, rows: &[usize]) -> BatchSlices {
         let device = self.points.device();
@@ -1390,11 +1395,16 @@ mod tests {
 
     use crate::Stack;
 
+    /// Chemin de l'atlas de Gholipour (hors du dépôt : `data/atlas/gholipour`), que les tests de ce module lisent tous.
+    fn chemin_atlas() -> String {
+        format!("{}/../../data/atlas/gholipour/STA21.nii.gz", env!("CARGO_MANIFEST_DIR"))
+    }
+
     /// L'atlas de Gholipour, **tourné** dans le monde par une rotation arbitraire : son affine d'origine est diagonale, donc
     /// la transposition de l'inverse ne serait pas éprouvée (une mutation l'a montré). Mêmes voxels, affine oblique ; l'atlas est
     /// centré en (0, 0, 0), le volume reste donc autour de l'origine.
     fn atlas() -> Volume {
-        let chemin = format!("{}/../../data/atlas/gholipour/STA21.nii.gz", env!("CARGO_MANIFEST_DIR"));
+        let chemin = chemin_atlas();
         let original = Volume::from_stack(
             &Stack::read(std::path::Path::new(&chemin)).expect("atlas absent : voir data/atlas/gholipour"),
         );
@@ -1513,6 +1523,9 @@ mod tests {
     /// L'échantillonneur `f64` de référence rend la même valeur que `Volume::sample` à l'arrondi `f32` près.
     #[test]
     fn f64_reference_sampler_agrees_with_volume_sample() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let c = cas();
         let mut pire = 0.0_f64;
         for x in &c.points {
@@ -1529,6 +1542,9 @@ mod tests {
     /// Critère 1 : valeur contre la référence f64 indépendante.
     #[test]
     fn slice_ncc_matches_the_f64_reference_on_a_real_volume() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let c = cas();
         let device = device();
         let t = en_tenseurs(&c, &device);
@@ -1566,6 +1582,9 @@ mod tests {
     /// Critère 2 : gradient automatique contre différences finies de la référence f64, en trois poses.
     #[test]
     fn slice_ncc_gradient_matches_finite_differences_on_a_real_volume() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let c = cas();
         let device = device().autodiff();
         let t = en_tenseurs(&c, &device);
@@ -1614,6 +1633,9 @@ mod tests {
     /// chacune des 6 directions.
     #[test]
     fn slice_ncc_peaks_at_the_true_pose() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let c = cas();
         let device = device().autodiff();
         let t = en_tenseurs(&c, &device);
@@ -1927,6 +1949,9 @@ mod tests {
     /// Version courte du critère, dans la suite par défaut : les deux premières poses de la série d'évaluation.
     #[test]
     fn registration_smoke_test_recovers_two_poses() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let volume = atlas();
         let res = serie(&volume, 271828, 2, 3.0, 3.0, 0.0, None, "fumee");
         assert_eq!(res.len(), 2);
@@ -2221,7 +2246,7 @@ mod tests {
                     sorties.push(Depart {
                         ncc: *r.ncc_history.last().unwrap(),
                         deplacement_rms: rms_depuis(&[0.0; 6]),
-                        distance_au_premier: poses.first().map_or(0.0, |p0| rms_depuis(p0)),
+                        distance_au_premier: poses.first().map_or(0.0, rms_depuis),
                     });
                     poses.push(r.params);
                 }
@@ -2373,6 +2398,9 @@ mod tests {
     /// jamais inférieure à celle du premier recalage.
     #[test]
     fn robust_registration_only_restarts_suspect_slices_and_never_worsens() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let volume = atlas();
         let device = device().autodiff();
         let vt = VolumeTensors::new(&volume, &device);
@@ -2581,6 +2609,9 @@ mod tests {
     /// Éprouve la relance elle-même : sans elle (ou avec des départs identiques), la NCC ne progresse pas.
     #[test]
     fn robust_registration_rescues_a_blocked_slice() {
+        if !medoxide_core::donnees_de_test(std::path::Path::new(&chemin_atlas())) {
+            return;
+        }
         let volume = atlas();
         let device = device().autodiff();
         let vt = VolumeTensors::new(&volume, &device);
@@ -2675,9 +2706,9 @@ mod tests {
             .map(|n| {
                 let (c, r) = (n / taille, n % taille);
                 let (i, j, k) = (r / (dims[1] * dims[2]), (r / dims[2]) % dims[1], r % dims[2]);
-                ((0.09 * i as f32 + 0.3 * c as f32).sin()
+                (0.09 * i as f32 + 0.3 * c as f32).sin()
                     + (0.13 * j as f32).cos()
-                    + (0.07 * k as f32 + 0.1 * c as f32).sin()) as f32
+                    + (0.07 * k as f32 + 0.1 * c as f32).sin()
             })
             .collect();
         let coords: Vec<f32> = (0..s * p * 3)

@@ -779,6 +779,9 @@ mod tests {
     /// pour 3 couples résolution / marge.
     #[test]
     fn grid_matches_the_python_reference_on_real_stacks() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/grid/grilles.tsv", racine()))) {
+            return;
+        }
         let tsv = std::fs::read_to_string(format!("{}/data/reference/grid/grilles.tsv", racine()))
             .expect("références absentes : lancer scripts/make_reference_grid.py");
         let mut n_lignes = 0;
@@ -1042,7 +1045,7 @@ mod tests {
                         .filter(|(_, &m)| m)
                         .fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
                     let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
-                    let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919);
+                    let mut alea = Alea(0xC0FFEE ^ ((n as u64 + 1) * 7919));
                     let bruite = propre.data().mapv(|v| {
                         let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0; // somme de 12 uniformes - 6 : gaussienne centrée réduite approchée
                         (f64::from(v) + sigma * gauss) as f32
@@ -2486,7 +2489,7 @@ mod tests {
                         .filter(|(_, &m)| m > 0)
                         .fold((0.0_f64, 0usize), |(s, n), (&v, _)| (s + f64::from(v), n + 1));
                     let sigma = f64::from(bruit_pct) / 100.0 * somme / n_m as f64;
-                    let mut alea = Alea(0xC0FFEE ^ (n as u64 + 1) * 7919 ^ u64::from(amplitude));
+                    let mut alea = Alea(0xC0FFEE ^ ((n as u64 + 1) * 7919) ^ u64::from(amplitude));
                     data.mapv_inplace(|v| {
                         let gauss: f64 = (0..12).map(|_| alea.suivant()).sum::<f64>() - 6.0;
                         (f64::from(v) + sigma * gauss) as f32
@@ -3425,7 +3428,7 @@ mod tests {
                 continue;
             }
             for j in 0..stack.dim().2 {
-                if partenaires.map_or(false, |p| !p.contains(&(sj, j))) {
+                if partenaires.is_some_and(|p| !p.contains(&(sj, j))) {
                     continue; // ensemble de partenaires imposé (gelé) : seuls ceux-là comptent
                 }
                 let (inv2, c2, n2) = plan(sj, j);
@@ -5846,7 +5849,7 @@ mod tests {
                         let mut p = apres.clone();
                         for (sj, stack_j) in tous.iter().enumerate() {
                             for kj in 0..stack_j.dim().2 {
-                                if erreur(sj, kj, apres.get(sj, kj)).map_or(false, |e| e > 1.5) {
+                                if erreur(sj, kj, apres.get(sj, kj)).is_some_and(|e| e > 1.5) {
                                     p.set(
                                         sj,
                                         kj,
@@ -5873,7 +5876,7 @@ mod tests {
                         let mut poses = base.clone();
                         poses.set(si, k, s0);
                         if (partenaires == "après" || partenaires == "oracle")
-                            && erreur(si, k, &s0).map_or(true, |e| e <= 1.5)
+                            && erreur(si, k, &s0).is_none_or(|e| e <= 1.5)
                         {
                             continue; // déjà bien recalée : hors du périmètre du multi-départ
                         }
@@ -8565,11 +8568,7 @@ mod tests {
             blur_slice_in_mask(bruit.view(), demi.view(), 2.0),
             blur_slice_in_mask(modifiee.view(), demi.view(), 2.0),
         );
-        for ((i, j), (&va, &vb)) in a
-            .indexed_iter()
-            .zip(b.iter())
-            .map(|(((i, j), x), y)| (((i, j)), (x, y)))
-        {
+        for ((i, j), (&va, &vb)) in a.indexed_iter().zip(b.iter()).map(|(((i, j), x), y)| ((i, j), (x, y))) {
             if demi[[i, j]] {
                 assert!(
                     (va - vb).abs() < 1e-3,
@@ -9153,7 +9152,7 @@ mod tests {
                 let mut compte = 0usize;
                 for ((i, j), &dedans) in masque.index_axis(Axis(2), k).indexed_iter() {
                     if dedans {
-                        if compte % 5 == 0 {
+                        if compte.is_multiple_of(5) {
                             let x = coupe.pixel_to_world(i as f64, j as f64).push(1.0);
                             paires.push(((e * x).xyz(), (v * x).xyz()));
                         }
@@ -9827,7 +9826,7 @@ mod tests {
         let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
         let identite = SlicePoses::identity(&stacks);
         // MEDOXIDE_ALIGN_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (un mouvement rigide par stack, 2 balayages) au lieu des poses d'en-tête
-        let depart = if std::env::var("MEDOXIDE_ALIGN_STACKS").map_or(false, |v| v.trim() == "1") {
+        let depart = if std::env::var("MEDOXIDE_ALIGN_STACKS").is_ok_and(|v| v.trim() == "1") {
             let debut_stacks = std::time::Instant::now();
             let alignes =
                 align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
@@ -9845,7 +9844,7 @@ mod tests {
             identite.clone()
         };
         // MEDOXIDE_INIT_S2S = 1 : la boucle (coupe-volume) part des poses de l'estimation coupe-coupe au lieu des poses d'en-tête (ou alignées)
-        let depart = if std::env::var("MEDOXIDE_INIT_S2S").map_or(false, |v| v.trim() == "1") {
+        let depart = if std::env::var("MEDOXIDE_INIT_S2S").is_ok_and(|v| v.trim() == "1") {
             let debut_s2s = std::time::Instant::now();
             let rapport =
                 crate::s2s::register_slices_s2s(&stacks, &depart, &crate::s2s::S2sConfig::default(), &device).unwrap();
@@ -9865,7 +9864,7 @@ mod tests {
             stacks.iter().map(|s| s.dim().2).sum::<usize>()
         );
         // MEDOXIDE_MOTION = s2s : mouvement estimé SANS reconstruction (coupe-coupe, `register_slices_s2s`, MEDOXIDE_S2S_SWEEPS balayages, 3 par défaut), puis UNE reconstruction avec ces poses
-        if std::env::var("MEDOXIDE_MOTION").map_or(false, |v| v.trim() == "s2s") {
+        if std::env::var("MEDOXIDE_MOTION").is_ok_and(|v| v.trim() == "s2s") {
             let debut = std::time::Instant::now();
             // MEDOXIDE_S2S_ANCRE = a : seules les paires impliquant le stack `a` (indice dans `retenus`) servent à l'estimation ; les autres paires restent pour évaluer
             let ancre = std::env::var("MEDOXIDE_S2S_ANCRE")
@@ -9926,7 +9925,7 @@ mod tests {
             min_stack_coverage: 1,
             skip_unused_reconstructions: false,
             cycles,
-            alpha: alpha,
+            alpha,
             cg_max_iterations: 300,
             cg_tolerance: 1e-4,
             robust: robuste,
@@ -10410,7 +10409,8 @@ mod tests {
     #[test]
     #[ignore = "données locales ; très longue"]
     fn evaluate_the_loop_on_sta31() {
-        for amplitude in [2u32] {
+        {
+            let amplitude = 2u32;
             let (atlas, stacks, vraies) = stacks_atlas_avec_mouvement("STA31", amplitude, 5);
             evaluer_la_boucle("données medoxide", "medoxide", &atlas, &stacks, &vraies, amplitude);
         }
@@ -10443,7 +10443,7 @@ mod tests {
             .ok()
             .map_or(0.0, |v| v.trim().parse().unwrap());
         // MEDOXIDE_STACKS = 1 : la boucle part des poses obtenues par `register_stacks` (2 balayages) au lieu des poses d'en-tête ; MEDOXIDE_SUFFIXE : suffixe du fichier exporté
-        let depart_stacks = std::env::var("MEDOXIDE_STACKS").map_or(false, |v| v.trim() == "1");
+        let depart_stacks = std::env::var("MEDOXIDE_STACKS").is_ok_and(|v| v.trim() == "1");
         let suffixe = std::env::var("MEDOXIDE_SUFFIXE").unwrap_or_default();
         // MEDOXIDE_STACKS_RETENUS : sous-ensemble de stacks (« 0,1 » : axial et coronal), tous par défaut ; MEDOXIDE_LOO_CYCLES : nombre de premiers cycles où chaque stack est recalé contre une
         // reconstruction faite sans lui (6 par défaut ; 0 : toujours la reconstruction complète). Les exports d'un sous-ensemble vont dans un sous-dossier `stacks_<indices>` (pas d'écrasement).
@@ -10460,10 +10460,10 @@ mod tests {
         let cycles_sans_le_stack: usize = std::env::var("MEDOXIDE_LOO_CYCLES")
             .ok()
             .map_or(6, |v| v.trim().parse().unwrap());
-        let grille = reconstruction_grid(&stacks, 0.8, 10.0).unwrap();
-        let identite = SlicePoses::identity(&stacks);
-        let init_vraies = normalized_adjoint_with_poses(&grille, &stacks, &vraies).unwrap();
-        let c = construire_comparaison(&grille, &init_vraies.support, &atlas, &stacks);
+        let grille = reconstruction_grid(stacks, 0.8, 10.0).unwrap();
+        let identite = SlicePoses::identity(stacks);
+        let init_vraies = normalized_adjoint_with_poses(&grille, stacks, vraies).unwrap();
+        let c = construire_comparaison(&grille, &init_vraies.support, atlas, stacks);
         let mut sortie = PathBuf::from(format!("{}/data/atlas/results/{slug}_mvt{amplitude}", racine()));
         if sous_ensemble {
             sortie = sortie.join(format!(
@@ -10472,12 +10472,12 @@ mod tests {
             ));
         }
         let borne = |poses: &SlicePoses, nom: &str| {
-            let p = ReconstructionProblem::with_poses(&grille, &stacks, poses, ALPHA_CHOISI).unwrap();
+            let p = ReconstructionProblem::with_poses(&grille, stacks, poses, ALPHA_CHOISI).unwrap();
             let x = p.conjugate_gradient(&p.initial_guess(), 300, 1e-4).x;
             ecrire_image_grille(&sortie.join(format!("ours_{nom}.nii.gz")), &x, &grille);
             qualite(&c, &x)
         };
-        let (haute, basse) = (borne(&vraies, "true_poses"), borne(&identite, "no_correction"));
+        let (haute, basse) = (borne(vraies, "true_poses"), borne(&identite, "no_correction"));
         println!("--- {etiquette}, mouvement ±{amplitude}°/±{amplitude} mm (référence sans le stack recalé) : bornes PSNR haute {:.2} dB, basse {:.2} dB", haute.1, basse.1);
         // 6 cycles : les critères (étude 06 §15) portent sur l'état après 3 cycles, fixé avant ; les cycles 4 à 6 sont descriptifs (post hoc).
         let config = align::LoopConfig {
@@ -10512,24 +10512,24 @@ mod tests {
         let depart = if depart_stacks {
             let debut_stacks = std::time::Instant::now();
             let alignes =
-                align::register_stacks(&grille, &stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
+                align::register_stacks(&grille, stacks, &identite, 2, RobustConfig::new(0.9), &device).unwrap();
             println!(
                 "  alignement des stacks : désalignement entre stacks {:?} → {:?} ; {:.0} s",
-                desalignement_entre_stacks(&stacks, &identite, &vraies),
-                desalignement_entre_stacks(&stacks, &alignes.poses, &vraies),
+                desalignement_entre_stacks(stacks, &identite, vraies),
+                desalignement_entre_stacks(stacks, &alignes.poses, vraies),
                 debut_stacks.elapsed().as_secs_f64()
             );
             alignes.poses
         } else {
             identite.clone()
         };
-        let resultat = align::reconstruct_with_motion_correction(&grille, &stacks, &depart, config, &device, |cycle, x, poses| {
+        let resultat = align::reconstruct_with_motion_correction(&grille, stacks, &depart, config, &device, |cycle, x, poses| {
             let q = qualite(&c, x);
             println!("  reconstruction {cycle} : NCC {:.4}, PSNR {:.2} dB  (t = {:.0} s)", q.0, q.1, debut.elapsed().as_secs_f64());
             psnr.push(q.1);
-            erreurs_par_cycle.push(erreurs_de_pose(&stacks, poses, &vraies));
+            erreurs_par_cycle.push(erreurs_de_pose(stacks, poses, vraies));
             let tri = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); (v[v.len() / 2], v[v.len() - 1]) };
-            let (global, par_stack) = (tri(erreurs_apres_mouvement_commun(&stacks, poses, &vraies, false)), tri(erreurs_apres_mouvement_commun(&stacks, poses, &vraies, true)));
+            let (global, par_stack) = (tri(erreurs_apres_mouvement_commun(stacks, poses, vraies, false)), tri(erreurs_apres_mouvement_commun(stacks, poses, vraies, true)));
             println!("    après retrait d'un mouvement rigide commun : médiane {:.2} mm (max {:.2}) ; un par stack : médiane {:.2} mm (max {:.2})", global.0, global.1, par_stack.0, par_stack.1);
         })
         .unwrap();
