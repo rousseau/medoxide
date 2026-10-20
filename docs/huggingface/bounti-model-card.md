@@ -13,8 +13,6 @@ tags:
 
 # medoxide-bounti : poids de BOUNTI convertis pour Burn
 
-> Brouillon de la fiche du dépôt Hugging Face (non publié). Les sommes de contrôle sont à renseigner au moment de l'envoi.
-
 Ces fichiers sont les poids de **BOUNTI** (segmentation du cerveau fœtal en 19 tissus à partir d'une reconstruction 3D T2) et du réseau d'extraction du cerveau de sa chaîne, **convertis au format `burnpack`** pour [Burn](https://burn.dev), afin d'être utilisés par la commande `medx bounti` de [medoxide](https://github.com/rousseau/medoxide) sans Docker ni PyTorch.
 
 **Ce sont les poids des auteurs, sans réentraînement ni ajustement** : seul le format change (export ONNX puis conversion, en `float32`). Le travail est celui de l'équipe de Maria Deprez, Alena Uus et collaborateurs (King's College London) : merci de les citer.
@@ -29,15 +27,15 @@ Ces fichiers sont les poids de **BOUNTI** (segmentation du cerveau fœtal en 19 
 ## Licence
 
 **GNU General Public License v3.0** : la licence des scripts et du code de `auto-proc-svrtk`, dont l'image Docker est issue (texte : `LICENSE` de ce dépôt amont, <https://www.gnu.org/licenses/gpl-3.0.html>). Le dépôt amont ne mentionne pas les poids séparément ; ces fichiers sont publiés sous la licence de la distribution dont ils proviennent.
-Ils sont une **version modifiée (convertie de format)** des poids d'origine. Le code qui les utilise (medoxide) est sous licence MIT ; les poids, eux, restent sous GPL v3 et ne sont pas inclus dans le dépôt de code.
+Ils sont une **version modifiée (convertie de format)** des poids d'origine. Le code qui les utilise (medoxide) est sous licence MIT ; les poids, eux, restent sous GPL v3 et ne sont pas inclus dans le dépôt de code. Le texte de la licence est dans le fichier `LICENSE` de ce dépôt (copie de celui de `auto-proc-svrtk`).
 
 ## Fichiers
 
 | Fichier | Réseau | Paramètres | Taille | SHA-256 |
 |---|---|---|---|---|
-| `bet/bet_64.bpk` | Attention U-Net 3D, extraction du cerveau (2 sorties, canaux 32 à 512) | 23,6 M | 94,5 Mo | à renseigner |
-| `unet/unet_64.bpk` | U-Net 3D, 19 tissus + fond (20 sorties, canaux 32 à 512) | 9,83 M | 39,3 Mo | à renseigner |
-| `attunet/attunet_64.bpk` | Attention U-Net 3D, 19 tissus + fond (canaux 16 à 256) | 5,91 M | 23,6 Mo | à renseigner |
+| `bet/bet_64.bpk` | Attention U-Net 3D, extraction du cerveau (2 sorties, canaux 32 à 512) | 23,6 M | 94,5 Mo | `3b288ec287cfa42518f6cd5023d23e7cd5387f06175d769038b73781e0d31fe6` |
+| `unet/unet_64.bpk` | U-Net 3D, 19 tissus + fond (20 sorties, canaux 32 à 512) | 9,83 M | 39,3 Mo | `6ac7d9b793c68e307d89d793a7b1ff66916c631d9524b0157c7f0a25f2ac6ae8` |
+| `attunet/attunet_64.bpk` | Attention U-Net 3D, 19 tissus + fond (canaux 16 à 256) | 5,91 M | 23,6 Mo | `a3c9a4c5ed67997d3ce9b283e309818030f82c3e38cfe160f0351f69e45774fa` |
 
 (`_64` : taille du cube factice de l'export ONNX ; les réseaux sont indépendants de la taille spatiale.)
 
@@ -52,7 +50,9 @@ Points de contrôle PyTorch/MONAI → export ONNX (opset 17) → `onnx2burn` (bu
 ## Utilisation
 
 ```bash
-# télécharger les trois fichiers dans un dossier (ex. ~/.cache/medoxide/bounti, cherché par défaut)
+# télécharger les trois fichiers (en gardant les sous-dossiers bet/, unet/, attunet/) dans un dossier,
+# par exemple ~/.cache/medoxide/bounti, cherché par défaut ;
+# vérifier les sommes de contrôle avec : shasum -a 256 bet/bet_64.bpk unet/unet_64.bpk attunet/attunet_64.bpk
 medx bounti --input reconstruction.nii.gz --output segmentation.nii.gz --weights <dossier>
 ```
 

@@ -1,7 +1,7 @@
-//! Emplacement des poids convertis de BOUNTI (trois fichiers `.bpk`, hors du dépôt : voir `docs/BOUNTI.md` pour leur licence et leur production).
+//! Emplacement des poids convertis de BOUNTI (trois fichiers `.bpk`, hors du dépôt : publiés sur <https://huggingface.co/rousseau/medoxide-bounti> sous licence GPL v3, ou produits par `scripts/bounti_poids.sh` ; voir `docs/BOUNTI.md`).
 //!
 //! Le dossier des poids contient `bet/bet_64.bpk`, `unet/unet_64.bpk` et `attunet/attunet_64.bpk`. Il est cherché dans cet ordre : l'option de la ligne de commande, la variable d'environnement `MEDOXIDE_BOUNTI_WEIGHTS`, puis le cache de l'utilisateur
-//! (`$XDG_CACHE_HOME/medoxide/bounti`, sinon `~/.cache/medoxide/bounti`). Rien n'est téléchargé : la licence des poids n'est pas tranchée.
+//! (`$XDG_CACHE_HOME/medoxide/bounti`, sinon `~/.cache/medoxide/bounti`). Rien n'est téléchargé automatiquement pour l'instant.
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +27,7 @@ pub enum ErreurPoids {
 
 impl std::fmt::Display for ErreurPoids {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let aide = "Ils se produisent depuis l'image Docker de BOUNTI avec scripts/bounti_poids.sh (voir docs/BOUNTI.md) ; ils sont sous licence GPL v3 et ne sont pas distribués avec medoxide.";
+        let aide = "Téléchargez-les (en gardant les sous-dossiers bet/, unet/, attunet/) depuis https://huggingface.co/rousseau/medoxide-bounti, ou produisez-les depuis l'image Docker des auteurs avec scripts/bounti_poids.sh (voir docs/BOUNTI.md) ; ils sont sous licence GPL v3 et ne sont pas inclus dans le dépôt de medoxide.";
         match self {
             ErreurPoids::AucunDossier => write!(
                 f,

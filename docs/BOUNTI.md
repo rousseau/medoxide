@@ -318,3 +318,14 @@ Le seuil n'est pas ajusté (règle posée avant la mesure). **Causes, localisée
 ### C2 à 160³ (complément de l'étape 4)
 
 La référence PyTorch de la fusion à 160³ (`scripts/make_bounti_fusion_reference.py 160`, sous `garde_memoire.py 11`, pic de mémoire de 10,1 Go) et le test `the_fusion_matches_the_pytorch_reference` (`BOUNTI_N=160`) : **0 voxel d'étiquette différent sur 4 096 000** et écart relatif des logits fusionnés de **1,45e-6** (critère : ≥ 99,9 % d'étiquettes identiques). Avec le résultat à 128³ (0 voxel sur 2 097 152, 1,6e-6), C2 est atteint aux deux tailles de référence testées ; la chaîne complète à 256³ est validée par C3 (sous-étape 5d-2).
+
+### Publication des poids sur Hugging Face
+
+Décision de l'utilisateur (le 2026-10-20, après celle de principe de la veille) : publier les poids convertis, en citant le travail, le dépôt GitHub des auteurs et la licence de leur distribution. **Publié** : <https://huggingface.co/rousseau/medoxide-bounti> (public, étiquette `license:gpl-3.0`), contenant `bet/bet_64.bpk`, `unet/unet_64.bpk`, `attunet/attunet_64.bpk`, le texte de la licence (`LICENSE`, copie de celui de `auto-proc-svrtk`) et la fiche (`README.md` : origine, licence, version modifiée, conversion, validation, citation, usage et limites ; source dans `docs/huggingface/bounti-model-card.md`). Les fichiers envoyés sont ceux produits par `scripts/bounti_poids.sh` et validés de bout en bout (0 voxel de différence avec les poids précédents sur calme 1).
+| Fichier | taille (octets) | SHA-256 |
+|---|---|---|
+| `bet/bet_64.bpk` | 94 503 944 | `3b288ec2…e0d31fe6` |
+| `unet/unet_64.bpk` | 39 342 160 | `6ac7d9b7…ac6ae8` |
+| `attunet/attunet_64.bpk` | 23 646 288 | `a3c9a4c5…e45774fa` |
+(sommes complètes dans la fiche.) **Vérification** : dépôt retéléchargé par `snapshot_download`, les cinq fichiers (trois poids, `LICENSE`, `README.md`) sont identiques bit à bit à ceux envoyés. Le jeton utilisé (à portée limitée à l'écriture sur le compte) n'a été passé que par variable d'environnement, jamais écrit dans un fichier ni dans le dépôt.
+Le dépôt amont ne mentionne pas les poids séparément (« the auto SVRTK code and all scripts » sous GPL v3) : la fiche le dit et les publie sous la licence de la distribution d'où ils viennent. Reste à faire : téléchargement automatique par `medx bounti` (URL et SHA-256, comme `medx fetalbet`).

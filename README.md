@@ -6,7 +6,7 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 | Sous-commande | Méthode |
 |---|---|
 | `medx fetalbet` | Masque cérébral en IRM fœtale (portage de [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction)) |
-| `medx bounti` | Segmentation du cerveau fœtal en 19 tissus à partir d'une reconstruction 3D T2 (portage de [BOUNTI](https://github.com/SVRTK/auto-proc-svrtk), sans Docker ; les poids, sous licence GPL v3, ne sont pas distribués : voir ci-dessous) |
+| `medx bounti` | Segmentation du cerveau fœtal en 19 tissus à partir d'une reconstruction 3D T2 (portage de [BOUNTI](https://github.com/SVRTK/auto-proc-svrtk), sans Docker ; poids convertis sur [Hugging Face](https://huggingface.co/rousseau/medoxide-bounti), licence GPL v3 : voir ci-dessous) |
 | `medx svr recon` | Reconstruction coupe-vers-volume : volume 3D à partir de stacks 2D d'IRM fœtale, avec estimation du mouvement de chaque coupe (coupe-coupe ou coupe-volume) ; en développement |
 | `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère |
 
@@ -39,7 +39,9 @@ options, les durées et les limites.
 Segmentation des tissus d'une reconstruction (19 tissus et le fond, extraction du cerveau comprise) :
 
 ```bash
-bash scripts/bounti_poids.sh      # une fois : produit les poids (voir « Référence et licence »)
+# une fois : télécharger les poids (trois fichiers, sous-dossiers conservés) depuis
+# https://huggingface.co/rousseau/medoxide-bounti dans ~/.cache/medoxide/bounti, ou passer --weights <dossier>,
+# ou les produire soi-même depuis l'image Docker des auteurs : bash scripts/bounti_poids.sh
 ./target/release/medx bounti --input volume.nii.gz --output segmentation.nii.gz
 # ou, dans l'arborescence BIDS dérivée lue par guioxide :
 ./target/release/medx bounti --input volume.nii.gz --bids /chemin/jeu --participant 01 --session 1
@@ -103,9 +105,12 @@ garantie.
 `medx bounti` est un portage de **BOUNTI** (Uus et al., King's College London), avec
 l'extraction du cerveau 3D de la chaîne officielle. Le dépôt contient le code des réseaux (généré
 à partir de l'architecture MONAI) et la chaîne de traitement, **pas les poids** : ce sont ceux des
-auteurs, que nous considérons sous la licence GPL v3 de leur logiciel (hypothèse, à confirmer auprès
-d'eux). Ils sont donc produits localement par `scripts/bounti_poids.sh` à partir de l'image Docker des
-auteurs, jamais versionnés ni redistribués avec medoxide. Si vous l'utilisez, merci de citer :
+auteurs, convertis au format de Burn sans réentraînement, et publiés séparément sur
+[Hugging Face](https://huggingface.co/rousseau/medoxide-bounti) sous la licence **GPL v3** de
+leur dépôt [`auto-proc-svrtk`](https://github.com/SVRTK/auto-proc-svrtk) et de ses images Docker
+(qui ne mentionne pas les poids séparément : ils suivent la licence de la distribution d'où ils viennent).
+Ils peuvent aussi être reproduits par `scripts/bounti_poids.sh` à partir de l'image Docker des
+auteurs. Ils ne sont jamais versionnés dans ce dépôt (licence MIT). Si vous l'utilisez, merci de citer :
 
 ```bibtex
 @article{uus2023bounti,

@@ -197,7 +197,7 @@ enum Command {
         #[arg(long, conflicts_with = "output")]
         output_dir: Option<PathBuf>,
         /// Dossier des poids convertis. Priorité : cette option, puis la variable d'environnement
-        /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti). Licence GPL v3 : non distribués
+        /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti). Poids sur https://huggingface.co/rousseau/medoxide-bounti (GPL v3)
         #[arg(long)]
         weights: Option<PathBuf>,
         /// GPU (wgpu) ou CPU (beaucoup plus lent)
