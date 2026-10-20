@@ -779,6 +779,9 @@ mod tests {
     /// pour 3 couples résolution / marge.
     #[test]
     fn grid_matches_the_python_reference_on_real_stacks() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/grid/grilles.tsv", racine()))) {
+            return;
+        }
         let tsv = std::fs::read_to_string(format!("{}/data/reference/grid/grilles.tsv", racine()))
             .expect("références absentes : lancer scripts/make_reference_grid.py");
         let mut n_lignes = 0;

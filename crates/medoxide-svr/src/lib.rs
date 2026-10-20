@@ -1325,6 +1325,9 @@ mod tests {
     /// décimales : mêmes valeurs que dans `medoxide-core`, lues cette fois par `Stack`.
     #[test]
     fn reads_fetal_bet_volumes_with_nibabel_affines() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine()))) {
+            return;
+        }
         let attendu: [(&str, [[f64; 4]; 3]); 3] = [
             (
                 "fetus_03",
@@ -1381,6 +1384,9 @@ mod tests {
     /// valide (orthogonale, pixdim cohérent). Données locales (`data/`, hors de Git).
     #[test]
     fn reads_all_development_stacks_even_left_handed() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
@@ -1476,6 +1482,9 @@ mod tests {
     /// l'ordre du trois-millième de voxel avec l'affine stockée (qu'applique nibabel, et nous).
     #[test]
     fn world_coordinates_match_nibabel_and_simpleitk() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let refs = references();
         assert_eq!(refs.len(), 104, "8 volumes de Fetal-BET + 96 stacks");
         let (mut pire_nib, mut pire_itk) = (0.0_f64, 0.0_f64);
@@ -1505,6 +1514,9 @@ mod tests {
     /// Critère 3 : invariants géométriques de chaque stack, sans référence externe.
     #[test]
     fn slice_invariants_hold_on_all_stacks() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let refs = references();
         let mut n_coupes = 0;
         for (chemin, _) in &refs {
@@ -1587,6 +1599,9 @@ mod tests {
     /// dans la table de références (calcul indépendant), donnent la boîte attendue (< 1e-6 mm).
     #[test]
     fn bounding_boxes_match_nibabel_corners() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+            return;
+        }
         let mut pire = 0.0_f64;
         for (chemin, lignes) in references() {
             let stack = Stack::read(&chemin).unwrap();
@@ -1612,6 +1627,9 @@ mod tests {
     /// cohérence entre stacks : voir l'étude 02.)
     #[test]
     fn reads_each_development_subject_as_a_set() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
@@ -1810,6 +1828,9 @@ mod tests {
     /// Version rapide (un stack sur 8) de l'étape 1d.
     #[test]
     fn mask_cleaning_and_pivots_match_scipy_and_numpy_sampled() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/pivots.tsv", racine()))) {
+            return;
+        }
         verifier_masques_et_pivots(8);
     }
 
@@ -1959,6 +1980,9 @@ mod tests {
     /// Version rapide : les sujets à plusieurs groupes et les deux premiers autres.
     #[test]
     fn stack_groups_match_python_reference_sampled() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/masques.tsv", racine()))) {
+            return;
+        }
         let mut autres = 0;
         verifier_groupes(|_, _, n_groupes| {
             if n_groupes > 1 {
@@ -2087,6 +2111,9 @@ mod tests {
     /// Le domaine « dans la grille » de Rust doit aussi être celui de la référence, point par point.
     #[test]
     fn trilinear_sampling_matches_scipy_and_simpleitk() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/sampling/index.tsv", racine()))) {
+            return;
+        }
         let racine = racine();
         let index = std::fs::read_to_string(format!("{racine}/data/reference/sampling/index.tsv"))
             .expect("références absentes : lancer scripts/make_reference_sampling.py");
@@ -2392,6 +2419,9 @@ mod tests {
     /// normale égale à σ_normale² (la normale est un axe propre de la PSF). Données locales.
     #[test]
     fn psf_of_all_development_stacks_follows_slice_axes() {
+        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine()))) {
+            return;
+        }
         let mut fichiers = Vec::new();
         trouver(
             &Path::new(&racine()).join("data/svr/jeu_reel_tru_haste"),
