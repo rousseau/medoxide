@@ -81,6 +81,7 @@ mod tests {
 
     /// `echanger_gauche_droite` : le canal `c` du résultat est le canal `PARTENAIRE[c]` de l'entrée (valeurs distinctes par canal et par position) ; `retourner_x` renverse exactement l'ordre sur l'axe x et laisse y et z intacts.
     #[test]
+    #[ignore = "gpu"]
     // les indices (c, i, j, k) servent aussi à calculer la position attendue : la forme indexée est la plus claire
     #[allow(clippy::needless_range_loop)]
     fn the_swap_and_the_flip_move_exactly_what_they_should() {
@@ -120,6 +121,7 @@ mod tests {
     /// Fusion de deux réseaux factices **non symétriques** (sortie `a(c)·image + b(c)·(i + 1)` avec `i` l'indice sur l'axe x, de coefficients différents par réseau et par canal) : la fusion Rust égale à 1e-5 près la formule écrite à la main,
     /// `moyenne sur les réseaux de [ normale(c, i) + retournée_remise_dans_le_repère(PARTENAIRE[c], i) ] / 2`, ce qui contrôle à la fois le sens du retournement, l'ordre « retour puis échange » et le diviseur.
     #[test]
+    #[ignore = "gpu"]
     fn the_fusion_follows_the_hand_written_formula() {
         let device = Device::default();
         let (x, y, z) = (3usize, 2usize, 2usize);
@@ -180,6 +182,7 @@ mod tests {
 
     /// `etiquettes` : le canal de plus grand logit à chaque voxel, en ordre C `[X, Y, Z]`.
     #[test]
+    #[ignore = "gpu"]
     fn the_labels_are_the_channel_of_largest_logit() {
         let device = Device::default();
         let (x, y, z) = (2usize, 2usize, 3usize);

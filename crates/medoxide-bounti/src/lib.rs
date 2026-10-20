@@ -162,6 +162,7 @@ mod tests {
     /// Précision de [`crate::norme::InstanceNorm`] contre un calcul en f64, sur `[1, 4, n, n, n]` de moyenne 3 et d'écart type 1, pour n = 64, 128 et 256 : écart maximal de la sortie normalisée (valeurs de l'ordre de 1) ≤ 1e-5 à toutes les tailles
     /// (mesuré sur GPU : 1,9e-6, 1,7e-6, 2,8e-6 ; la normalisation de `burn::nn::InstanceNorm` donne 2,8e-5, 4,7e-4 puis 1,0e-2 sur ces mêmes tailles).
     #[test]
+    #[ignore = "gpu"]
     fn the_cascaded_instance_norm_stays_accurate_on_large_volumes() {
         use crate::norme::InstanceNormConfig;
         use burn::tensor::Distribution;
@@ -191,6 +192,7 @@ mod tests {
     /// Précision de la normalisation selon le rapport moyenne / écart type (10, 100, 1000), sur `[1, 2, 128, 128, 128]`, contre un calcul en f64 : écart maximal de la sortie normalisée ≤ 1e-5 pour chaque rapport
     /// (avant la correction à deux passes : 3,0e-6, 1,2e-5 et 2,4e-4 sur GPU).
     #[test]
+    #[ignore = "gpu"]
     fn the_cascaded_instance_norm_is_accurate_for_large_means() {
         use crate::norme::InstanceNormConfig;
         use burn::tensor::Distribution;
@@ -224,6 +226,7 @@ mod tests {
 
     /// Même sens que `burn::nn::InstanceNorm` sur une petite entrée (où les deux sont précis) : sortie égale à 1e-5 près, avec `gamma` et `beta` non triviaux ; et propriétés exactes : après normalisation sans paramètres affines, chaque canal a une moyenne de 0 (1e-5 près) et une variance de 1 − ε/(variance + ε) (écart type 1 à 1e-4 près pour une variance d'entrée de 25).
     #[test]
+    #[ignore = "gpu"]
     fn the_cascaded_instance_norm_matches_burns_on_small_inputs() {
         use crate::norme::InstanceNormConfig;
         use burn::tensor::Distribution;
