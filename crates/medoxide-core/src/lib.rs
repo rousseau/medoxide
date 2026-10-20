@@ -314,7 +314,10 @@ pub const EXIGER_DONNEES: &str = "MEDOXIDE_EXIGER_DONNEES";
 ///
 /// Passer le premier fichier que le test lit :
 ///
-/// ```ignore
+/// ```no_run
+/// use std::path::Path;
+///
+/// let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
 /// let entree = format!("{racine}/data/sourcedata/fetus_03.nii.gz");
 /// if !medoxide_core::donnees_de_test(Path::new(&entree)) {
 ///     return;
