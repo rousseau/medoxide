@@ -12,6 +12,19 @@
 //!   gauche » : c'est le cas courant, y compris des 96 stacks du jeu de développement) :
 //!   cela n'est pas une erreur, et l'image n'est jamais retournée.
 
+// Lints de style de clippy écartés pour tout le crate : le code est numérique, et ces règles n'y apportent rien (aucun effet sur le calcul).
+// - `needless_range_loop` : les boucles sur un indice (axe 0..3, voxel, coupe) indexent souvent plusieurs tableaux en parallèle ; la forme indexée est plus claire que `iter().enumerate()` ;
+// - `neg_cmp_op_on_partial_ord` : `!(x > 0.0)` est voulu, il traite NaN comme un échec de la condition (`x <= 0.0` serait faux pour NaN : la garde le laisserait passer) ;
+// - `too_many_arguments` et `type_complexity` : signatures des noyaux de calcul, qui reçoivent explicitement grille, poses, options et tampons plutôt que des structures créées pour l'occasion ;
+// - `field_reassign_with_default` : dans les tests, on part des réglages par défaut et on change un ou deux champs, ce qui se lit mieux que la syntaxe `..Default::default()`.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::field_reassign_with_default
+)]
+
 pub mod align;
 pub mod bias;
 pub mod diff;
@@ -1443,13 +1456,12 @@ mod tests {
                 let (stack, reference) = l.split_once('\t').unwrap();
                 let octets = std::fs::read(format!("{racine}/{reference}")).unwrap();
                 let valeurs: Vec<f64> = octets
-                    .chunks_exact(8)
-                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| f64::from_le_bytes(*c))
                     .collect();
-                let lignes = valeurs
-                    .chunks_exact(9)
-                    .map(|r| <[f64; 9]>::try_from(r).unwrap())
-                    .collect();
+                let lignes = valeurs.as_chunks::<9>().0.to_vec();
                 (PathBuf::from(format!("{racine}/{stack}")), lignes)
             })
             .collect()
@@ -2071,6 +2083,7 @@ mod tests {
     /// - contre SimpleITK (`EvaluateAtPhysicalPoint`, qui valide aussi l'orientation) : < 1e-3. Seuil moins strict car
     ///   ITK construit sa géométrie avec `pixdim` et une direction orthonormalisée (écart de 2,6e-4 mm mesuré à
     ///   l'étape 1b) : avec un fort gradient d'intensité, cela change la valeur échantillonnée.
+    ///
     /// Le domaine « dans la grille » de Rust doit aussi être celui de la référence, point par point.
     #[test]
     fn trilinear_sampling_matches_scipy_and_simpleitk() {
@@ -2086,8 +2099,10 @@ mod tests {
             let pas: usize = c[3].parse().unwrap();
             let octets = std::fs::read(format!("{racine}/{}", c[4])).unwrap();
             let ref_vals: Vec<f32> = octets
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             let contraste = {
                 let d = volume.data();
@@ -2720,8 +2735,10 @@ mod tests {
                 (c[3].parse().unwrap(), c[4].parse().unwrap(), c[5].parse().unwrap());
             let octets = std::fs::read(format!("{racine}/{}", c[6])).unwrap();
             let ref_vals: Vec<f32> = octets
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             assert_eq!(ref_vals.len(), ks.len() * 2 * bloc * bloc);
             let sp = stack.spacing();

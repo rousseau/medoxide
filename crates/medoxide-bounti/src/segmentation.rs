@@ -224,7 +224,7 @@ mod tests {
                 affine: cube.affine,
             };
             let logits = reseaux.extraction.forward(vers_tenseur(&normalise, &device));
-            let valeurs = logits.clone().into_data().convert::<f32>().to_vec::<f32>().unwrap();
+            let valeurs = logits.clone().into_data().convert::<f32>().try_to_vec::<f32>().unwrap();
             let voxels = 128 * 128 * 128;
             let mut differents = 0usize;
             let mut marge_max = 0.0_f32;

@@ -305,6 +305,15 @@ pub fn read_volume(path: &Path) -> Result<Array3<f32>, CoreError> {
 }
 
 #[cfg(test)]
+// Lints de style écartés pour les tests de ce module (aucun effet sur le calcul) :
+// - `excessive_precision` : les valeurs de référence de nibabel sont recopiées avec tous leurs chiffres (9 chiffres significatifs, valeurs exactes de `f32`), pour pouvoir les comparer à la sortie de nibabel ;
+// - `field_reassign_with_default` : un en-tête NIfTI par défaut dont on règle quelques champs se lit mieux que `..Default::default()` ;
+// - `needless_range_loop` : l'indice de colonne `c` sert aussi à comparer plusieurs tableaux (`pixdim[c + 1]`, `tailles[c]`).
+#[allow(
+    clippy::excessive_precision,
+    clippy::field_reassign_with_default,
+    clippy::needless_range_loop
+)]
 mod tests {
     use super::*;
 
@@ -383,7 +392,9 @@ mod tests {
     fn lire_f32(chemin: &str) -> Vec<f32> {
         let octets = std::fs::read(chemin).expect(chemin);
         octets
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }

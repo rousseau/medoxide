@@ -491,7 +491,9 @@ mod tests {
     fn lire_f32(chemin: &str) -> Vec<f32> {
         let octets = std::fs::read(chemin).expect(chemin);
         octets
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }

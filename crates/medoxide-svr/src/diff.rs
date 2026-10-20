@@ -560,6 +560,11 @@ impl BatchSlices {
         self.points.dims()[0]
     }
 
+    /// Vrai si le lot ne contient aucune coupe.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Les coupes `rows` (avec répétitions possibles) comme un nouveau lot : sert à lancer plusieurs départs d'une même coupe.
     fn select(&self, rows: &[usize]) -> BatchSlices {
         let device = self.points.device();
@@ -2221,7 +2226,7 @@ mod tests {
                     sorties.push(Depart {
                         ncc: *r.ncc_history.last().unwrap(),
                         deplacement_rms: rms_depuis(&[0.0; 6]),
-                        distance_au_premier: poses.first().map_or(0.0, |p0| rms_depuis(p0)),
+                        distance_au_premier: poses.first().map_or(0.0, rms_depuis),
                     });
                     poses.push(r.params);
                 }
@@ -2675,9 +2680,9 @@ mod tests {
             .map(|n| {
                 let (c, r) = (n / taille, n % taille);
                 let (i, j, k) = (r / (dims[1] * dims[2]), (r / dims[2]) % dims[1], r % dims[2]);
-                ((0.09 * i as f32 + 0.3 * c as f32).sin()
+                (0.09 * i as f32 + 0.3 * c as f32).sin()
                     + (0.13 * j as f32).cos()
-                    + (0.07 * k as f32 + 0.1 * c as f32).sin()) as f32
+                    + (0.07 * k as f32 + 0.1 * c as f32).sin()
             })
             .collect();
         let coords: Vec<f32> = (0..s * p * 3)
