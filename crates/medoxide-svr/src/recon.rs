@@ -213,6 +213,45 @@ fn coupes_avec_masque<'a>(stacks: &'a [Stack], poses: &'a SlicePoses) -> Vec<(Ar
         .collect()
 }
 
+/// Nombre de blocs de la réduction parallèle (voir [`reduire_par_blocs`]). Une constante : le découpage, donc l'ordre des additions, ne dépend ni du nombre de threads ni de leur ordonnancement.
+/// Compromis : au plus ce nombre de volumes partiels sont gardés en mémoire avant la fusion, et la réduction n'utilise pas plus de ce nombre de threads.
+const BLOCS_DE_REDUCTION: usize = 16;
+
+/// Réduction parallèle **déterministe** : somme sur `elements` en `min(BLOCS_DE_REDUCTION, n)` blocs contigus de tailles presque égales (le bloc `b` couvre `b·n/blocs .. (b+1)·n/blocs`) ; chaque bloc est accumulé dans l'ordre, par une tâche, dans son propre accumulateur (`neutre`, puis `accumuler`),
+/// et les accumulateurs des blocs sont fusionnés **dans l'ordre des blocs** (`fusionner`). `None` si `elements` est vide.
+///
+/// Pourquoi pas `par_iter().fold(..).reduce_with(..)` : la forme de l'arbre de fusion y dépend du nombre de threads et du vol de travail, donc l'ordre des additions flottantes (non associatives) varie d'un lancement à l'autre.
+/// Deux exécutions du même calcul différaient de l'arrondi, et, par le recalage, parfois de bien plus (poses différentes de 5e-2 mesurées avec 3 threads) : le résultat n'était pas reproductible d'une machine à l'autre. Ici il l'est, au bit près, quel que soit le nombre de threads.
+fn reduire_par_blocs<T: Sync, A: Send>(
+    elements: &[T],
+    neutre: impl Fn() -> A + Sync,
+    accumuler: impl Fn(&mut A, &T) + Sync,
+    fusionner: impl Fn(&mut A, A),
+) -> Option<A> {
+    let n = elements.len();
+    if n == 0 {
+        return None;
+    }
+    let blocs = BLOCS_DE_REDUCTION.min(n);
+    // `collect` d'un itérateur indexé garde l'ordre des blocs
+    let partiels: Vec<A> = (0..blocs)
+        .into_par_iter()
+        .map(|b| {
+            let mut accumulateur = neutre();
+            for element in &elements[b * n / blocs..(b + 1) * n / blocs] {
+                accumuler(&mut accumulateur, element);
+            }
+            accumulateur
+        })
+        .collect();
+    let mut partiels = partiels.into_iter();
+    let mut total = partiels.next()?;
+    for partiel in partiels {
+        fusionner(&mut total, partiel);
+    }
+    Some(total)
+}
+
 /// Résultat de [`normalized_adjoint`].
 #[derive(Debug, Clone)]
 pub struct NormalizedAdjoint {
@@ -254,24 +293,21 @@ pub(crate) fn adjoint_sums(
             .ok_or_else(|| SvrError::NoMask(stack.path().to_path_buf()))?;
     }
     let coupes = coupes_avec_masque(stacks, poses);
-    // Les coupes sont indépendantes : chaque tâche accumule dans ses propres volumes (écrire dans un volume partagé serait une course aux
-    // données), puis on additionne les volumes.
-    let (numerateur, denominateur) = coupes
-        .par_iter()
-        .fold(
-            || (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)),
-            |(mut num, mut den), (m, coupe)| {
-                // numérateur et dénominateur en une seule passe, sur les pixels du masque : y n'est lu que là
-                geometrie.back_project_with_weight(coupe, &coupe.psf(), coupe.data(), *m, &mut num, &mut den);
-                (num, den)
-            },
-        )
-        .reduce_with(|(mut n1, mut d1), (n2, d2)| {
-            n1 += &n2;
-            d1 += &d2;
-            (n1, d1)
-        })
-        .unwrap_or_else(|| (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)));
+    // Les coupes sont indépendantes : chaque bloc de coupes accumule dans ses propres volumes (écrire dans un volume partagé serait une course aux
+    // données), puis on additionne les volumes dans un ordre fixe (réduction déterministe, voir `reduire_par_blocs`).
+    let (numerateur, denominateur) = reduire_par_blocs(
+        &coupes,
+        || (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)),
+        |acc, (m, coupe)| {
+            // numérateur et dénominateur en une seule passe, sur les pixels du masque : y n'est lu que là
+            geometrie.back_project_with_weight(coupe, &coupe.psf(), coupe.data(), *m, &mut acc.0, &mut acc.1);
+        },
+        |total, (n2, d2)| {
+            total.0 += &n2;
+            total.1 += &d2;
+        },
+    )
+    .unwrap_or_else(|| (Array3::<f64>::zeros(grid.dims), Array3::<f64>::zeros(grid.dims)));
     Ok((numerateur, denominateur))
 }
 
@@ -446,23 +482,23 @@ impl<'a> ReconstructionProblem<'a> {
             }
         }
         let volume = Volume::new(restreint, self.grid.affine).expect("l'affine d'une grille est inversible");
-        // Une passe normale par coupe, en parallèle ; chaque tâche accumule le gradient dans son propre volume, puis on additionne.
+        // Une passe normale par coupe, en parallèle par blocs de coupes ; chaque bloc accumule le gradient dans son propre volume, puis on additionne dans un ordre fixe (voir `reduire_par_blocs`).
         let dims = self.grid.dims;
-        let (mut gradient, data) = coupes_avec_masque(self.stacks, &self.poses)
-            .par_iter()
-            .fold(
-                || (Array3::<f64>::zeros(dims), 0.0),
-                |(mut g, d), (m, coupe)| {
-                    let pixels = use_data.then(|| coupe.data());
-                    let terme = volume.normal_pass_masked(coupe, &coupe.psf(), pixels, *m, &mut g);
-                    (g, d + terme)
-                },
-            )
-            .reduce_with(|(mut g1, d1), (g2, d2)| {
-                g1 += &g2;
-                (g1, d1 + d2)
-            })
-            .unwrap_or_else(|| (Array3::<f64>::zeros(dims), 0.0));
+        let coupes = coupes_avec_masque(self.stacks, &self.poses);
+        let (mut gradient, data) = reduire_par_blocs(
+            &coupes,
+            || (Array3::<f64>::zeros(dims), 0.0_f64),
+            |acc, (m, coupe)| {
+                let pixels = use_data.then(|| coupe.data());
+                let terme = volume.normal_pass_masked(coupe, &coupe.psf(), pixels, *m, &mut acc.0);
+                acc.1 += terme;
+            },
+            |total, (g2, d2)| {
+                total.0 += &g2;
+                total.1 += d2;
+            },
+        )
+        .unwrap_or_else(|| (Array3::<f64>::zeros(dims), 0.0));
         let regularization = regularization(
             x,
             &self.domain,
@@ -711,6 +747,141 @@ mod tests {
 
     fn racine() -> String {
         format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// Valeurs dont la somme dépend de l'ordre des additions : signes aléatoires et grandeurs étalées sur seize ordres de grandeur (de 1e-8 à 1e8), générées de façon déterministe (congruence linéaire).
+    fn valeurs_sensibles_a_l_ordre(n: usize) -> Vec<f64> {
+        let mut etat = 0x2545_F491_4F6C_DD1D_u64;
+        let mut suivant = move || {
+            etat = etat
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (etat >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let signe = if suivant() < 0.5 { -1.0 } else { 1.0 };
+                signe * 10f64.powf(16.0 * suivant() - 8.0) * (1.0 + suivant())
+            })
+            .collect()
+    }
+
+    /// Somme attendue à la main : blocs contigus `b·n/blocs .. (b+1)·n/blocs` (blocs = min(16, n)), chaque bloc additionné dans l'ordre à partir de 0, puis les blocs dans l'ordre.
+    fn somme_par_blocs_a_la_main(valeurs: &[f64]) -> f64 {
+        let n = valeurs.len();
+        let blocs = 16.min(n);
+        let mut total = 0.0;
+        for b in 0..blocs {
+            let mut partiel = 0.0;
+            for v in &valeurs[b * n / blocs..(b + 1) * n / blocs] {
+                partiel += v;
+            }
+            if b == 0 {
+                total = partiel;
+            } else {
+                total += partiel;
+            }
+        }
+        total
+    }
+
+    fn somme_reduite(valeurs: &[f64]) -> Option<f64> {
+        reduire_par_blocs(valeurs, || 0.0, |acc, v| *acc += v, |total, autre| *total += autre)
+    }
+
+    /// La réduction ne dépend pas du nombre de threads : le résultat est identique AU BIT PRÈS avec 1, 2, 3, 5, 7, 12 et 24 threads et sur 20 répétitions, et égal à la somme par blocs écrite à la main.
+    /// Les valeurs sont choisies pour que l'ordre des additions change le résultat (la somme séquentielle de gauche à droite en diffère : sans cela le test ne distinguerait rien).
+    #[test]
+    fn the_block_reduction_is_bitwise_identical_for_any_thread_count() {
+        for n in [37usize, 100, 16, 17, 250] {
+            let valeurs = valeurs_sensibles_a_l_ordre(n);
+            let attendu = somme_par_blocs_a_la_main(&valeurs);
+            let sequentielle = valeurs.iter().fold(0.0, |s, v| s + v);
+            if n >= 2 * BLOCS_DE_REDUCTION {
+                // avec au plus 16 éléments la somme par blocs EST la somme séquentielle, et avec un peu plus de 16 elle ne s'en écarte que d'une association (qui peut tomber juste) ; à partir de deux éléments par bloc l'ordre des additions change vraiment
+                assert_ne!(
+                    attendu.to_bits(),
+                    sequentielle.to_bits(),
+                    "n = {n} : les valeurs ne sont pas sensibles à l'ordre"
+                );
+            }
+            for threads in [1usize, 2, 3, 5, 7, 12, 24] {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+                for essai in 0..20 {
+                    let obtenu = pool.install(|| somme_reduite(&valeurs)).unwrap();
+                    assert_eq!(
+                        obtenu.to_bits(),
+                        attendu.to_bits(),
+                        "n = {n}, {threads} threads, essai {essai} : {obtenu:e} contre {attendu:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Cas limites : aucun élément donne `None` (sans appeler le neutre) ; moins de 16 éléments donnent un bloc par élément, donc la somme de gauche à droite ; `neutre` est appelé une fois par bloc, `fusionner` (blocs − 1) fois.
+    #[test]
+    fn the_block_reduction_handles_empty_and_small_inputs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let appels = AtomicUsize::new(0);
+        let vide: [f64; 0] = [];
+        assert!(reduire_par_blocs(
+            &vide,
+            || {
+                appels.fetch_add(1, Ordering::SeqCst);
+                0.0
+            },
+            |a: &mut f64, v: &f64| *a += v,
+            |t, o| *t += o
+        )
+        .is_none());
+        assert_eq!(appels.load(Ordering::SeqCst), 0);
+        let cinq = valeurs_sensibles_a_l_ordre(5);
+        let gauche_droite = cinq.iter().fold(0.0, |s, v| s + v);
+        assert_eq!(somme_reduite(&cinq).unwrap().to_bits(), gauche_droite.to_bits());
+        let fusions = AtomicUsize::new(0);
+        let neutres = AtomicUsize::new(0);
+        let valeurs = valeurs_sensibles_a_l_ordre(100);
+        let _ = reduire_par_blocs(
+            &valeurs,
+            || {
+                neutres.fetch_add(1, Ordering::SeqCst);
+                0.0
+            },
+            |a: &mut f64, v: &f64| *a += v,
+            |t, o| {
+                fusions.fetch_add(1, Ordering::SeqCst);
+                *t += o
+            },
+        );
+        assert_eq!(neutres.load(Ordering::SeqCst), 16, "un neutre par bloc");
+        assert_eq!(fusions.load(Ordering::SeqCst), 15, "blocs − 1 fusions");
+        assert_eq!(somme_reduite(&[2.5]), Some(2.5));
+    }
+
+    /// Le calcul de la reconstruction ne dépend pas du nombre de threads : l'adjoint normalisé et le gradient sont identiques au bit près avec 1, 3 et 12 threads (le test d'origine échouait avec 3 threads sur le runner macOS : poses finales différentes de 5e-2).
+    #[test]
+    fn the_reconstruction_does_not_depend_on_the_thread_count() {
+        let t = Temp::new("threads_reconstruction");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 1.0, 1.0, 17);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let calcul = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| {
+                let (num, den) = adjoint_sums(&grille, &stacks, &vraies).unwrap();
+                let probleme = ReconstructionProblem::with_poses(&grille, &stacks, &vraies, 0.5).unwrap();
+                let x = probleme.initial_guess().mapv(|v| v + 1.0);
+                let e = probleme.evaluate(&x);
+                (num, den, e.gradient, e.data.to_bits(), e.regularization.to_bits())
+            })
+        };
+        let reference = calcul(1);
+        for threads in [3usize, 12] {
+            assert_eq!(calcul(threads), reference, "{threads} threads");
+        }
     }
 
     /// Dossier temporaire propre à un test (nom + processus), supprimé en fin de test.
