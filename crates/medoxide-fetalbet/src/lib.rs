@@ -502,6 +502,7 @@ mod tests {
     /// Références produites par `python scripts/make_reference_slice.py`.
     /// Critère : écart relatif (max |Δ| / max |logit|) < 1e-4, argmax identique.
     #[test]
+    #[ignore = "gpu"]
     fn inference_matches_onnxruntime() {
         use burn::tensor::{Device, Tensor, TensorData};
 
@@ -690,6 +691,7 @@ mod tests {
     /// Étape 6b, version rapide (~1 min) : fetus_06, dont l'axe 240 est complété
     /// à 256 (une seule fenêtre par coupe).
     #[test]
+    #[ignore = "gpu"]
     fn tiled_inference_matches_monai_fast() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
         if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/models/attunet.bpk"))) {
@@ -880,6 +882,7 @@ mod tests {
 
     /// Étape 8, version rapide : fetus_06 (une fenêtre par coupe).
     #[test]
+    #[ignore = "gpu"]
     fn segment_end_to_end_fast() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
         if !medoxide_core::donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_06.nii.gz"))) {
