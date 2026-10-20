@@ -63,6 +63,8 @@ impl From<DeviceArg> for DeviceKind {
     }
 }
 
+// `Recon` porte beaucoup d'options et `Info` très peu : l'énumération est construite une seule fois par appel du programme, boxer une variante n'apporterait rien.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum SvrAction {
     /// Reconstruit un volume 3D à partir de stacks 2D (IRM fœtale) : estime le mouvement de chaque coupe, puis reconstruit

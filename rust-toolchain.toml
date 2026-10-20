@@ -1,5 +1,3 @@
 [toolchain]
-channel = "stable"
-# Une fois la version MSRV de Burn confirmée (voir docs Burn au moment
-# de l'ajouter), on pourra épingler un numéro exact, ex: "1.90.0",
-# pour un build 100% reproductible entre machines/collaborateurs.
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

@@ -102,7 +102,7 @@ pub(crate) fn blur_slice_in_mask(image: ArrayView2<f32>, masque: ArrayView2<bool
         .map(|i| (-0.5 * (i as f64 / sigma_pixels).powi(2)).exp())
         .collect();
     // pas de normalisation du noyau : elle s'annulerait dans le rapport signal / masque
-    let mut valeurs = image.mapv(|v| f64::from(v));
+    let mut valeurs = image.mapv(f64::from);
     let mut poids = masque.mapv(|m| if m { 1.0_f64 } else { 0.0 });
     valeurs.zip_mut_with(&poids, |v, &w| *v *= w);
     for axe in 0..2 {

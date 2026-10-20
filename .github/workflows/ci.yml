@@ -1,0 +1,29 @@
+name: CI
+
+# Format, lints et tests sur CPU, Linux et macOS (conventions communes : guioxide/docs/developpement.md).
+# Les tests qui lisent data/ ou models/ se sautent en CI (données absentes) ; MEDOXIDE_EXIGER_DONNEES=1 les rend obligatoires.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release

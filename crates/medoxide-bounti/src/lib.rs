@@ -31,7 +31,9 @@ mod tests {
         let octets = std::fs::read(chemin)
             .unwrap_or_else(|e| panic!("{} illisible : {e} (voir docs/BOUNTI.md)", chemin.display()));
         octets
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect()
     }

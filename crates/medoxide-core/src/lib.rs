@@ -304,7 +304,52 @@ pub fn read_volume(path: &Path) -> Result<Array3<f32>, CoreError> {
         .map_err(|_| CoreError::NotVolume3D(dim))
 }
 
+/// Nom de la variable d'environnement qui rend les données de test obligatoires (voir [`donnees_de_test`]).
+pub const EXIGER_DONNEES: &str = "MEDOXIDE_EXIGER_DONNEES";
+
+/// À appeler au début d'un test qui lit un fichier de données locales (`data/`, `models/`, hors du dépôt) : `true` si le fichier `chemin` existe, le test peut continuer.
+///
+/// Sinon, affiche `test sauté : <chemin> absent` sur la sortie d'erreur et renvoie `false` : le test doit alors se terminer par `return;` (il est compté comme réussi, ce qui permet à la CI, qui n'a pas ces données, de rester verte).
+/// Exception : si la variable d'environnement `MEDOXIDE_EXIGER_DONNEES` vaut `1`, l'absence du fichier fait **paniquer** avec ce même message, pour qu'une machine qui doit avoir les données ne saute rien sans qu'on le voie.
+///
+/// Passer le premier fichier que le test lit :
+///
+/// ```ignore
+/// let entree = format!("{racine}/data/sourcedata/fetus_03.nii.gz");
+/// if !medoxide_core::donnees_de_test(Path::new(&entree)) {
+///     return;
+/// }
+/// ```
+///
+/// # Panique
+/// Si le fichier est absent et que `MEDOXIDE_EXIGER_DONNEES=1`.
+pub fn donnees_de_test(chemin: &Path) -> bool {
+    donnees_de_test_selon(chemin, std::env::var(EXIGER_DONNEES).as_deref() == Ok("1"))
+}
+
+/// Cœur de [`donnees_de_test`], avec l'exigence en paramètre (testable sans modifier l'environnement du processus).
+fn donnees_de_test_selon(chemin: &Path, exiger: bool) -> bool {
+    if chemin.exists() {
+        return true;
+    }
+    let message = format!("test sauté : {} absent", chemin.display());
+    if exiger {
+        panic!("{message}");
+    }
+    eprintln!("{message}");
+    false
+}
+
 #[cfg(test)]
+// Lints de style écartés pour les tests de ce module (aucun effet sur le calcul) :
+// - `excessive_precision` : les valeurs de référence de nibabel sont recopiées avec tous leurs chiffres (9 chiffres significatifs, valeurs exactes de `f32`), pour pouvoir les comparer à la sortie de nibabel ;
+// - `field_reassign_with_default` : un en-tête NIfTI par défaut dont on règle quelques champs se lit mieux que `..Default::default()` ;
+// - `needless_range_loop` : l'indice de colonne `c` sert aussi à comparer plusieurs tableaux (`pixdim[c + 1]`, `tailles[c]`).
+#[allow(
+    clippy::excessive_precision,
+    clippy::field_reassign_with_default,
+    clippy::needless_range_loop
+)]
 mod tests {
     use super::*;
 
@@ -313,6 +358,12 @@ mod tests {
     /// Fetal-BET (`dataset/f0832s1`) ; voir `book/src/validation.md`.
     #[test]
     fn volume_info_matches_nibabel() {
+        if !donnees_de_test(Path::new(&format!(
+            "{}/../../data/sourcedata/fetus_03.nii.gz",
+            env!("CARGO_MANIFEST_DIR")
+        ))) {
+            return;
+        }
         let attendu: [(&str, u16, f32, f32); 8] = [
             ("fetus_03", 44, 1.17, 2.0),
             ("fetus_04", 40, 1.17, 3.0),
@@ -338,6 +389,12 @@ mod tests {
     /// orientations diffèrent (LPS, LIP, PIR), arrondis à 4 décimales.
     #[test]
     fn volume_info_affine_matches_nibabel() {
+        if !donnees_de_test(Path::new(&format!(
+            "{}/../../data/sourcedata/fetus_03.nii.gz",
+            env!("CARGO_MANIFEST_DIR")
+        ))) {
+            return;
+        }
         let attendu: [(&str, [[f32; 4]; 4]); 3] = [
             (
                 "fetus_03",
@@ -383,7 +440,9 @@ mod tests {
     fn lire_f32(chemin: &str) -> Vec<f32> {
         let octets = std::fs::read(chemin).expect(chemin);
         octets
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -393,6 +452,9 @@ mod tests {
     #[test]
     fn read_volume_matches_nibabel() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+        if !donnees_de_test(Path::new(&format!("{racine}/data/sourcedata/fetus_03.nii.gz"))) {
+            return;
+        }
         for nom in ["03", "04", "06", "07", "09", "10", "11", "12"] {
             let volume = read_volume(Path::new(&format!("{racine}/data/sourcedata/fetus_{nom}.nii.gz"))).unwrap();
             let attendu = lire_f32(&format!("{racine}/data/reference/fetus_{nom}_raw.f32"));
@@ -712,5 +774,26 @@ mod tests {
             h.pixdim[0]
         );
         assert_eq!((h.quatern_x, h.quatern_y, h.quatern_z), (89.7, -112.65, -91.95));
+    }
+
+    /// Un fichier présent donne `true` (avec ou sans exigence) ; un fichier absent donne `false` sans exigence, et fait paniquer avec le message `test sauté : <chemin> absent` avec l'exigence.
+    #[test]
+    fn test_data_presence_is_checked_and_can_be_required() {
+        let present = std::env::temp_dir().join(format!("medoxide_donnees_{}.txt", std::process::id()));
+        std::fs::write(&present, b"x").unwrap();
+        assert!(donnees_de_test_selon(&present, false));
+        assert!(donnees_de_test_selon(&present, true));
+        assert!(donnees_de_test(&present), "la version publique donne le même résultat");
+        let absent = std::env::temp_dir().join("medoxide_donnees_absentes.nii.gz");
+        assert!(!absent.exists());
+        assert!(!donnees_de_test_selon(&absent, false));
+        let erreur = std::panic::catch_unwind(|| donnees_de_test_selon(&absent, true)).unwrap_err();
+        let message = erreur
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| erreur.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap();
+        assert_eq!(message, format!("test sauté : {} absent", absent.display()));
+        let _ = std::fs::remove_file(&present);
     }
 }
