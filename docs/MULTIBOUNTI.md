@@ -72,3 +72,40 @@ Export ONNX par `scripts/export_multibounti_onnx.py <bet|lr|multi>` (chargement 
 | extraction du cerveau (`bet`, 2 sorties) | 2,26e-6 | 1,000000 |
 | gauche / droite (`lr`, 3 sorties) | 2,74e-6 | 1,000000 |
 | 43 étiquettes (`multi`, 44 sorties, |logit| jusqu'à 486) | 2,64e-6 | 0,999999 |
+
+## 6. Sous-étape M2 : fenêtres glissantes (résultat)
+
+`crates/medoxide-bounti/src/fenetres.rs` refait `sliding_window_inference(…, (128, 128, 128), 4, modèle, overlap = 0,8)` de MONAI, mode `constant` : départs de fenêtre de `dense_patch_slices` (vérifiés contre MONAI sur plusieurs tailles), logits additionnés puis divisés par le nombre de fenêtres qui couvrent le voxel, étiquette = premier canal de plus grand logit moyen (comparaison stricte `>`). Le plan des fenêtres et l'accumulation sont testés sans GPU avec un faux réseau (cas d'égalité compris, ce qui a corrigé deux conceptions de test erronées).
+**Critère atteint** (test `the_multibounti_windows_match_the_official_labels`, GPU, 343 fenêtres sur `pad-reo-n4-masked-t2-256` de `calme1`, mise à l'échelle sur tout le volume) : **0 voxel différent sur 16 777 216** de `multi-lab-reo-t2` officiel (seuil : 0,1 %), en 1 992 s.
+
+## 7. Sous-étape M3 : géométrie, de MIRTK à Rust (résultat)
+
+Chaque phase de `scripts/multibounti_mirtk_phases.sh` est refaite dans `crates/medoxide-bounti/src/multibounti.rs` (`phase_a`, `phase_b`, `phase_c`, `phase_d`) et comparée aux fichiers de MIRTK, en partant à chaque phase des fichiers officiels de la phase précédente.
+
+| Phase | Fichiers comparés | Résultat (critère : dimensions égales, affine ≤ 1e-3 mm, intensités ≤ 1e-3 de la plage, masques ≥ 99,9 % identiques) |
+|---|---|---|
+| A (prétraitement, cube de 128³) | `m-t2`, `crop-org-t2`, `crop-tr-t2`, `pad-crop-tr-t2-128` | `calme1` à `calme3` : masque identique (0 voxel différent), affine ≤ 3,8e-6 mm, intensités ≤ 3,9e-6 |
+| B (nettoyage du masque, cube du gauche/droite) | masques `bet-lab…`, `dl-bet-lab…`, `masked-n4-crop-tr-t2`, `pad-masked-n4-crop-tr-t2-128` | masques identiques (0 voxel), affine ≤ 5,6e-6 mm, intensités ≤ 3,3e-6 |
+| C (réorientation par `aff-d.dof` officiel, cube de 256³) | `dl-bet-org-t2`, `masked-crop-org-t2`, `reo-n4-masked-t2`, `pad-reo-n4-masked-t2-256` | `calme1`, `calme2` : 1 et 2 voxels différents sur 6,4 et 5,6 millions (masque), affine ≤ 6,9e-6 mm, intensités ≤ 3,4e-6 |
+| D (retour dans la grille d'origine, cortex aminci) | `tr-multi-lab-reo-t2`, `sortie_officielle` | `calme1` : 6 et 5 voxels différents sur 2 505 150 voxels non nuls (seuil : 0,1 %) |
+
+**Règles de MIRTK établies en chemin** (chacune testée contre l'outil, voir `LEARNING.md`) :
+- `mask-image` entre deux grilles différentes : plus proche voisin (`floor(x + 0,5)`) ;
+- `crop-image` entre deux grilles : intervalle **semi-ouvert** dans l'espace physique (borne basse incluse, haute exclue, inversé sur un axe de sens négatif) ;
+- `pad-3d` : cube isotrope de voxel `1,01 × (plus petit voxel × plus grande dimension) / N`, sans changement d'intensités, interpolation linéaire ;
+- `edit-image -copy-origin` : centre sur centre ; `-labels` : indicatrice interpolée > 0,5, sinon plus proche voisin (extension du bord d'un voxel pour les étiquettes, d'un demi-voxel pour les intensités) ;
+- dilatation et érosion sur le voisinage de 26 avec couche extérieure figée ; bruit de coordonnées en `float32` aux égalités exactes (voir `LEARNING.md`).
+
+**Fichiers `.dof`** (`affine.rs`) : lecture des `.dof` rigides et affines de MIRTK (douze paramètres, nombres de 64 bits gros-boutistes) et matrice `A = T·R·K·S` identique à celle qu'affiche MIRTK (écart ≤ 5e-7). **`thin-cortex-thick`** (`cortex.rs`) : port des douze passes décrites en section 3, identique à l'outil sur six volumes aléatoires et sur la sortie réelle de `calme1` ; test par mutations à la main : 11 mutants sur 12 tués, le dernier (`< 5` au lieu de `< 4` dans la garde des petites images) est équivalent, la boucle étant déjà vide jusqu'à 4 voxels.
+**`guess-ga`** est reproduit (367 mL pour `calme1`, test `the_full_multibounti_chain…`).
+
+## 8. Sous-étape M4 : le recalage affine, mesures préalables
+
+Le recalage compare le gabarit gauche/droite (`lr-lab`, cortex seulement : 185 mL) à la carte prédite par le petit réseau (98 mL) ; il est donc peu contraint. **Répétabilité de MIRTK** (`scripts/multibounti_repetabilite.py` et `…_mesure.py`) : le recalage officiel relancé huit fois à partir de départs tirés ±5 mm, ±5° et ±5 % autour du départ officiel ; écart moyen, sur les voxels du gabarit, entre deux transformations :
+
+| Volume | écart à l'officiel, médiane / max | entre essais, médiane / max |
+|---|---|---|
+| `calme1` | 4,68 / 5,43 mm | 4,68 / 8,92 mm |
+| `calme2` | 2,66 / 4,41 mm | 3,25 / 6,21 mm |
+
+Le recalage de MIRTK n'est donc répétable qu'à quelques millimètres près : c'est la dispersion que le nôtre peut se permettre.
