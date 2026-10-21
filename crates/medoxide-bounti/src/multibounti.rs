@@ -363,4 +363,18 @@ mod tests {
             }
         }
     }
+
+    /// `edit-image gabarit -copy-origin image` : le gabarit gauche/droite (`lr-lab.nii.gz`) centré sur `masked-n4-crop-tr-t2` est identique à `tmp-lr-ref` de MIRTK (mêmes dimensions, affine ≤ 1e-4 mm, mêmes valeurs).
+    #[test]
+    #[ignore = "demande les références et les gabarits de data/multibounti (hors dépôt)"]
+    fn the_recentred_template_matches_mirtks_copy_origin() {
+        let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/multibounti");
+        let gabarit = Volume::lire(&racine.join("burn/gabarit/lr-lab.nii.gz")).unwrap();
+        for id in ["calme1", "calme2", "calme3"] {
+            let centre = lire(id, "masked-n4-crop-tr-t2").centre();
+            let mien = gabarit.recentrer(&centre);
+            let officiel = lire(id, "tmp-lr-ref");
+            comparer(id, "tmp-lr-ref", &mien, &officiel, 0.0, 1e-4);
+        }
+    }
 }

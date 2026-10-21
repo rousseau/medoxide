@@ -99,8 +99,21 @@ impl Volume {
         ))
     }
 
+    /// Même volume, translaté pour que le centre de sa grille soit en `centre` (mm) : le `edit-image -copy-origin` de MIRTK (centre sur centre).
+    pub fn recentrer(&self, centre: &Vector3<f64>) -> Volume {
+        let decalage = centre - self.centre();
+        let mut affine = self.affine;
+        for axe in 0..3 {
+            affine[(axe, 3)] += decalage[axe];
+        }
+        Volume {
+            donnees: self.donnees.clone(),
+            affine,
+        }
+    }
+
     /// Intensité interpolée (trilinéaire) à la position `voxel` exprimée en coordonnées de voxel de ce volume : valeur du voxel de bord jusqu'à `marge` voxels au-delà du dernier centre de voxel (0,5 pour les intensités, 1 pour les cartes d'étiquettes), 0 au-delà.
-    fn echantillonner_voxel(&self, voxel: &Vector3<f64>, marge: f64) -> f32 {
+    pub(crate) fn echantillonner_voxel(&self, voxel: &Vector3<f64>, marge: f64) -> f32 {
         let d = self.dimensions();
         let mut base = [0usize; 3];
         let mut fraction = [0.0_f64; 3];

@@ -118,3 +118,24 @@ Le recalage de medoxide en reprend le principe (NMI de 16 classes, voxels de 3,9
 Pour chaque volume, `e` est l'écart moyen (voxels du gabarit, en mm) entre deux transformations. **Critère** : (i) pour au moins 6 des 7 volumes de validation, l'écart de notre transformation à l'officielle ne dépasse pas le plus grand écart des huit essais de MIRTK à l'officielle sur le même volume ; (ii) aucun écart à l'officielle ne dépasse 10 mm ; (iii) contrôle indirect : le Dice final de M5.
 
 **Réglages retenus sur les volumes de mise au point** (prototype Python hors dépôt, grille de 18 combinaisons : pas 3,0 / 3,9 / 5,0 mm, 16 ou 32 classes, tolérance 1e-3 / 1e-4 / 1e-5 ; puis tolérances plus serrées jusqu'à la convergence complète) : pas de 3,9 mm (flou gaussien d'écart-type la moitié du pas), **16 classes**, histogramme conjoint à pondération linéaire, gradient par différences centrées de 0,5 (mm, degré ou pour cent), pas de recherche de 1 doublé jusqu'à 4 fois (déplacement maximal de 1 unité par paramètre au départ), arrêt quand le gain relatif d'énergie passe sous **1e-5** ou après 100 itérations. Écart moyen à l'officielle sur les six volumes de mise au point : **1,97 mm** (calme1 2,6 ; calme2 3,8 ; feta001 0,7 ; feta002 1,7 ; feta003 1,2 ; feta004 1,9) contre 3,4 à 5,3 mm pour les réglages grossiers ; une convergence complète ne fait pas mieux (2,2 à 2,4 mm) : le plancher est la différence entre notre NMI et celle de MIRTK. Ces réglages sont figés avant toute mesure sur les volumes de validation.
+
+### Résultat de M4 : le critère (i) n'est PAS atteint
+
+Implémentation : `crates/medoxide-bounti/src/recalage.rs` (flou gaussien, NMI à 16 classes, descente de gradient par différences centrées ; 2 s par volume en `--release`), test `the_registration_stays_within_the_dispersion_of_mirtk`. Tests synthétiques : une translation connue est retrouvée à 0,25 mm ; une affine complète est rapprochée de 6,4 à 2,0 mm (les cartes d'ellipsoïdes presque symétriques ne contraignent pas tous les paramètres).
+Écart moyen à la transformation officielle (mm), à côté du plus grand écart d'un des huit essais de MIRTK :
+
+| Volume | notre écart | plus grand écart d'un essai MIRTK | dans la dispersion ? |
+|---|---|---|---|
+| calme1 (mise au point) | 1,63 | 5,43 | oui |
+| calme2 (mise au point) | 3,66 | 4,41 | oui |
+| feta001 à feta004 (mise au point) | 0,95 / 1,19 / 2,39 / 1,85 | 1,43 / 2,58 / 1,27 / 1,84 | oui / oui / non / non |
+| **calme3 (validation)** | 2,78 | 4,11 | oui |
+| **feta005 (validation)** | 5,00 | 3,72 | **non** |
+| **feta006 (validation)** | 1,52 | 1,51 | non (de 0,01 mm) |
+| **feta007 (validation)** | 2,10 | 5,66 | oui |
+| **feta008 (validation)** | 1,39 | 15,23 | oui |
+| **feta009 (validation)** | 1,35 | 1,31 | non (de 0,04 mm) |
+| **feta010 (validation)** | 1,27 | 3,45 | oui |
+
+**Validation : 4 volumes sur 7 dans la dispersion (critère : 6 sur 7) → critère (i) non atteint.** Le critère (ii) (aucun écart > 10 mm) est atteint : pire écart 5,00 mm (feta005). Deux des trois échecs sont de l'ordre du centième de millimètre ; le seul vrai écart est `feta005` (départ « petit cerveau », 83 mL, échelle initiale de 40 %).
+Lecture : la dispersion de MIRTK sur les volumes FeTA est parfois de 1,3 mm seulement, de l'ordre de la différence entre deux implémentations de la même NMI ; sur `feta005`, notre solution a une NMI **plus haute** que celles de MIRTK (1,213 contre 1,17 à 1,20 : MIRTK n'a pas convergé), sur `feta003` et `calme2` c'est l'inverse (1,195 contre 1,200 ; 1,127 contre 1,129 : nous sommes un peu moins bien convergés). Les seuils ne sont pas modifiés ; le contrôle indirect (iii), le Dice final de M5, tranche sur l'utilité réelle.
