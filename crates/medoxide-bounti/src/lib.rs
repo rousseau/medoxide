@@ -8,7 +8,9 @@ pub mod bet;
 pub mod etiquettes;
 pub mod fusion;
 pub mod geometrie;
+pub mod lr;
 pub mod masque;
+pub mod multi;
 pub mod norme;
 pub mod poids;
 pub mod segmentation;
@@ -26,6 +28,11 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti")
     }
 
+    /// Dossier des données locales de Multi-BOUNTI (poids convertis, références), ignoré par Git.
+    fn donnees_multi() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/multibounti")
+    }
+
     /// Lit un tableau brut `float32` petit-boutiste.
     fn lire_f32(chemin: &Path) -> Vec<f32> {
         let octets = std::fs::read(chemin)
@@ -38,9 +45,10 @@ mod tests {
             .collect()
     }
 
-    /// **Critère C1** pour un réseau (cube de `n`³, `data/bounti/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
+    /// **Critère C1** pour un réseau (cube de `n`³, `<racine>/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py` ou `scripts/make_multibounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
     /// et au moins 99,9 % des voxels ont la même étiquette (argmax sur les 20 canaux).
-    fn verifier_c1(
+    fn verifier_c1_dans(
+        racine: &Path,
         nom: &str,
         canaux: usize,
         n: usize,
@@ -48,8 +56,8 @@ mod tests {
         passe_avant: impl Fn(Tensor<5>) -> Tensor<5>,
         device: &Device,
     ) {
-        let entree = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_input.f32")));
-        let attendus = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_logits.f32")));
+        let entree = lire_f32(&racine.join(format!("reference/{nom}_{n}{tag}_input.f32")));
+        let attendus = lire_f32(&racine.join(format!("reference/{nom}_{n}{tag}_logits.f32")));
         assert_eq!(entree.len(), n * n * n);
         assert_eq!(attendus.len(), canaux * n * n * n);
 
@@ -62,7 +70,7 @@ mod tests {
             let suffixe = std::env::var("MEDOXIDE_DEVICE").unwrap_or_else(|_| "gpu".into());
             let octets: Vec<u8> = obtenus.iter().flat_map(|v| v.to_le_bytes()).collect();
             std::fs::write(
-                donnees().join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")),
+                racine.join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")),
                 octets,
             )
             .unwrap();
@@ -89,6 +97,18 @@ mod tests {
             ecart / amplitude
         );
         assert!(accord >= 0.999, "accord des étiquettes {accord}");
+    }
+
+    /// [`verifier_c1_dans`] sur les références de BOUNTI (`data/bounti/reference/`).
+    fn verifier_c1(
+        nom: &str,
+        canaux: usize,
+        n: usize,
+        tag: &str,
+        passe_avant: impl Fn(Tensor<5>) -> Tensor<5>,
+        device: &Device,
+    ) {
+        verifier_c1_dans(&donnees(), nom, canaux, n, tag, passe_avant, device);
     }
 
     /// Appareil de calcul des tests : le GPU par défaut, ou le CPU de Burn (`flex`) avec `MEDOXIDE_DEVICE=flex` (diagnostic : sépare l'erreur de conversion de l'arithmétique du GPU).
@@ -318,5 +338,20 @@ mod tests {
         for n in [64usize, 128] {
             verifier_c1("bet", 2, n, "_reel", |x| modele.forward(x), &device);
         }
+    }
+
+    /// **Critère C1** des trois réseaux de Multi-BOUNTI (extraction du cerveau, gauche/droite, 43 étiquettes ; `docs/MULTIBOUNTI.md`, sous-étape M1) à 128³ sur des entrées réelles de la chaîne de `calme1`
+    /// (`scripts/make_multibounti_reference.py`) : écart relatif des logits ≤ 1e-5 contre PyTorch f32 et ≥ 99,9 % d'étiquettes identiques.
+    #[test]
+    #[ignore = "demande les poids de Multi-BOUNTI convertis et les références PyTorch dans data/multibounti (hors dépôt)"]
+    fn the_multibounti_networks_match_pytorch_on_real_inputs() {
+        let device = appareil();
+        let racine = donnees_multi();
+        let bet = crate::bet::Model::from_file(racine.join("burn/bet/bet_64.bpk"), &device);
+        verifier_c1_dans(&racine, "bet", 2, 128, "", |x| bet.forward(x), &device);
+        let lr = crate::lr::Model::from_file(racine.join("burn/lr/lr_64.bpk"), &device);
+        verifier_c1_dans(&racine, "lr", 3, 128, "", |x| lr.forward(x), &device);
+        let multi = crate::multi::Model::from_file(racine.join("burn/multi/multi_64.bpk"), &device);
+        verifier_c1_dans(&racine, "multi", 44, 128, "", |x| multi.forward(x), &device);
     }
 }
