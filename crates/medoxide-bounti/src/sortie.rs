@@ -105,7 +105,7 @@ fn ecrire_texte(chemin: &Path, texte: &str) -> Result<(), ErreurSortie> {
 }
 
 /// Écrit un volume `uint8` avec l'affine donnée (`sform` et `qform` cohérents, voir [`medoxide_core::definir_affine`]).
-fn ecrire_volume(chemin: &Path, donnees: &Array3<u8>, affine: &Matrix4<f64>) -> Result<(), ErreurSortie> {
+pub fn ecrire_volume(chemin: &Path, donnees: &Array3<u8>, affine: &Matrix4<f64>) -> Result<(), ErreurSortie> {
     let mut en_tete = nifti::NiftiHeader::default();
     medoxide_core::definir_affine(
         &mut en_tete,

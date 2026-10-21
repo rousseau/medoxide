@@ -21,6 +21,19 @@ const RECOUVREMENT: f64 = 0.8;
 /// Canaux de sortie du réseau à 43 étiquettes : le fond et les 43 étiquettes.
 const CANAUX_TISSUS: usize = 44;
 
+/// Fichiers attendus dans le dossier des poids, relativement à lui.
+pub const FICHIERS: [&str; 4] = [
+    "bet/bet_64.bpk",
+    "lr/lr_64.bpk",
+    "multi/multi_64.bpk",
+    "gabarit/lr-lab.nii.gz",
+];
+
+/// Fichiers de [`FICHIERS`] absents de `dossier`.
+pub fn fichiers_manquants(dossier: &Path) -> Vec<&'static str> {
+    FICHIERS.into_iter().filter(|f| !dossier.join(f).is_file()).collect()
+}
+
 /// Les trois réseaux de la chaîne, chargés une fois pour plusieurs volumes.
 pub struct ReseauxMulti {
     extraction: bet::Model,
@@ -162,6 +175,29 @@ pub fn segmenter_apres_recalage(
         .expect("le cube de 256³ contient des fenêtres de 128³");
     let (_, finales) = phase_d(&preparation.a, &c, &sur_le_cube, transformation);
     Ok(SegmentationMulti { etiquettes: finales })
+}
+
+/// Le dossier des poids est vérifié fichier par fichier : la liste des absents est exacte, et vide pour un dossier complet.
+#[cfg(test)]
+mod tests_poids {
+    use super::*;
+
+    #[test]
+    fn the_missing_weight_files_are_listed_exactly() {
+        let dossier = std::env::temp_dir().join(format!("medoxide-poids-multi-{}", std::process::id()));
+        std::fs::create_dir_all(dossier.join("bet")).unwrap();
+        std::fs::create_dir_all(dossier.join("gabarit")).unwrap();
+        assert_eq!(fichiers_manquants(&dossier), FICHIERS.to_vec());
+        std::fs::write(dossier.join("bet/bet_64.bpk"), b"x").unwrap();
+        std::fs::write(dossier.join("gabarit/lr-lab.nii.gz"), b"x").unwrap();
+        assert_eq!(fichiers_manquants(&dossier), vec!["lr/lr_64.bpk", "multi/multi_64.bpk"]);
+        std::fs::create_dir_all(dossier.join("lr")).unwrap();
+        std::fs::create_dir_all(dossier.join("multi")).unwrap();
+        std::fs::write(dossier.join("lr/lr_64.bpk"), b"x").unwrap();
+        std::fs::write(dossier.join("multi/multi_64.bpk"), b"x").unwrap();
+        assert!(fichiers_manquants(&dossier).is_empty());
+        std::fs::remove_dir_all(&dossier).unwrap();
+    }
 }
 
 #[cfg(test)]
