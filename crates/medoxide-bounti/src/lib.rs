@@ -6,11 +6,13 @@
 pub mod attunet;
 pub mod bet;
 pub mod etiquettes;
+pub mod fenetres;
 pub mod fusion;
 pub mod geometrie;
 pub mod lr;
 pub mod masque;
 pub mod multi;
+pub mod multibounti;
 pub mod norme;
 pub mod poids;
 pub mod segmentation;
@@ -353,5 +355,43 @@ mod tests {
         verifier_c1_dans(&racine, "lr", 3, 128, "", |x| lr.forward(x), &device);
         let multi = crate::multi::Model::from_file(racine.join("burn/multi/multi_64.bpk"), &device);
         verifier_c1_dans(&racine, "multi", 44, 128, "", |x| multi.forward(x), &device);
+    }
+
+    /// **Critère de la sous-étape M2** (`docs/MULTIBOUNTI.md`) : le réseau 43 étiquettes en Burn, appliqué par les 343 fenêtres de 128³ (recouvrement 0,8) à l'entrée de 256³ de `calme1` (`pad-reo-n4-masked-t2-256.nii.gz`, mise à l'échelle sur tout le volume comme le fait le script officiel),
+    /// donne des étiquettes **identiques à au moins 99,9 %** à la sortie officielle `multi-lab-reo-t2.nii.gz` (MONAI `sliding_window_inference`, PyTorch sur CPU). Très long (343 passes du réseau).
+    #[test]
+    #[ignore = "demande les poids de Multi-BOUNTI convertis et la référence officielle de calme1 dans data/multibounti (hors dépôt) ; long"]
+    fn the_multibounti_windows_match_the_official_labels() {
+        use crate::fenetres::etiquettes_par_fenetres;
+        use crate::geometrie::Volume;
+        let device = appareil();
+        let racine = donnees_multi();
+        let multi = crate::multi::Model::from_file(racine.join("burn/multi/multi_64.bpk"), &device);
+        let entree = Volume::lire(&racine.join("ref/calme1/pad-reo-n4-masked-t2-256.nii.gz")).unwrap();
+        let officiel = Volume::lire(&racine.join("ref/calme1/multi-lab-reo-t2.nii.gz")).unwrap();
+        let (min, max) = entree
+            .donnees
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let image = entree.donnees.mapv(|v| (v - min) / (max - min));
+        let debut = std::time::Instant::now();
+        let reseau = |fenetre: &ndarray::Array3<f32>| -> Vec<f32> {
+            let valeurs: Vec<f32> = fenetre.iter().copied().collect();
+            let x = Tensor::<5>::from_data(TensorData::new(valeurs, [1, 1, 128, 128, 128]), &device);
+            multi.forward(x).into_data().try_to_vec::<f32>().unwrap()
+        };
+        let obtenu = etiquettes_par_fenetres(&image, 128, 0.8, 44, reseau).unwrap();
+        let duree = debut.elapsed().as_secs_f64();
+        let attendu = officiel.donnees.mapv(|v| v as u8);
+        let differents = obtenu.iter().zip(attendu.iter()).filter(|(a, b)| a != b).count();
+        let voxels = obtenu.len();
+        println!(
+            "FENETRES calme1 : {differents} voxels différents sur {voxels} ({:.5} % identiques), {duree:.0} s",
+            100.0 * (1.0 - differents as f64 / voxels as f64)
+        );
+        assert!(
+            differents as f64 <= 1e-3 * voxels as f64,
+            "{differents} voxels différents sur {voxels}"
+        );
     }
 }
