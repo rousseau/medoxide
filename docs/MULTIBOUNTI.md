@@ -109,3 +109,10 @@ Le recalage compare le gabarit gauche/droite (`lr-lab`, cortex seulement : 185 m
 | `calme2` | 2,66 / 4,41 mm | 3,25 / 6,21 mm |
 
 Le recalage de MIRTK n'est donc répétable qu'à quelques millimètres près : c'est la dispersion que le nôtre peut se permettre.
+
+### Critère de M4 (écrit avant toute mesure sur les volumes de validation)
+
+Constat, tiré de la sortie détaillée de `register` (`-v 3`) : MIRTK fait presque tout son travail au **premier niveau** (voxels de 3,9 mm, 16 classes d'histogramme, une quinzaine d'itérations de descente de gradient avec recherche de pas, énergie 1 → 0,94) ; les trois niveaux plus fins ne gagnent presque rien (1 à 2 itérations). Sa solution est donc un point de passage d'une descente non convergée, d'où sa dispersion de quelques millimètres.
+Le recalage de medoxide en reprend le principe (NMI de 16 classes, voxels de 3,9 mm, descente de gradient depuis la transformation de départ de `guess-ga`) ; ses réglages (pas, flou, nombre de classes, tolérance) sont choisis sur des volumes de **mise au point** : `calme1`, `calme2`, `feta001` à `feta004`.
+**Volumes de validation** (non utilisés pour les réglages) : `calme3`, `feta005` à `feta010` (reconstructions du jeu public FeTA 1.2, rééchantillonnées à 0,5 mm ; références produites par `scripts/multibounti_reference.py <id> --sans-reseau-43`, répétabilité de MIRTK par `scripts/multibounti_repetabilite.py <id> 8`).
+Pour chaque volume, `e` est l'écart moyen (voxels du gabarit, en mm) entre deux transformations. **Critère** : (i) pour au moins 6 des 7 volumes de validation, l'écart de notre transformation à l'officielle ne dépasse pas le plus grand écart des huit essais de MIRTK à l'officielle sur le même volume ; (ii) aucun écart à l'officielle ne dépasse 10 mm ; (iii) contrôle indirect : le Dice final de M5.
