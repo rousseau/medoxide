@@ -7,6 +7,7 @@ Chaque méthode est un module, exposé comme une sous-commande de `medx`.
 |---|---|
 | `medx fetalbet` | Masque cérébral en IRM fœtale (portage de [Fetal-BET](https://github.com/IntelligentImaging/fetal-brain-extraction)) |
 | `medx bounti` | Segmentation du cerveau fœtal en 19 tissus à partir d'une reconstruction 3D T2 (portage de [BOUNTI](https://github.com/SVRTK/auto-proc-svrtk), sans Docker ; poids convertis sur [Hugging Face](https://huggingface.co/rousseau/medoxide-bounti), licence GPL v3 : voir ci-dessous) |
+| `medx multibounti` | **Expérimental** : segmentation du cerveau fœtal en 43 étiquettes (portage de Multi-BOUNTI, voxels de 0,5 mm). Chaîne identique à l'officielle quand le recalage est celui de MIRTK ; avec le recalage propre à medoxide, la sortie diffère de celle de l'outil officiel (Dice moyen 0,72 sur un volume, comme deux passages de MIRTK entre eux : voir `docs/MULTIBOUNTI.md`). Poids GPL v3 non publiés : à convertir soi-même |
 | `medx svr recon` | Reconstruction coupe-vers-volume : volume 3D à partir de stacks 2D d'IRM fœtale, avec estimation du mouvement de chaque coupe (coupe-coupe ou coupe-volume) ; en développement |
 | `medx svr info` | Géométrie de stacks NIfTI (dimensions, espacement, normale, boîte dans le monde) et, avec des masques cérébraux, regroupement des stacks qui partagent un repère |
 
