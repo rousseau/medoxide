@@ -144,3 +144,17 @@ Lecture : la dispersion de MIRTK sur les volumes FeTA est parfois de 1,3 mm seul
 
 `crates/medoxide-bounti/src/segmentation_multi.rs` assemble la chaîne : `preparer` (phase A, réseau d'extraction du cerveau, phase B, réseau gauche/droite), puis `segmenter_apres_recalage` (phase C, 343 fenêtres du réseau à 43 étiquettes, phase D). Le volume du masque en mL (`guess-ga`) est retrouvé exactement (367 mL pour `calme1`).
 **Critère M5a atteint** (test `the_full_multibounti_chain_matches_the_official_one_with_the_official_registration`, GPU, `aff-d.dof` officiel, `calme1`) : accord de voxels avec `sortie_officielle` **1,00000**, Dice moyen **1,0000** sur les 43 étiquettes, pire Dice parmi les étiquettes d'au moins 1 000 voxels **0,9999** (étiquette 29) ; seuils 0,98 et 0,95. Durée : 2 279 s (GPU partagé avec d'autres calculs). La chaîne en Rust, de la reconstruction aux étiquettes, reproduit donc la chaîne officielle dès que le recalage est le même.
+
+## 10. Sensibilité de la sortie au recalage : le plancher de bruit (mesure)
+
+Test `diagnostic_sensitivity_of_the_segmentation_to_the_registration` : la chaîne en Burn (mêmes réseaux, mêmes phases) lancée sur `calme1` avec deux recalages **de MIRTK**, issus de départs perturbés (`scripts/multibounti_repetabilite.py`), et comparée à la sortie officielle :
+
+| Recalage de MIRTK (départ perturbé) | écart moyen à l'officiel | accord de voxels | Dice moyen (43 étiquettes) | pire Dice (étiquettes ≥ 1 000 voxels) |
+|---|---|---|---|---|
+| essai 2 | 2,38 mm | 0,970 | **0,708** | 0,558 (étiquette 12) |
+| essai 0 | 5,38 mm | 0,951 | **0,566** | 0,053 (étiquette 10) |
+
+**Une différence de recalage de 2,4 mm, bien dans la dispersion de MIRTK lui-même, fait tomber le Dice moyen à 0,71.** La parcellation (limites entre lobes, entre régions corticales) dépend de la position de la tête dans l'espace du gabarit : le réseau n'est pas équivariant à quelques millimètres près. Les grosses étiquettes (37 et 38, plus de 500 000 voxels) restent à 0,93 et 0,88 à 0,93 ; les petites et les limites de lobes perdent le plus.
+**Conséquence pour M5** : le critère « Dice moyen ≥ 0,98 contre `sortie_officielle` » ne peut être tenu que par une chaîne qui retrouve la transformation EXACTE de MIRTK (ce que fait M5a, 1,0000, en la lisant), pas par un recalage indépendant : il mesure la chance de tomber sur la même solution non convergée. Il n'est pas modifié ; le résultat avec notre recalage sera donné contre lui, et contre le critère suivant, écrit avant la mesure.
+
+**Critère M5′ (écrit avant de lancer la chaîne avec notre recalage sur `calme1`)** : le Dice moyen de notre sortie contre la sortie officielle n'est pas inférieur à celui d'un recalage de MIRTK aussi éloigné de l'officiel que le nôtre : ≥ 0,708 si notre écart de recalage est ≤ 2,38 mm (valeur de l'essai 2), ≥ 0,566 s'il est ≤ 5,38 mm. Autrement dit : notre recalage ne perd pas plus de segmentation qu'un autre passage de MIRTK.
