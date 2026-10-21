@@ -206,6 +206,21 @@ enum Command {
         #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
         device: DeviceArg,
     },
+    /// Segmentation du cerveau fœtal en 43 étiquettes (portage de Multi-BOUNTI) d'une reconstruction 3D T2 à 0,5 mm
+    Multibounti {
+        /// Reconstruction 3D à 0,5 mm (NIfTI)
+        #[arg(long)]
+        input: PathBuf,
+        /// Étiquettes de sortie (NIfTI)
+        #[arg(long)]
+        output: PathBuf,
+        /// Dossier des poids convertis (`bet/`, `lr/`, `multi/`, `gabarit/` : voir docs/MULTIBOUNTI.md ; licence GPL v3, non inclus dans le dépôt)
+        #[arg(long, env = "MEDOXIDE_MULTIBOUNTI_WEIGHTS")]
+        weights: PathBuf,
+        /// GPU (wgpu) ou CPU (beaucoup plus lent)
+        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
+        device: DeviceArg,
+    },
     /// Extraction du masque cérébral en IRM fœtale (portage de Fetal-BET)
     Fetalbet {
         /// Volume NIfTI d'entrée
@@ -436,6 +451,46 @@ fn bounti(
     ExitCode::SUCCESS
 }
 
+fn multibounti(
+    entree: &std::path::Path,
+    sortie: &std::path::Path,
+    poids: &std::path::Path,
+    calcul: medoxide_bounti::segmentation::Calcul,
+) -> ExitCode {
+    use medoxide_bounti::{geometrie::Volume, segmentation_multi, sortie as ecriture};
+    let manquants = segmentation_multi::fichiers_manquants(poids);
+    if !manquants.is_empty() {
+        eprintln!(
+            "medx multibounti : poids manquants dans {} : {}",
+            poids.display(),
+            manquants.join(", ")
+        );
+        return ExitCode::FAILURE;
+    }
+    let volume = match Volume::lire(entree) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("medx multibounti : {} : {e}", entree.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let appareil = calcul.appareil();
+    let reseaux = segmentation_multi::ReseauxMulti::charger(poids, &appareil);
+    let resultat = match segmentation_multi::segmenter(&volume, &reseaux, &appareil) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("medx multibounti : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = ecriture::ecrire_volume(sortie, &resultat.etiquettes, &volume.affine) {
+        eprintln!("medx multibounti : {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("Étiquettes écrites dans {sortie:?}");
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -468,6 +523,12 @@ fn main() -> ExitCode {
             };
             bounti(&input, fichiers, weights.as_deref(), device.into())
         }
+        Command::Multibounti {
+            input,
+            output,
+            weights,
+            device,
+        } => multibounti(&input, &output, &weights, device.into()),
         Command::Svr {
             action:
                 SvrAction::Info {
@@ -653,5 +714,37 @@ mod tests {
             !essai(&["bounti", "--input", "a", "--output", "b", "--output-dir", "o"]),
             "--output-dir sans --bids"
         );
+    }
+
+    /// Arguments de `medx multibounti` : `--input`, `--output` et `--weights` (ou la variable `MEDOXIDE_MULTIBOUNTI_WEIGHTS`, non lue ici) sont requis ; `--device` accepte `cpu`.
+    #[test]
+    fn the_multibounti_arguments_are_required_as_documented() {
+        let essai = |args: &[&str]| Cli::try_parse_from(std::iter::once("medx").chain(args.iter().copied())).is_ok();
+        assert!(essai(&[
+            "multibounti",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--weights",
+            "w"
+        ]));
+        assert!(essai(&[
+            "multibounti",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--weights",
+            "w",
+            "--device",
+            "cpu"
+        ]));
+        assert!(
+            !essai(&["multibounti", "--input", "a", "--output", "b"])
+                || std::env::var_os("MEDOXIDE_MULTIBOUNTI_WEIGHTS").is_some()
+        );
+        assert!(!essai(&["multibounti", "--output", "b", "--weights", "w"]));
+        assert!(!essai(&["multibounti", "--input", "a", "--weights", "w"]));
     }
 }
