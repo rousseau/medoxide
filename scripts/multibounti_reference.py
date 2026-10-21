@@ -7,7 +7,8 @@ L'image Docker de Multi-BOUNTI (AMD64, 38 Go) n'est pas utilisée ; la chaîne e
 Le réseau 43 étiquettes lance 343 fenêtres de 128³ (recouvrement 0,8) : environ 70 minutes par volume sur le CPU. Chaque étape est sautée si son fichier de sortie existe déjà (reprise après interruption).
 
 Prérequis (voir docs/MULTIBOUNTI.md) : `data/multibounti/image/` (scripts, gabarits, poids), `data/multibounti/amd/` (binaires et bibliothèques MIRTK AMD64, avec les liens `.so.0`), `data/multibounti/entrees/<id>.nii.gz` (`scripts/multibounti_entrees.py`).
-Usage : python scripts/multibounti_reference.py <id>      (sortie : data/multibounti/ref/<id>/, résultat final `sortie_officielle.nii.gz`)
+Usage : python scripts/multibounti_reference.py <id> [--sans-reseau-43]      (sortie : data/multibounti/ref/<id>/, résultat final `sortie_officielle.nii.gz`)
+`--sans-reseau-43` s'arrête après la phase C (avant le réseau de 343 fenêtres) : toutes les étapes géométriques et les deux petits réseaux sont alors disponibles en quelques minutes ; relancer sans l'option reprend à la suite.
 """
 
 import os
@@ -88,6 +89,9 @@ def main():
     open(f"{dossier}/guess-ga.txt", "w").write(f"{volume_ml}\n")
     print(f"[guess-ga] {volume_ml} mL -> {'i.dof' if volume_ml > 170 else 'i-very-early-ga.dof'}", flush=True)
     etape(dossier, "C recalage affine et réorientation", "pad-reo-n4-masked-t2-256.nii.gz", lambda: phase_mirtk(dossier, "C", {"GUESS_GA": volume_ml}))
+    if "--sans-reseau-43" in sys.argv:
+        print("arrêt avant le réseau 43 étiquettes (--sans-reseau-43)")
+        return
     etape(dossier, "réseau : 43 étiquettes", "multi-lab-reo-t2.nii.gz",
           lambda: reseau(dossier, 128, 43, POIDS_MULTI, "pad-reo-n4-masked-t2-256.nii.gz", "multi-lab-reo-t2.nii.gz"))
     etape(dossier, "D retour dans la grille d'origine", "tr-multi-lab-reo-t2.nii.gz", lambda: phase_mirtk(dossier, "D"))

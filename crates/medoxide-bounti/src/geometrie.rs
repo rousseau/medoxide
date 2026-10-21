@@ -205,23 +205,29 @@ impl Volume {
         Ok((self.recadrer(boite.0, boite.1), boite))
     }
 
+    /// Affine d'une grille de `dimensions` voxels isotropes de `voxel_mm` mm, d'orientation LAS (axe x de sens opposé) et **centrée** sur le point `centre` (mm).
+    pub fn affine_de_grille_las(centre: &Vector3<f64>, dimensions: [usize; 3], voxel_mm: f64) -> Matrix4<f64> {
+        let mut affine = Matrix4::<f64>::identity();
+        affine[(0, 0)] = -voxel_mm;
+        affine[(1, 1)] = voxel_mm;
+        affine[(2, 2)] = voxel_mm;
+        let milieu = Vector3::new(
+            (dimensions[0] as f64 - 1.0) / 2.0,
+            (dimensions[1] as f64 - 1.0) / 2.0,
+            (dimensions[2] as f64 - 1.0) / 2.0,
+        );
+        let decalage = centre - affine.fixed_view::<3, 3>(0, 0) * milieu;
+        affine.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
+        affine
+    }
+
     /// **Étape 2** : rééchantillonne dans la grille de référence (300 × 369 × 300 voxels de 0,6 mm, orientation LAS, c'est-à-dire axe x de sens opposé), centrée sur le centre de ce volume.
     pub fn vers_grille_de_reference(&self) -> Volume {
-        let mut affine = Matrix4::<f64>::identity();
-        affine[(0, 0)] = -VOXEL_REFERENCE_MM;
-        affine[(1, 1)] = VOXEL_REFERENCE_MM;
-        affine[(2, 2)] = VOXEL_REFERENCE_MM;
-        let milieu = Vector3::new(
-            (DIMENSIONS_REFERENCE[0] as f64 - 1.0) / 2.0,
-            (DIMENSIONS_REFERENCE[1] as f64 - 1.0) / 2.0,
-            (DIMENSIONS_REFERENCE[2] as f64 - 1.0) / 2.0,
-        );
-        let decalage = self.centre() - affine.fixed_view::<3, 3>(0, 0) * milieu;
-        affine.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
+        let affine = Volume::affine_de_grille_las(&self.centre(), DIMENSIONS_REFERENCE, VOXEL_REFERENCE_MM);
         self.reechantillonner(&affine, DIMENSIONS_REFERENCE)
     }
 
-    /// **Étape 3** : garde les voxels de ce volume dont le centre est dans la boîte physique `boite` (bornes de voxels d'un volume `origine`, élargies d'un demi-voxel : bords des voxels). Sur chaque axe, début = ⌈borne basse⌉ et fin = ⌊borne haute⌋ en indices de ce volume.
+    /// **Étape 3** : garde les voxels de ce volume dont le centre est dans la boîte physique `boite` (bornes de voxels d'un volume `origine`, élargies d'un demi-voxel : bords des voxels), intervalle semi-ouvert dans l'espace de `origine` (bord bas inclus, bord haut exclu). Sur chaque axe, début = ⌈borne basse⌉ et fin = ⌊borne haute⌋ en indices de ce volume, sauf quand un bord tombe exactement sur un centre de voxel.
     ///
     /// # Erreurs
     /// [`ErreurGeometrie::Vide`] si la boîte ne contient aucun centre de voxel.
@@ -244,11 +250,30 @@ impl Volume {
             }
         }
         let d = self.dimensions();
+        // sens de chaque axe de ce volume par rapport aux axes de `origine` : signe du coefficient dominant de `inverse × origine.affine`
+        let passage = inverse * origine.affine;
+        let sens_positif: [bool; 3] = std::array::from_fn(|axe| {
+            let dominant = (0..3)
+                .max_by(|&a, &b| passage[(axe, a)].abs().total_cmp(&passage[(axe, b)].abs()))
+                .expect("trois axes");
+            passage[(axe, dominant)] >= 0.0
+        });
         let (mut debut, mut fin) = ([0usize; 3], [0usize; 3]);
         for axe in 0..3 {
-            // petite tolérance : un bord tombant exactement sur un centre de voxel (à l'arrondi flottant près) l'inclut
-            let b = (bas[axe] - 1e-9).ceil().max(0.0);
-            let h = (haut[axe] + 1e-9).floor().min(d[axe] as f64 - 1.0);
+            // intervalle semi-ouvert dans l'espace de `origine` : un voxel est gardé si le voxel de `origine` le plus proche de son centre est dans la boîte, c'est-à-dire bord bas inclus et bord haut exclu
+            // (constaté quand la grille et l'image ont le même pas, Multi-BOUNTI à 0,5 mm : les bords tombent exactement sur des centres ; sans effet quand aucun bord ne tombe sur un centre).
+            // Si l'axe de ce volume est inversé par rapport à celui de `origine` (x en LAS contre RAS), le bord haut de `origine` est à l'indice bas de ce volume : les deux extrémités s'échangent.
+            let (b, h) = if sens_positif[axe] {
+                (
+                    (bas[axe] - 1e-9).ceil().max(0.0),
+                    ((haut[axe] - 1e-9).ceil() - 1.0).min(d[axe] as f64 - 1.0),
+                )
+            } else {
+                (
+                    ((bas[axe] + 1e-9).floor() + 1.0).max(0.0),
+                    (haut[axe] + 1e-9).floor().min(d[axe] as f64 - 1.0),
+                )
+            };
             if h < b {
                 return Err(ErreurGeometrie::Vide);
             }
@@ -257,9 +282,9 @@ impl Volume {
         Ok(self.recadrer(debut, fin))
     }
 
-    /// **Étape 4** (`prepare-for-monai` de la chaîne officielle) : cube de `n`³ voxels isotropes de taille `1,01 × plus petit voxel × plus grande dimension / n`, de même orientation que ce volume et centré sur son centre, interpolation trilinéaire,
-    /// puis intensités ramenées dans [0, 1] par `(v − min) / (max − min)` (un volume constant donne 0).
-    pub fn cube(&self, n: usize) -> Volume {
+    /// Cube de `n`³ voxels isotropes de taille `1,01 × plus petit voxel × plus grande dimension / n`, de même orientation que ce volume et centré sur son centre, interpolation trilinéaire, **sans** changer les intensités :
+    /// c'est `pad-3d` de MIRTK (grille cubique isotrope complétée de zéros, mode linéaire) et la géométrie de `prepare-for-monai`.
+    pub fn cube_sans_echelle(&self, n: usize) -> Volume {
         let colonnes: Vec<Vector3<f64>> = (0..3)
             .map(|c| self.affine.fixed_view::<3, 1>(0, c).into_owned())
             .collect();
@@ -275,7 +300,12 @@ impl Volume {
         let milieu = Vector3::new(1.0, 1.0, 1.0) * ((n as f64 - 1.0) / 2.0);
         let decalage = self.centre() - affine.fixed_view::<3, 3>(0, 0) * milieu;
         affine.fixed_view_mut::<3, 1>(0, 3).copy_from(&decalage);
-        let mut cube = self.reechantillonner(&affine, [n, n, n]);
+        self.reechantillonner(&affine, [n, n, n])
+    }
+
+    /// **Étape 4** (`prepare-for-monai` de la chaîne officielle) : [`Volume::cube_sans_echelle`], puis intensités ramenées dans [0, 1] par `(v − min) / (max − min)` (un volume constant donne 0).
+    pub fn cube(&self, n: usize) -> Volume {
+        let mut cube = self.cube_sans_echelle(n);
         let (min, max) = cube
             .donnees
             .iter()
@@ -286,6 +316,12 @@ impl Volume {
         cube.donnees
             .mapv_inplace(|v| if plage > 0.0 { (v - min) / plage } else { 0.0 });
         cube
+    }
+
+    /// `nan` de MIRTK : remet à 0 les voxels non finis ou de valeur absolue supérieure à `seuil`.
+    pub fn annuler_valeurs_extremes(&mut self, seuil: f32) {
+        self.donnees
+            .mapv_inplace(|v| if v.is_finite() && v.abs() <= seuil { v } else { 0.0 });
     }
 
     /// Étapes 1 à 3 : volume recadré dans la grille de référence, prêt pour [`Volume::cube`] (voir la documentation du module).
@@ -574,5 +610,31 @@ mod tests {
                 comparer(&format!("cube{n}"), &s3.cube(n), &mirtk, 1e-5);
             }
         }
+    }
+
+    /// Bords du recadrage sur une boîte qui tombent exactement sur des centres de voxel (même pas que l'image, grilles alignées : Multi-BOUNTI à 0,5 mm) : intervalle semi-ouvert dans l'espace de l'origine, bord bas inclus et bord haut exclu.
+    /// L'origine est un volume de pas 1 mm dont la boîte couvre les voxels 2 à 5, donc les bords 1,5 et 5,5 ; la grille cible a ses centres en 0,5, 1,5, 2,5… (axe croissant) ou en 9,5, 8,5, 7,5… (axe inversé, comme x en LAS contre RAS) :
+    /// le centre 1,5 (bord bas) est gardé, le centre 5,5 (bord haut) ne l'est pas, dans les deux sens. Les axes y et z ne tombent pas sur des centres : début ⌈bas⌉ et fin ⌊haut⌋ comme avant.
+    #[test]
+    fn a_crop_edge_on_a_voxel_centre_keeps_the_low_edge_and_drops_the_high_edge() {
+        let origine = volume([12, 12, 12], diagonale(1.0, 1.0, 1.0, [0.0, 0.0, 0.0]), |_, _, _| 1.0);
+        let boite: Boite = ([2, 2, 2], [5, 5, 5]);
+        // axe croissant : centres en i + 0,5 ; y et z : centres en i + 0,25 (aucun bord ne tombe sur un centre)
+        let croissant = volume([10, 10, 10], diagonale(1.0, 1.0, 1.0, [0.5, 0.25, 0.25]), |_, _, _| 0.0);
+        let recadre = croissant.recadrer_sur_boite_physique(&origine, boite).unwrap();
+        // x : centres 1,5 à 4,5 gardés (indices 1 à 4) ; y et z : centres de 1,75 à 5,25 (indices 2 à 5 pour y et z : 2,25… ) -> bornes ⌈1,5 − 0,25⌉ = 2 et ⌊5,5 − 0,25⌋ = 5
+        assert_eq!(recadre.dimensions(), [4, 4, 4]);
+        assert!((recadre.affine[(0, 3)] - 1.5).abs() < 1e-9 && (recadre.affine[(1, 3)] - 2.25).abs() < 1e-9);
+        // axe x inversé : centres en 9,5 − i ; le bord haut de l'origine (x = 5,5) est à l'indice bas (i = 4) et il est exclu, le bord bas (x = 1,5) est à l'indice 8 et il est gardé
+        let inverse = volume([10, 10, 10], diagonale(-1.0, 1.0, 1.0, [9.5, 0.25, 0.25]), |_, _, _| {
+            0.0
+        });
+        let recadre = inverse.recadrer_sur_boite_physique(&origine, boite).unwrap();
+        assert_eq!(recadre.dimensions(), [4, 4, 4]);
+        assert!(
+            (recadre.affine[(0, 3)] - 4.5).abs() < 1e-9,
+            "premier centre x = {}",
+            recadre.affine[(0, 3)]
+        );
     }
 }

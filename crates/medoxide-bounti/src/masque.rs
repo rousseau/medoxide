@@ -142,6 +142,26 @@ pub fn masque_du_cerveau(
 }
 
 impl Volume {
+    /// `mask-image` de MIRTK avec un masque sur une **autre grille** : pour chaque voxel de ce volume, la valeur du masque lue au voxel du masque **le plus proche** du centre du voxel (arrondi par `floor(x + 0,5)`) ; un voxel est conservé si cette valeur est non nulle, mis à 0 sinon (y compris hors de la grille du masque).
+    /// Règle établie contre MIRTK sur le cube de 128³ de l'extraction du cerveau appliqué à l'image recadrée : 0 voxel différent sur 6,5 millions (l'interpolation linéaire du masque en donne 12 à 21).
+    pub fn masquer_au_plus_proche(&self, masque: &Volume) -> Volume {
+        let vers_masque = masque.affine.try_inverse().expect("affine inversible") * self.affine;
+        let d = masque.dimensions();
+        let mut donnees = self.donnees.clone();
+        for ((i, j, k), valeur) in donnees.indexed_iter_mut() {
+            let p = (vers_masque * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
+            let indices = [(p.x + 0.5).floor(), (p.y + 0.5).floor(), (p.z + 0.5).floor()];
+            let dedans = (0..3).all(|a| indices[a] >= 0.0 && indices[a] < d[a] as f64);
+            if !dedans || masque.donnees[[indices[0] as usize, indices[1] as usize, indices[2] as usize]] == 0.0 {
+                *valeur = 0.0;
+            }
+        }
+        Volume {
+            donnees,
+            affine: self.affine,
+        }
+    }
+
     /// Volume dont les voxels hors de `masque` sont mis à 0.
     pub fn masquer(&self, masque: &Array3<bool>) -> Volume {
         let mut donnees = self.donnees.clone();
