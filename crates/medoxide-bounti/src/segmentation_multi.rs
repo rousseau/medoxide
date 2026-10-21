@@ -2,12 +2,13 @@
 //!
 //! Les étapes sont celles de la chaîne officielle (voir `docs/MULTIBOUNTI.md`), chacune validée séparément contre MIRTK et PyTorch :
 //! 1. phase A et réseau d'extraction du cerveau (cube de 128³), phase B (masque nettoyé, image masquée), réseau gauche/droite : [`preparer`] ;
-//! 2. recalage affine du gabarit gauche/droite sur la carte prédite, qui donne la transformation de [`Preparation::volume_ml`] à [`segmenter_apres_recalage`] (le recalage lui-même n'est pas dans ce module) ;
+//! 2. recalage affine du gabarit gauche/droite sur la carte prédite ([`crate::recalage::recaler`], départ choisi d'après [`Preparation::volume_ml`]) ;
 //! 3. phase C (image ramenée dans l'orientation du gabarit, cube de 256³), réseau à 43 étiquettes par fenêtres glissantes, phase D (retour dans la grille d'origine, amincissement du cortex) : [`segmenter_apres_recalage`].
 use crate::fenetres::etiquettes_par_fenetres;
 use crate::fusion::etiquettes;
 use crate::geometrie::{ErreurGeometrie, Volume};
 use crate::multibounti::{phase_a, phase_b, phase_c, phase_d, PhaseA, PhaseB, COTE_PETIT_CUBE};
+use crate::recalage::{depart_selon_le_volume, recaler};
 use crate::{bet, lr, multi};
 use burn::tensor::{Device, Tensor, TensorData};
 use nalgebra::Matrix4;
@@ -25,18 +26,20 @@ pub struct ReseauxMulti {
     extraction: bet::Model,
     gauche_droite: lr::Model,
     tissus: multi::Model,
+    gabarit: Volume,
 }
 
 impl ReseauxMulti {
-    /// Charge les poids convertis depuis `dossier`, qui contient `bet/bet_64.bpk`, `lr/lr_64.bpk` et `multi/multi_64.bpk` (voir `docs/MULTIBOUNTI.md`).
+    /// Charge les poids convertis depuis `dossier`, qui contient `bet/bet_64.bpk`, `lr/lr_64.bpk`, `multi/multi_64.bpk` et le gabarit gauche/droite `gabarit/lr-lab.nii.gz` (voir `docs/MULTIBOUNTI.md`).
     ///
     /// # Panique
-    /// Si un fichier de poids est absent ou illisible.
+    /// Si un fichier est absent ou illisible.
     pub fn charger(dossier: &Path, device: &Device) -> ReseauxMulti {
         ReseauxMulti {
             extraction: bet::Model::from_file(dossier.join("bet/bet_64.bpk"), device),
             gauche_droite: lr::Model::from_file(dossier.join("lr/lr_64.bpk"), device),
             tissus: multi::Model::from_file(dossier.join("multi/multi_64.bpk"), device),
+            gabarit: Volume::lire(&dossier.join("gabarit/lr-lab.nii.gz")).expect("gabarit gauche/droite lisible"),
         }
     }
 }
@@ -103,6 +106,30 @@ pub fn preparer(entree: &Volume, reseaux: &ReseauxMulti, device: &Device) -> Res
         gauche_droite,
         volume_ml,
     })
+}
+
+/// Segmente `entree` (reconstruction 3D T2 fœtale à 0,5 mm) en 43 étiquettes, de bout en bout : [`preparer`], recalage affine, [`segmenter_apres_recalage`].
+///
+/// # Erreurs
+/// [`ErreurGeometrie::Vide`] si l'image, le masque du cerveau ou l'image réorientée est vide.
+pub fn segmenter(
+    entree: &Volume,
+    reseaux: &ReseauxMulti,
+    device: &Device,
+) -> Result<SegmentationMulti, ErreurGeometrie> {
+    let preparation = preparer(entree, reseaux, device)?;
+    let transformation = transformation_du_recalage(&preparation, reseaux);
+    segmenter_apres_recalage(&preparation, &transformation, reseaux, device)
+}
+
+/// Recalage affine du gabarit gauche/droite (centré sur l'image masquée, comme `edit-image -copy-origin` dans la chaîne officielle) sur la carte gauche/droite prédite, depuis le départ choisi d'après le volume du cerveau.
+pub fn transformation_du_recalage(preparation: &Preparation, reseaux: &ReseauxMulti) -> Matrix4<f64> {
+    let gabarit = reseaux.gabarit.recentrer(&preparation.b.masquee.centre());
+    let sujet = Volume {
+        donnees: preparation.gauche_droite.mapv(f32::from),
+        affine: preparation.b.cube.affine,
+    };
+    recaler(&gabarit, &sujet, &depart_selon_le_volume(preparation.volume_ml))
 }
 
 /// Segmentation en 43 étiquettes sur la grille de l'image d'entrée.
@@ -269,6 +296,30 @@ mod tests {
             .mapv(|v| v.round() as u8);
         for (nom, etiquettes) in &obtenus {
             resume(id, nom, etiquettes, &officiel);
+        }
+    }
+
+    /// **Critère M5** (`docs/MULTIBOUNTI.md`), chaîne de bout en bout avec NOTRE recalage : Dice moyen ≥ 0,98 sur les étiquettes présentes et Dice ≥ 0,95 pour toute étiquette d'au moins 1 000 voxels contre `sortie_officielle`, pour chaque volume de `MEDOXIDE_MULTI_IDS` (séparés par des virgules, `calme1` par défaut).
+    /// Très long (343 fenêtres par volume). À lancer sous le garde-fou mémoire : `python scripts/garde_memoire.py 18 cargo test --release -p medoxide-bounti with_our_registration -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "demande les poids de Multi-BOUNTI et les références de data/multibounti (hors dépôt) ; très long"]
+    fn the_full_multibounti_chain_matches_the_official_one_with_our_registration() {
+        let device = appareil();
+        let reseaux = ReseauxMulti::charger(&racine().join("burn"), &device);
+        let ids = std::env::var("MEDOXIDE_MULTI_IDS").unwrap_or_else(|_| "calme1".to_string());
+        for id in ids.split(',') {
+            let dossier = racine().join("ref").join(id);
+            let entree = Volume::lire(&dossier.join("entree.nii.gz")).unwrap();
+            let debut = std::time::Instant::now();
+            let resultat = segmenter(&entree, &reseaux, &device).unwrap();
+            println!("MULTI {id} : chaîne complète en {:.0} s", debut.elapsed().as_secs_f64());
+            let officiel = Volume::lire(&dossier.join("sortie_officielle.nii.gz"))
+                .unwrap()
+                .donnees
+                .mapv(|v| v.round() as u8);
+            let (moyen, pire, e) = resume(id, "notre recalage", &resultat.etiquettes, &officiel);
+            assert!(moyen >= 0.98, "{id} : Dice moyen {moyen}");
+            assert!(pire >= 0.95, "{id} : étiquette {e} : Dice {pire}");
         }
     }
 }

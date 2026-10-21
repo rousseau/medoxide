@@ -17,6 +17,7 @@ pub mod multi;
 pub mod multibounti;
 pub mod norme;
 pub mod poids;
+pub mod recalage;
 pub mod segmentation;
 pub mod segmentation_multi;
 pub mod sortie;
