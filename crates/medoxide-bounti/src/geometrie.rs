@@ -167,6 +167,19 @@ impl Volume {
         }
     }
 
+    /// `transform-image … -target cible -dofin transformation` de MIRTK : rééchantillonne ce volume sur la grille (`affine_cible`, `dimensions`) en lisant, pour chaque voxel de la cible, la valeur de ce volume au point `transformation × (position du voxel dans la cible)`
+    /// (interpolation trilinéaire, extension d'un demi-voxel du bord). `transformation` envoie le repère de la cible vers celui de ce volume (voir [`crate::affine`]) ; le volume rendu a l'affine de la cible.
+    pub fn reechantillonner_transforme(
+        &self,
+        transformation: &Matrix4<f64>,
+        affine_cible: &Matrix4<f64>,
+        dimensions: [usize; 3],
+    ) -> Volume {
+        let mut volume = self.reechantillonner(&(transformation * affine_cible), dimensions);
+        volume.affine = *affine_cible;
+        volume
+    }
+
     /// Sous-volume des voxels `debut..=fin` (bornes incluses) ; l'affine est décalée en conséquence.
     pub fn recadrer(&self, debut: [usize; 3], fin: [usize; 3]) -> Volume {
         let donnees = self

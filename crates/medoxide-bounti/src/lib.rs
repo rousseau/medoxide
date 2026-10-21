@@ -3,8 +3,10 @@
 //! Chaque réseau est le code généré par `onnx2burn` à partir de l'export ONNX du réseau MONAI d'origine, sans réentraînement. Les poids (GPL v3) restent hors du dépôt.
 //! Cette étape ne contient que l'U-Net 3D à 20 sorties, validé contre PyTorch (critère C1) ; la fusion des deux réseaux, le retournement et le pré/post-traitement viendront ensuite.
 
+pub mod affine;
 pub mod attunet;
 pub mod bet;
+pub mod cortex;
 pub mod etiquettes;
 pub mod fenetres;
 pub mod fusion;
