@@ -1,0 +1,74 @@
+# Portage de Multi-BOUNTI en Rust / Burn
+
+Suite de `docs/BOUNTI.md` (même méthode : une référence officielle, un critère chiffré **écrit avant le code**, une sous-étape à la fois ; tout écart est consigné tel quel). Journal tenu au fil de l'eau ; les fichiers de travail (poids, scripts officiels, références) sont dans `data/multibounti/` (ignoré par Git).
+
+## 1. Ce qu'est Multi-BOUNTI, faits relevés
+
+Multi-BOUNTI (équipe SVRTK, King's College London) segmente le cerveau périnatal (fœtal et néonatal) en **43 étiquettes**, sur une reconstruction **à 0,5 mm**. Le code et les poids sont dans l'image Docker `fetalsvrtk/svrtk:perinatal_brain_mri_analysis_amd` (AMD seulement, 13,2 Go compressés, environ 38 Go décompressés : **non tirée**, le disque du Mac est plein à 93 %). Ils sont lus directement dans les couches du registre, en flux, sans rien stocker (`scratchpad` : outil `couches.py`, parcours par expression régulière). L'image `general_auto_arm` utilisée pour BOUNTI n'a **pas** ces scripts.
+Licence : celle de la distribution, GNU GPL v3 (en-tête de chaque script : « Copyright 2026 - King's College London … GNU General Public License v3.0 »). Les poids suivent la même règle que ceux de BOUNTI (voir `docs/BOUNTI.md`) : jamais dans ce dépôt MIT.
+
+**Contenu de `/home/perinatal-brain-mri-analysis/`** (état final de l'image : les couches récentes remplacent des scripts de la couche 46 par des variantes) :
+- `scripts/` : `run-multi-bounti-fetal-brain-segmentation-2026-{general,dhcp,with-bet-init}.sh`, `run-multi-bounti-neo-brain-segmentation-2026-{dhcp,with-bet-init}.sh`, `run-fetal-brain-bet-extraction-2026-general.sh`, `run-neo-brain-bet-extraction-2026-general.sh`, `run-internal-capsule-neo-brain-segmentation-3t.sh`, deux scripts de volumétrie ;
+- `src/` : `run_monai_patch_atunet_segmentation_1case-2026-{gpu,cpu}.py`, `…-flip-14-gpu.py` (capsule interne, 14 étiquettes) ;
+- `models/` : réseaux d'extraction du cerveau (`atunet_bet_brain_{fetal_1lab,153t_svr_2026_128,neo_*}`), réseaux gauche/droite (`atunet_lr_brain_{fetal,neo}_2lab`), **réseaux 43 étiquettes** (`patch_atunet_new_multi_43_brain_neo_fetal_aff_fix_022026` pour le fœtus, `…_neo_aff_fix_…` pour le nouveau-né), capsule interne (`patch_atunet_ic_dgm_14_…`) ; chaque fichier fait environ 94,6 Mo ;
+- `templates/ref-bounti/` : `ref-082025.nii.gz` (grille de référence), `dl-ref-t2.nii.gz`, `lr-lab.nii.gz` (gabarit gauche/droite), `lab.nii.gz`, et quatre transformations de départ (`i.dof`, `i-fetal.dof`, `i-early-ga.dof`, `i-very-early-ga.dof`) ;
+- `bin/N4BiasFieldCorrection` (correction de biais, optionnelle).
+
+**Les trois réseaux de la chaîne fœtale ont la même architecture** (script `run_monai_patch_atunet_segmentation_1case-2026-gpu.py`) : `AttentionUnet` de MONAI, 1 canal d'entrée, `cl_num + 1` sorties, canaux (32, 64, 128, 256, 512), pas (2, 2, 2, 2), noyaux 3, dropout 0,5, poids chargés avec `strict=False` ; intensités ramenées à [0, 1] (`ScaleIntensity`, sur tout le volume) ; inférence `sliding_window_inference(…, (128, 128, 128), 4, modèle, overlap=0.8)` puis `argmax`. Extraction du cerveau : 1 étiquette (2 sorties) ; gauche/droite : 2 étiquettes (3 sorties) ; tissus : **43 étiquettes (44 sorties)**.
+
+**Chaîne officielle fœtale « general »** (`run-multi-bounti-fetal-brain-segmentation-2026-general.sh`, commandes MIRTK et `python3` ; le code Rust sera écrit à partir de cette description) :
+1. Contrôle : la résolution z doit valoir 0,5 mm (±0,01), sinon la chaîne s'arrête.
+2. Prétraitement : retrait des dynamiques, `nan` (valeurs non finies), masque `> 0,5`, plus grande composante connexe, recadrage ; rééchantillonnage linéaire dans la grille de `ref-082025` (origine recopiée) ; recadrage ; `pad-3d` à 128 (valeur 1).
+3. Extraction du cerveau par le réseau (`atunet_bet_brain_153t_svr_2026_128`, une fenêtre de 128³) ; `erode-image` (1), plus grande composante, `dilate-image` (1) ; version dilatée 2 fois ; retour dans la grille recadrée (`-labels`).
+4. Image masquée, recadrée, `pad-3d` à 128.
+5. Réseau gauche/droite (`atunet_lr_brain_fetal_2lab`) → carte gauche/droite masquée par le cerveau.
+6. **Recalage affine** (`mirtk register gabarit lr-lab -model Affine -dofin …`) du gabarit gauche/droite sur la carte prédite ; transformation de départ choisie par **`guess-ga`** (âge gestationnel estimé à partir du masque : `i.dof` si > 170, sinon `i-very-early-ga.dof`).
+7. Retour du masque dans la grille d'origine (`-labels`), dilatation de 2, masquage et recadrage de l'image d'origine ; **réorientation** de l'image dans la grille du gabarit `dl-ref-t2` par la transformation affine ; seuil, recadrage, `nan`, `pad-3d` à 256.
+8. Réseau 43 étiquettes (fenêtres de 128³ sur le volume de 256³, recouvrement 0,8) ; retour dans la grille de l'image d'origine par l'**inverse** de la transformation affine (`-dofin_i … -labels`) ; **`thin-cortex-thick`** (outil MIRTK propre à cette image) donne l'étiquetage final.
+La variante `-with-bet-init` prend en plus un **masque du cerveau externe** (par exemple celui de la reconstruction) à la place de l'étape 3 ; `-dhcp` utilise le réseau d'extraction `atunet_bet_brain_fetal_1lab`.
+
+## 2. Difficultés identifiées avant de coder
+
+| Élément | Nature | Disponibilité de l'outil officiel |
+|---|---|---|
+| Réseaux (3) et inférence par fenêtres glissantes | même recette que BOUNTI ; fenêtres MONAI à reproduire | PyTorch / MONAI sur le Mac |
+| Géométrie MIRTK (`pad-3d`, recadrages, rééchantillonnage, `-labels`) | extension des règles déjà établies pour BOUNTI | outils dans l'image ARM (`pad-3d`, `get-dz`, `register`, `transform-image`, …) |
+| Recalage affine MIRTK (`register -model Affine`) | optimisation numérique : on ne reproduira pas le même minimum au bit près | `register` dans l'image ARM |
+| `guess-ga`, `thin-cortex-thick` | outils propres à l'image AMD, sans source | absents de l'image ARM ; binaires AMD64 à extraire et exécuter dans un conteneur AMD64 (Rosetta) |
+
+Entrée des essais : nos reconstructions sont à 0,8 mm et la chaîne exige 0,5 mm ; les volumes d'essai sont donc rééchantillonnés à 0,5 mm (interpolation linéaire). Les valeurs numériques sont réelles, la résolution est seulement interpolée.
+
+## 3. Les deux outils sans source, reconstitués
+
+Les deux binaires AMD64 (`guess-ga`, 46 Ko, couche 46 ; `thin-cortex-thick`, 55 Ko, couche 45) sont extraits dans `data/multibounti/amd/`. Pour les **exécuter** sur le Mac : conteneur AMD64 (Rosetta) `ubuntu:22.04` avec `libtbb2` et `libgomp1` (la version 24.04 n'a pas `libtbb.so.2`), les bibliothèques `libMIRTK*.so` des couches 9 et 25 montées depuis l'extérieur (les liens symboliques `.so.0` sont recréés à la main : l'extraction par `tarfile` ne les garde pas). Aucun de ces fichiers n'est dans le dépôt (GPL v3, non redistribués).
+
+**`guess-ga`** : lit un masque binaire et affiche le **volume du masque en mL, arrondi à l'entier** (et non un âge en jours, malgré son nom). Relevé sur onze ellipsoïdes de 0,8 à 266,5 mL et sur le masque d'un cerveau (353,6 mL) : 1, 3, 6, 12, 21, 33, 50, 71, 97, 168, 266 et 354. Le script compare ce nombre à 170 (`-gt 170`) pour choisir la transformation de départ du recalage : `i.dof` (rigide, identité) si le volume arrondi dépasse 170 mL, sinon `i-very-early-ga.dof` (affine, échelle de 40 %).
+**`thin-cortex-thick`** : lu dans le désassemblage (`llvm-objdump` d'Xcode ; les symboles `thick_gm` et `fix_gm` sont conservés). `main` lit l'image en `double`, applique **douze fois** `thick_gm(image, g, a, w)` à la suite, puis écrit le résultat en `double` : (g, a, w) = (37, 13, 1), (37, 15, 3), (37, 17, 5), (37, 19, 7), (37, 21, 9), (37, 23, 11), (38, 14, 2), (38, 16, 4), (38, 18, 6), (38, 20, 8), (38, 22, 10), (38, 24, 12). `fix_gm` n'est jamais appelée.
+`thick_gm(image, g, a, w)` : pour chaque voxel V d'étiquette `w` situé à au moins 2 voxels du bord, s'il existe un voxel d'étiquette `a` à **distance exactement 2 sur un axe** (±x, ±y, ±z), alors chacun des six voisins de V d'étiquette `g` prend l'étiquette `w`. Les lectures se font dans l'image d'entrée de l'appel, les écritures dans une copie (l'ordre de parcours est donc sans effet).
+**Vérification** (hypothèse tirée du code machine, puis essayée contre l'outil réel) : six volumes d'étiquettes aléatoires (de 14×15×13 à 24×15×18 voxels, 29 valeurs, beaucoup de 37 et 38) ; mon modèle des douze passes donne **0 voxel différent** de l'outil, alors que celui-ci modifie de 44 à 143 voxels par volume.
+
+## 4. Références produites, plan et critères (écrits avant le code)
+
+**Références officielles** (`scripts/multibounti_reference.py`, dossier `data/multibounti/ref/<id>/`, chaque fichier intermédiaire de la chaîne gardé) : `calme1` terminée (réseau 43 étiquettes : **20 023 s sur le CPU partagé**, bien plus que les 70 minutes estimées ; le CPU pur de PyTorch est le seul moyen, MPS n'a pas `ConvTranspose3d`) ; `calme2` et `calme3` lancées à basse priorité. Sortie finale de `calme1` : 43 étiquettes présentes (dont de minuscules : 3, 26 et 1 voxels pour les étiquettes 8, 7 et 43), grille et affine de l'entrée (236 × 212 × 211, 0,5 mm), type `float64`. L'extraction du cerveau a donné un masque de 367 mL (`guess-ga`) donc la transformation de départ `i.dof` ; 319 mL pour `calme2`.
+
+| Sous-étape | Quoi | Critère (fixé avant) |
+|---|---|---|
+| **M1** réseaux | export ONNX et conversion `onnx2burn` des trois réseaux (extraction du cerveau `153t_svr`, gauche/droite, 43 étiquettes ; même `AttentionUnet`, seul le nombre de sorties change : 2, 3, 44) | critère C1 de BOUNTI : écart relatif des logits ≤ 1e-5 contre PyTorch f32 et ≥ 99,9 % d'étiquettes identiques, à 128³, sur les entrées réelles de la chaîne de `calme1` |
+| **M2** fenêtres | `sliding_window_inference` de MONAI en Rust : fenêtres de 128³, recouvrement 0,8, poids uniformes | plan des fenêtres égal à celui de MONAI (départs calculés par MONAI pour plusieurs tailles) ; étiquettes **≥ 99,9 % identiques** à la sortie officielle `multi-lab-reo-t2.nii.gz` de `calme1` (256³) |
+| **M3** géométrie | `pad-3d`, recadrages, rééchantillonnage dans `ref-082025`, nettoyage du masque, transformations avec `.dof` | chaque étape contre MIRTK (image ARM) sur `calme1` à `calme3` : dimensions identiques, affine ≤ 1e-3 mm, intensités ≤ 1e-3 de la plage, masques ≥ 99,9 % identiques |
+| **M4** recalage | recalage affine du gabarit gauche/droite (`register -model Affine`) et lecture/écriture des `.dof` | à fixer après avoir mesuré la répétabilité de MIRTK lui-même (départs perturbés) : l'écart de notre affine à la sienne ne doit pas dépasser la dispersion de MIRTK ; contrôle indirect par le Dice final |
+| **M5** assemblage | chaîne complète, commande `medx`, option « masque du cerveau externe » (variante `-with-bet-init`) | **Dice moyen ≥ 0,98 sur les 43 étiquettes et Dice ≥ 0,95 pour toute étiquette d'au moins 1 000 voxels** contre `sortie_officielle` sur `calme1` à `calme3` ; les étiquettes plus petites sont rapportées sans seuil |
+
+**Ordre des essais pour isoler les causes** : M2 à M3 sont d'abord validés en partant des fichiers intermédiaires **officiels** (y compris `aff-d.dof` de MIRTK), puis M4 remplace le recalage de MIRTK par le nôtre ; sans cela une dérive du recalage ne se distinguerait pas d'un défaut du réseau ou de la géométrie.
+
+## 5. Sous-étape M1 : les trois réseaux en Burn (résultat)
+
+Export ONNX par `scripts/export_multibounti_onnx.py <bet|lr|multi>` (chargement **strict** : aucune clé manquante ni en trop, alors que le script officiel charge avec `strict=False`), vérifié contre onnxruntime : écart relatif 1,9e-6 (`bet`), 3,2e-6 (`lr`), 3,8e-6 (`multi`), accord des étiquettes ≥ 0,99999. Conversion par `onnx2burn` (burn-onnx 0.22.0-pre.4).
+**Résultat structurel** : l'extraction du cerveau avec les poids `153t_svr` donne un code **identique** à `bet.rs` de BOUNTI (aux imports, à la mise en forme et au chemin des poids près : même contrôle que `scripts/bounti_poids.sh`) : `bet.rs` sert donc aussi à Multi-BOUNTI, avec d'autres poids. Les réseaux gauche/droite et 43 étiquettes diffèrent de `bet.rs` d'**une seule ligne** (le nombre de sorties de la dernière convolution : 3 et 44, au lieu de 2) : `lr.rs` et `multi.rs` sont `bet.rs` avec cette ligne changée et un en-tête d'attribution propre (code identique au code généré, mêmes contrôles). Modules : `crates/medoxide-bounti/src/{lr,multi}.rs`.
+**Critère C1 atteint aux trois réseaux** (test `the_multibounti_networks_match_pytorch_on_real_inputs`, GPU, 128³, entrées réelles de la chaîne de `calme1` mises à l'échelle comme dans le script officiel ; références `scripts/make_multibounti_reference.py`) :
+
+| Réseau | écart relatif des logits (seuil 1e-5) | accord des étiquettes (seuil 0,999) |
+|---|---|---|
+| extraction du cerveau (`bet`, 2 sorties) | 2,26e-6 | 1,000000 |
+| gauche / droite (`lr`, 3 sorties) | 2,74e-6 | 1,000000 |
+| 43 étiquettes (`multi`, 44 sorties, |logit| jusqu'à 486) | 2,64e-6 | 0,999999 |
