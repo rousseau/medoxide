@@ -2,8 +2,11 @@
 //!
 //! Les opérations sont celles du script officiel, avec les règles de MIRTK déjà établies pour BOUNTI (recadrages, grille de référence centrée, `-labels`, dilatation et érosion) ; seuls changent la grille de référence (359 × 359 × 359 voxels de 0,5 mm), le seuil (0,5)
 //! et `pad-3d` (cube de 128 voxels sans mise à l'échelle des intensités).
+use crate::cortex::amincir_le_cortex;
+use crate::etiquettes::{etiquettes_vers_la_grille, etiquettes_vers_la_grille_par};
 use crate::geometrie::{Boite, ErreurGeometrie, Volume};
 use crate::masque::{dilater, eroder, plus_grande_composante};
+use nalgebra::Matrix4;
 use ndarray::Array3;
 
 /// Dimensions de la grille de référence `ref-082025` du gabarit (voxels de 0,5 mm, orientation LAS).
@@ -16,6 +19,12 @@ pub const SEUIL_MASQUE: f32 = 0.5;
 pub const SEUIL_VALEURS_EXTREMES: f32 = 100_000.0;
 /// Côté des cubes d'entrée des réseaux d'extraction du cerveau et gauche/droite.
 pub const COTE_PETIT_CUBE: usize = 128;
+/// Côté du cube que reçoit le réseau à 43 étiquettes.
+pub const COTE_GRAND_CUBE: usize = 256;
+/// Côté de la grille du gabarit de réorientation (`dl-ref-t2` : voxels de 0,5 mm, orientation LAS), sur laquelle l'image est ramenée par la transformation affine.
+pub const COTE_GRILLE_REORIENTEE: usize = 410;
+/// Valeur absolue au-delà de laquelle `nan` met un voxel à 0 dans l'image réorientée (phase C).
+pub const SEUIL_VALEURS_EXTREMES_REORIENTEE: f32 = 50_000.0;
 
 /// Résultat de la phase A.
 pub struct PhaseA {
@@ -94,6 +103,60 @@ pub fn phase_b(a: &PhaseA, brut: &Array3<bool>) -> Result<PhaseB, ErreurGeometri
         masquee,
         cube,
     })
+}
+
+/// Résultat de la phase C.
+pub struct PhaseC {
+    /// Masque du cerveau passé dans la grille de `a.recadree`, dilaté de 2 itérations (`dl-bet-org-t2` avant recadrage).
+    pub masque_origine: Array3<bool>,
+    /// Image d'origine masquée par `masque_origine` puis recadrée sur sa boîte (`masked-crop-org-t2`).
+    pub masquee_origine: Volume,
+    /// Cette image ramenée par la transformation affine dans la grille du gabarit, recadrée sur les voxels > 0,5, valeurs extrêmes annulées (`reo-n4-masked-t2`).
+    pub reorientee: Volume,
+    /// Cube de 256³ de `reorientee`, intensités inchangées (`pad-reo-n4-masked-t2-256`) : entrée du réseau à 43 étiquettes.
+    pub cube: Volume,
+}
+
+/// **Phase C** (hors recalage) : l'image masquée est ramenée dans l'orientation du gabarit par la transformation affine `transformation` (`aff-d.dof` : voir [`crate::affine::Parametres::matrice`]), puis mise en cube de 256³.
+/// `b` donne le masque nettoyé du cerveau et l'image `masquee` sur laquelle est centrée la grille du gabarit.
+///
+/// # Erreurs
+/// [`ErreurGeometrie::Vide`] si un masque ou l'image réorientée est vide.
+pub fn phase_c(a: &PhaseA, b: &PhaseB, transformation: &Matrix4<f64>) -> Result<PhaseC, ErreurGeometrie> {
+    let etiquettes = b.masque.mapv(u8::from);
+    let sur_origine = etiquettes_vers_la_grille(&etiquettes, &a.cube.affine, &a.recadree);
+    let masque_origine = dilater(&sur_origine.mapv(|e| e > 0), 2);
+    let masquee_origine = a.recadree.masquer_et_recadrer(&masque_origine)?;
+    let affine_gabarit =
+        Volume::affine_de_grille_las(&b.masquee.centre(), [COTE_GRILLE_REORIENTEE; 3], VOXEL_GABARIT_MM);
+    let ramenee =
+        masquee_origine.reechantillonner_transforme(transformation, &affine_gabarit, [COTE_GRILLE_REORIENTEE; 3]);
+    let (mut reorientee, _) = ramenee.recadrer_sur_seuil(SEUIL_MASQUE)?;
+    reorientee.annuler_valeurs_extremes(SEUIL_VALEURS_EXTREMES_REORIENTEE);
+    let cube = reorientee.cube_sans_echelle(COTE_GRAND_CUBE);
+    Ok(PhaseC {
+        masque_origine,
+        masquee_origine,
+        reorientee,
+        cube,
+    })
+}
+
+/// **Phase D** : étiquettes du réseau à 43 étiquettes (sur la grille de `c.cube`) ramenées dans la grille de l'image d'origine par l'INVERSE de la transformation (`-dofin_i`), puis cortex aminci (`thin-cortex-thick`).
+/// Rend aussi les étiquettes avant amincissement (`tr-multi-lab-reo-t2`).
+///
+/// # Panique
+/// Si `transformation` n'est pas inversible.
+pub fn phase_d(
+    a: &PhaseA,
+    c: &PhaseC,
+    etiquettes: &Array3<u8>,
+    transformation: &Matrix4<f64>,
+) -> (Array3<u8>, Array3<u8>) {
+    let inverse = transformation.try_inverse().expect("transformation inversible");
+    let avant = etiquettes_vers_la_grille_par(etiquettes, &c.cube.affine, &inverse, &a.origine);
+    let apres = amincir_le_cortex(&avant);
+    (avant, apres)
 }
 
 #[cfg(test)]
@@ -216,6 +279,88 @@ mod tests {
                 1e-3,
                 1e-3,
             );
+        }
+    }
+
+    /// Transformation officielle `aff-d.dof` d'un volume de référence.
+    fn transformation(id: &str) -> Matrix4<f64> {
+        let octets = std::fs::read(dossier(id).join("aff-d.dof")).unwrap();
+        crate::affine::Parametres::depuis_octets(&octets).unwrap().matrice()
+    }
+
+    /// **Critère de la phase C** (hors recalage : la transformation est celle de MIRTK) : masque d'origine identique à 99,9 % près, `masked-crop-org-t2`, `reo-n4-masked-t2` et le cube de 256³ de même grille (affine à 1e-3 mm près) et d'intensités à 1e-3 de la plage près.
+    #[test]
+    #[ignore = "demande les références de data/multibounti/ref (hors dépôt) : voir scripts/multibounti_reference.py"]
+    fn phase_c_matches_mirtk() {
+        for id in ["calme1", "calme2"] {
+            let a = phase_a(&lire(id, "entree")).unwrap();
+            let brut = lire(id, "bet-reseau-brut").donnees.mapv(|v| v > 0.5);
+            let b = phase_b(&a, &brut).unwrap();
+            let c = phase_c(&a, &b, &transformation(id)).unwrap();
+            let officiel = lire(id, "dl-bet-org-t2");
+            let boite = Volume::boite_du_masque(&c.masque_origine).unwrap();
+            let mien = c.masque_origine.slice(ndarray::s![
+                boite.0[0]..=boite.1[0],
+                boite.0[1]..=boite.1[1],
+                boite.0[2]..=boite.1[2]
+            ]);
+            assert_eq!(mien.dim(), officiel.donnees.dim(), "{id}/dl-bet-org-t2");
+            let differents = mien
+                .iter()
+                .zip(officiel.donnees.iter())
+                .filter(|(&a, &o)| a != (o > 0.5))
+                .count();
+            println!(
+                "MULTI {id}/dl-bet-org-t2 : {differents} voxels différents sur {}",
+                mien.len()
+            );
+            assert!(differents as f64 <= 1e-3 * mien.len() as f64, "{id}/dl-bet-org-t2");
+            comparer(
+                id,
+                "masked-crop-org-t2",
+                &c.masquee_origine,
+                &lire(id, "masked-crop-org-t2"),
+                1e-3,
+                1e-3,
+            );
+            comparer(
+                id,
+                "reo-n4-masked-t2",
+                &c.reorientee,
+                &lire(id, "reo-n4-masked-t2"),
+                1e-3,
+                1e-3,
+            );
+            comparer(
+                id,
+                "pad-reo-n4-masked-t2-256",
+                &c.cube,
+                &lire(id, "pad-reo-n4-masked-t2-256"),
+                1e-3,
+                1e-3,
+            );
+        }
+    }
+
+    /// **Critère de la phase D** : à partir des étiquettes OFFICIELLES du réseau (`multi-lab-reo-t2`) et de la transformation officielle, les étiquettes dans la grille d'origine (`tr-multi-lab-reo-t2`) puis la sortie finale (`sortie_officielle`) diffèrent d'au plus 0,1 % des voxels NON NULS de la référence (même grille).
+    #[test]
+    #[ignore = "demande les références de data/multibounti/ref (hors dépôt) : voir scripts/multibounti_reference.py"]
+    fn phase_d_matches_mirtk() {
+        for id in ["calme1"] {
+            let a = phase_a(&lire(id, "entree")).unwrap();
+            let brut = lire(id, "bet-reseau-brut").donnees.mapv(|v| v > 0.5);
+            let b = phase_b(&a, &brut).unwrap();
+            let c = phase_c(&a, &b, &transformation(id)).unwrap();
+            let etiquettes = lire(id, "multi-lab-reo-t2").donnees.mapv(|v| v.round() as u8);
+            let (avant, apres) = phase_d(&a, &c, &etiquettes, &transformation(id));
+            for (nom, mien) in [("tr-multi-lab-reo-t2", &avant), ("sortie_officielle", &apres)] {
+                let officiel = lire(id, nom).donnees.mapv(|v| v.round() as u8);
+                assert_eq!(mien.dim(), officiel.dim(), "{id}/{nom}");
+                let non_nuls = officiel.iter().filter(|&&e| e > 0).count();
+                let differents = mien.iter().zip(officiel.iter()).filter(|(a, b)| a != b).count();
+                println!("MULTI {id}/{nom} : {differents} voxels différents sur {non_nuls} non nuls");
+                assert!(differents as f64 <= 1e-3 * non_nuls as f64, "{id}/{nom}");
+            }
         }
     }
 }
