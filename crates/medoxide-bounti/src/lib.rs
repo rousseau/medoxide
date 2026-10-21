@@ -18,6 +18,7 @@ pub mod multibounti;
 pub mod norme;
 pub mod poids;
 pub mod segmentation;
+pub mod segmentation_multi;
 pub mod sortie;
 pub mod table;
 pub mod unet;
