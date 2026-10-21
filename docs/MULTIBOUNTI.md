@@ -158,3 +158,19 @@ Test `diagnostic_sensitivity_of_the_segmentation_to_the_registration` : la chaî
 **Conséquence pour M5** : le critère « Dice moyen ≥ 0,98 contre `sortie_officielle` » ne peut être tenu que par une chaîne qui retrouve la transformation EXACTE de MIRTK (ce que fait M5a, 1,0000, en la lisant), pas par un recalage indépendant : il mesure la chance de tomber sur la même solution non convergée. Il n'est pas modifié ; le résultat avec notre recalage sera donné contre lui, et contre le critère suivant, écrit avant la mesure.
 
 **Critère M5′ (écrit avant de lancer la chaîne avec notre recalage sur `calme1`)** : le Dice moyen de notre sortie contre la sortie officielle n'est pas inférieur à celui d'un recalage de MIRTK aussi éloigné de l'officiel que le nôtre : ≥ 0,708 si notre écart de recalage est ≤ 2,38 mm (valeur de l'essai 2), ≥ 0,566 s'il est ≤ 5,38 mm. Autrement dit : notre recalage ne perd pas plus de segmentation qu'un autre passage de MIRTK.
+
+## 11. Résultat de M5 avec notre recalage (`calme1`)
+
+Test `the_full_multibounti_chain_matches_the_official_one_with_our_registration` (GPU, 1 785 s, recalage de `recalage.rs` depuis le départ de `guess-ga`) :
+
+| Mesure | valeur | seuil | verdict |
+|---|---|---|---|
+| accord de voxels avec `sortie_officielle` | 0,972 | — | — |
+| **Dice moyen (43 étiquettes)** — critère M5 | **0,715** | ≥ 0,98 | **non atteint** |
+| pire Dice, étiquettes ≥ 1 000 voxels (étiquette 12) — critère M5 | **0,627** | ≥ 0,95 | **non atteint** |
+| **Dice moyen — critère M5′** (notre écart de recalage à l'officielle sur `calme1` : 1,63 mm ≤ 2,38 mm) | **0,715** | ≥ 0,708 | **atteint** (de 0,007) |
+
+Lecture honnête : le critère M5 d'origine ne pouvait pas être atteint par un recalage indépendant (section 10 : deux autres passages de MIRTK lui-même donnent 0,71 et 0,57) ; il n'a pas été modifié. Le critère M5′ est atteint, mais de peu et avec une seule référence de comparaison (essais de MIRTK à 2,38 et 5,38 mm) : notre recalage, 1,63 mm plus près de l'officielle, ne fait pas mieux que l'essai à 2,38 mm (0,715 contre 0,708). On ne peut donc pas affirmer qu'il est meilleur ou pire qu'un autre passage de MIRTK ; on peut dire qu'il est du même ordre. Sans vérité terrain (les noms des 43 étiquettes ne sont pas dans l'image ; FeTA a des étiquettes manuelles en 7 tissus qu'on ne sait pas croiser sans cette table), la **qualité anatomique** de la segmentation obtenue avec chaque recalage n'est pas mesurée.
+
+**Ce qui est établi** : (1) toute la chaîne en Rust, hors recalage, est identique à la chaîne officielle (M1 à M3, M5a : Dice 1,0000) ; (2) le recalage de MIRTK est peu répétable et la sortie en dépend fortement ; (3) notre recalage est dans la dispersion de MIRTK sur 4 volumes de validation sur 7, à 5 mm au plus.
+**Ce qui reste ouvert** : variante néonatale ; table des noms d'étiquettes (`dseg.tsv`) ; publication des poids (GPL v3, décision de l'utilisateur) ; un recalage qui reproduirait la trajectoire exacte de MIRTK (gradient analytique de la NMI, pas de recherche, niveaux plus fins) pour se rapprocher de la sortie officielle plutôt que de la valeur de la NMI.
