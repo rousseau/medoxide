@@ -8,6 +8,7 @@ use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
 use nalgebra::{Matrix4, Vector3, Vector4};
 use ndarray::{Array2, ArrayView2};
+use rayon::prelude::*;
 
 use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
 use crate::diff::pose_to_matrix;
@@ -841,6 +842,17 @@ pub struct S2sConfig {
     pub reliability_high: f64,
     /// Poids minimal d'un partenaire peu fiable (jamais nul : sans lui une coupe sans bon partenaire n'aurait plus de contrainte).
     pub reliability_floor: f64,
+    /// Façon de mettre à jour les poses pendant un balayage (voir [`S2sUpdate`]).
+    pub update: S2sUpdate,
+}
+
+/// Mise à jour des poses pendant un balayage de [`register_slices_s2s`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2sUpdate {
+    /// Gauss–Seidel (défaut) : les coupes sont recalées l'une après l'autre, dans un ordre aléatoire, et chacune voit les poses déjà mises à jour des précédentes. Séquentiel.
+    GaussSeidel,
+    /// Jacobi : toutes les coupes du balayage sont recalées contre les poses du balayage PRÉCÉDENT (figées au début du balayage), en parallèle, puis les poses sont mises à jour ensemble. Le résultat ne dépend ni de l'ordre ni du nombre de threads.
+    Jacobi,
 }
 
 /// Poids de fiabilité d'un partenaire de concordance `score` : `floor` en dessous de `low`, 1 au-dessus de `high`, et entre les deux `floor + (1 − floor) · x²(3 − 2x)` avec `x = (score − low) / (high − low)` (rampe lisse, monotone). Rend 1 si `high <= low` (pondération inactive).
@@ -881,6 +893,7 @@ impl Default for S2sConfig {
             reliability_low: 0.0,
             reliability_high: 0.0,
             reliability_floor: 0.05,
+            update: S2sUpdate::GaussSeidel,
         }
     }
 }
@@ -1278,6 +1291,231 @@ pub fn register_slices_s2s(
     config: &S2sConfig,
     device: &Device,
 ) -> Result<AlignmentReport, SvrError> {
+    let (rapport, balayages) = register_slices_s2s_traced(stacks, poses, config, device)?;
+    // expérience (branche s2s-jacobi) : MEDX_S2S_TRACE=1 affiche une ligne par balayage sur la sortie d'erreur
+    if std::env::var_os("MEDX_S2S_TRACE").is_some() {
+        for (i, b) in balayages.iter().enumerate() {
+            eprintln!(
+                "s2s balayage {i} sigma {:.2} net {} : {} mises à jour, concordance {:.4} -> {:.4}, déplacement moyen {:.3} mm, max {:.3} mm, {:.1} s",
+                b.sigma_pixels,
+                b.net,
+                b.mises_a_jour,
+                b.concordance_avant,
+                b.concordance_apres,
+                b.deplacement_moyen_mm,
+                b.deplacement_max_mm,
+                b.duree_s
+            );
+        }
+    }
+    if std::env::var_os("MEDX_S2S_TRACE").is_some() {
+        let c = mean_concordance(stacks, &rapport.poses, config, device)?;
+        eprintln!("s2s concordance moyenne aux poses finales (mesure commune) {c:.5}");
+    }
+    Ok(rapport)
+}
+
+/// Concordance moyenne aux intersections des poses `poses`, mesurée de la même façon pour tout mode de mise à jour : pour chaque coupe qui a des partenaires, la concordance (`IntersectionProblem::cost`) à sa pose, sans la modifier, moyennée. Calcul en parallèle (lecture seule).
+///
+/// # Erreurs
+/// Celles de [`register_slices_s2s`].
+pub fn mean_concordance(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    config: &S2sConfig,
+    device: &Device,
+) -> Result<f64, SvrError> {
+    verifier_entrees(stacks, poses)?;
+    let atlas = SliceAtlas::new(stacks, device)?;
+    let coupes: Vec<(usize, usize)> = stacks
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+        .collect();
+    let valeurs: Vec<f64> = coupes
+        .par_iter()
+        .filter_map(|&(si, k)| {
+            let preparee = preparer_coupe(&stacks[si], k, *poses.get(si, k))?;
+            let probleme = IntersectionProblem::build(&atlas, stacks, poses, si, k, &config.intersection, device)?;
+            let pivot = Tensor::<1>::from_floats(
+                [
+                    preparee.pivot.x as f32,
+                    preparee.pivot.y as f32,
+                    preparee.pivot.z as f32,
+                ],
+                device,
+            );
+            let zero = Tensor::<1>::from_floats([0.0_f32; 6], device);
+            let v = probleme.cost(zero, pivot, preparee.echelle);
+            Some(f64::from(v.into_data().try_to_vec::<f32>().unwrap()[0]))
+        })
+        .collect();
+    Ok(valeurs.iter().sum::<f64>() / valeurs.len().max(1) as f64)
+}
+
+/// Statistiques d'un balayage de [`register_slices_s2s_traced`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatBalayage {
+    /// Flou des images du balayage (0 : images nettes).
+    pub sigma_pixels: f64,
+    /// Balayage sur les images nettes (`true`) ou grossier (`false`).
+    pub net: bool,
+    /// Nombre de coupes dont la pose a été mise à jour (la concordance n'a pas baissé).
+    pub mises_a_jour: usize,
+    /// Concordance moyenne des coupes traitées avant leur recalage (aux poses vues par chaque coupe : en Gauss–Seidel, déjà en partie mises à jour).
+    pub concordance_avant: f64,
+    /// Concordance moyenne après le recalage (la plus haute des deux, comme le score retenu).
+    pub concordance_apres: f64,
+    /// Déplacement quadratique moyen (mm, sur les pixels de masque) de la mise à jour, moyenné sur les coupes mises à jour.
+    pub deplacement_moyen_mm: f64,
+    /// Plus grand de ces déplacements.
+    pub deplacement_max_mm: f64,
+    /// Durée du balayage (s).
+    pub duree_s: f64,
+}
+
+/// Ce que le recalage d'une coupe pendant un balayage produit : à appliquer ensuite aux poses, aux scores et au rapport.
+struct MiseAJour {
+    /// Nombre de points d'intersection valides de la coupe.
+    echantillons: f64,
+    /// Concordance avant et après le recalage.
+    avant: f64,
+    apres: f64,
+    /// Nouvelle pose (`D · M`), si la concordance n'a pas baissé.
+    pose: Option<Matrix4<f64>>,
+    /// Déplacement quadratique moyen de la mise à jour (mm), 0 si elle est refusée.
+    deplacement_mm: f64,
+}
+
+/// Ce qui évolue pendant [`register_slices_s2s_traced`] : poses courantes, dernière concordance et dernier nombre d'échantillons de chaque coupe, rapport de chaque coupe.
+struct Etat {
+    courantes: SlicePoses,
+    scores: Vec<f64>,
+    echantillons: Vec<f64>,
+    rapports: Vec<SliceReport>,
+}
+
+impl Etat {
+    /// Applique la mise à jour `m` de la coupe `n` (`(si, k)`) : échantillons, score retenu, rapport (balayage net seulement) et pose si elle est acceptée.
+    fn appliquer(&mut self, n: usize, (si, k): (usize, usize), m: &MiseAJour, net: bool) {
+        self.echantillons[n] = m.echantillons;
+        self.scores[n] = m.apres.max(m.avant);
+        if net {
+            let rapport = &mut self.rapports[n];
+            rapport.registered = true;
+            rapport.runs += 1;
+            rapport.ncc_first = m.avant;
+            rapport.ncc_final = m.avant;
+            if m.apres >= m.avant {
+                rapport.ncc_final = m.apres;
+            }
+        }
+        if let Some(pose) = m.pose {
+            self.courantes.set(si, k, pose);
+        }
+    }
+}
+
+/// Ce qui ne change pas pendant tout [`register_slices_s2s_traced`].
+struct Contexte<'a> {
+    stacks: &'a [Stack],
+    atlas: &'a SliceAtlas,
+    config: &'a S2sConfig,
+    device: &'a Device,
+    /// Position de la première coupe de chaque stack dans la liste de toutes les coupes.
+    decalages: &'a [usize],
+    /// Indice du balayage, tous niveaux confondus, et nombre total de balayages (pour l'échelle robuste).
+    balayage: usize,
+    total_balayages: usize,
+}
+
+/// Recale la coupe `k` du stack `si` (numéro `n` dans la liste de toutes les coupes) contre les poses `courantes`, avec les concordances `scores` et les nombres d'échantillons `echantillons` connus. `None` si la coupe n'a pas de pixels de masque assez nombreux ou pas de partenaire.
+fn recaler_coupe(
+    ctx: &Contexte,
+    (si, k): (usize, usize),
+    n: usize,
+    courantes: &SlicePoses,
+    scores: &[f64],
+    echantillons: &[f64],
+) -> Option<MiseAJour> {
+    let (stacks, config, device) = (ctx.stacks, ctx.config, ctx.device);
+    let courante = *courantes.get(si, k);
+    let preparee = preparer_coupe(&stacks[si], k, courante)?;
+    let probleme = IntersectionProblem::build(ctx.atlas, stacks, courantes, si, k, &config.intersection, device)?;
+    let n_echantillons = probleme.n_samples() as f64;
+    // la médiane tient compte de la coupe elle-même (Gauss–Seidel : sa valeur est écrite avant le calcul)
+    let mut connus = echantillons.to_vec();
+    connus[n] = n_echantillons;
+    let poids_temporel = config.temporal_weight
+        * information_weight(n_echantillons, median_of_known(&connus), config.temporal_info_exponent);
+    let probleme = match config.temporal_weight > 0.0 {
+        true => match temporal_prior_inputs(&stacks[si], courantes, si, k, &preparee.points, config.temporal_points) {
+            Some((points, cibles)) => probleme
+                .with_temporal_prior(&points, &cibles, poids_temporel)
+                .with_temporal_robustness(robust_scale(
+                    config.temporal_robust_start_mm,
+                    config.temporal_robust_mm,
+                    ctx.balayage,
+                    ctx.total_balayages,
+                )),
+            None => probleme,
+        },
+        false => probleme,
+    };
+    let probleme = if config.reliability_high > config.reliability_low {
+        probleme.with_partner_weights(|sj, kj| {
+            reliability_weight(
+                scores[ctx.decalages[sj] + kj],
+                config.reliability_low,
+                config.reliability_high,
+                config.reliability_floor,
+            )
+        })
+    } else {
+        probleme
+    };
+    let pivot = Tensor::<1>::from_floats(
+        [
+            preparee.pivot.x as f32,
+            preparee.pivot.y as f32,
+            preparee.pivot.z as f32,
+        ],
+        device,
+    );
+    let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
+    let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
+    let (pose, deplacement_mm) = if apres >= avant {
+        let delta = pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle);
+        let rms = (preparee
+            .points
+            .iter()
+            .map(|x| ((delta * x.push(1.0)).xyz() - x).norm_squared())
+            .sum::<f64>()
+            / preparee.points.len() as f64)
+            .sqrt();
+        (Some(delta * courante), rms)
+    } else {
+        (None, 0.0)
+    };
+    Some(MiseAJour {
+        echantillons: n_echantillons,
+        avant,
+        apres,
+        pose,
+        deplacement_mm,
+    })
+}
+
+/// Comme [`register_slices_s2s`], et rend en plus les statistiques de chaque balayage (dans l'ordre de leur exécution, tous niveaux confondus).
+///
+/// # Erreurs
+/// Celles de [`register_slices_s2s`].
+pub fn register_slices_s2s_traced(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    config: &S2sConfig,
+    device: &Device,
+) -> Result<(AlignmentReport, Vec<StatBalayage>), SvrError> {
     verifier_entrees(stacks, poses)?;
     let coupes: Vec<(usize, usize)> = stacks
         .iter()
@@ -1285,7 +1523,7 @@ pub fn register_slices_s2s(
         .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
         .collect();
     let mut courantes = poses.clone();
-    let mut rapports: Vec<SliceReport> = coupes
+    let rapports: Vec<SliceReport> = coupes
         .iter()
         .map(|&(stack, slice)| SliceReport {
             stack,
@@ -1304,10 +1542,15 @@ pub fn register_slices_s2s(
     let niveaux = sweep_schedule(config);
     let total_balayages: usize = niveaux.iter().map(|n| n.1).sum();
     let mut decalage_graine = 0u64;
-    // dernière concordance connue de chaque coupe (1 avant toute information) et position de chaque stack dans `coupes`, pour la fiabilité des partenaires
-    let mut scores = vec![1.0_f64; coupes.len()];
-    // dernier nombre de points d'intersection valides de chaque coupe (0 : pas encore vu), pour la pondération du poids temporel par l'information
-    let mut echantillons = vec![0.0_f64; coupes.len()];
+    let mut etat = Etat {
+        courantes,
+        // dernière concordance connue de chaque coupe (1 avant toute information), pour la fiabilité des partenaires
+        scores: vec![1.0_f64; coupes.len()],
+        // dernier nombre de points d'intersection valides de chaque coupe (0 : pas encore vu), pour la pondération du poids temporel par l'information
+        echantillons: vec![0.0_f64; coupes.len()],
+        rapports,
+    };
+    // position de la première coupe de chaque stack dans `coupes`
     let decalages: Vec<usize> = stacks
         .iter()
         .scan(0usize, |cumul, s| {
@@ -1316,96 +1559,89 @@ pub fn register_slices_s2s(
             Some(d)
         })
         .collect();
+    let mut statistiques = Vec::new();
     for (sigma, balayages, net) in niveaux {
         let atlas = SliceAtlas::new_blurred(stacks, device, sigma)?;
         for balayage in 0..balayages {
-            for &n in &ordre_aleatoire(coupes.len(), config.seed + decalage_graine + balayage as u64) {
-                let (si, k) = coupes[n];
-                let courante = *courantes.get(si, k);
-                let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else {
-                    continue;
-                };
-                let Some(probleme) =
-                    IntersectionProblem::build(&atlas, stacks, &courantes, si, k, &config.intersection, device)
-                else {
-                    continue;
-                };
-                echantillons[n] = probleme.n_samples() as f64;
-                let poids_temporel = config.temporal_weight
-                    * information_weight(
-                        echantillons[n],
-                        median_of_known(&echantillons),
-                        config.temporal_info_exponent,
-                    );
-                let probleme = match config.temporal_weight > 0.0 {
-                    true => match temporal_prior_inputs(
-                        &stacks[si],
-                        &courantes,
-                        si,
-                        k,
-                        &preparee.points,
-                        config.temporal_points,
-                    ) {
-                        Some((points, cibles)) => probleme
-                            .with_temporal_prior(&points, &cibles, poids_temporel)
-                            .with_temporal_robustness(robust_scale(
-                                config.temporal_robust_start_mm,
-                                config.temporal_robust_mm,
-                                decalage_graine as usize + balayage,
-                                total_balayages,
-                            )),
-                        None => probleme,
-                    },
-                    false => probleme,
-                };
-                let probleme = if config.reliability_high > config.reliability_low {
-                    probleme.with_partner_weights(|sj, kj| {
-                        reliability_weight(
-                            scores[decalages[sj] + kj],
-                            config.reliability_low,
-                            config.reliability_high,
-                            config.reliability_floor,
-                        )
-                    })
-                } else {
-                    probleme
-                };
-                let pivot = Tensor::<1>::from_floats(
-                    [
-                        preparee.pivot.x as f32,
-                        preparee.pivot.y as f32,
-                        preparee.pivot.z as f32,
-                    ],
-                    device,
-                );
-                let resultat = register_slice_s2s(&probleme, pivot, preparee.echelle, config.registration);
-                let (avant, apres) = (resultat.ncc_history[0], *resultat.ncc_history.last().unwrap());
-                scores[n] = apres.max(avant);
-                if net {
-                    let rapport = &mut rapports[n];
-                    rapport.registered = true;
-                    rapport.runs += 1;
-                    rapport.ncc_first = avant;
-                    rapport.ncc_final = avant;
-                    if apres >= avant {
-                        rapport.ncc_final = apres;
+            let debut = std::time::Instant::now();
+            let ctx = Contexte {
+                stacks,
+                atlas: &atlas,
+                config,
+                device,
+                decalages: &decalages,
+                balayage: decalage_graine as usize + balayage,
+                total_balayages,
+            };
+            let mises: Vec<MiseAJour> = match config.update {
+                S2sUpdate::GaussSeidel => {
+                    let mut mises = Vec::new();
+                    for &n in &ordre_aleatoire(coupes.len(), config.seed + decalage_graine + balayage as u64) {
+                        let Some(m) =
+                            recaler_coupe(&ctx, coupes[n], n, &etat.courantes, &etat.scores, &etat.echantillons)
+                        else {
+                            continue;
+                        };
+                        etat.appliquer(n, coupes[n], &m, net);
+                        mises.push(m);
                     }
+                    mises
                 }
-                if apres >= avant {
-                    courantes.set(
-                        si,
-                        k,
-                        pose_to_matrix(&resultat.params, &preparee.pivot, preparee.echelle) * courante,
-                    );
+                S2sUpdate::Jacobi => {
+                    // toutes les coupes voient l'état du début du balayage ; elles sont mises à jour ensemble ensuite
+                    let figes = (etat.courantes.clone(), etat.scores.clone(), etat.echantillons.clone());
+                    let calculees: Vec<Option<MiseAJour>> = (0..coupes.len())
+                        .into_par_iter()
+                        .map(|n| recaler_coupe(&ctx, coupes[n], n, &figes.0, &figes.1, &figes.2))
+                        .collect();
+                    let mut mises = Vec::new();
+                    for (n, m) in calculees.into_iter().enumerate() {
+                        if let Some(m) = m {
+                            etat.appliquer(n, coupes[n], &m, net);
+                            mises.push(m);
+                        }
+                    }
+                    mises
                 }
+            };
+            // expérience : MEDX_S2S_TRACE_DIR=<dossier> écrit les poses après chaque balayage (stack, coupe, matrice en ordre colonne)
+            if let Some(dossier) = std::env::var_os("MEDX_S2S_TRACE_DIR") {
+                let numero = statistiques.len();
+                let lignes: Vec<String> = coupes
+                    .iter()
+                    .map(|&(si, k)| {
+                        let m: Vec<String> = etat.courantes.get(si, k).iter().map(|v| format!("{v:?}")).collect();
+                        format!("{si}\t{k}\t{}", m.join("\t"))
+                    })
+                    .collect();
+                let _ = std::fs::create_dir_all(&dossier);
+                let _ = std::fs::write(
+                    std::path::Path::new(&dossier).join(format!("sweep-{numero:02}.tsv")),
+                    lignes.join("\n") + "\n",
+                );
             }
+            let acceptees: Vec<&MiseAJour> = mises.iter().filter(|m| m.pose.is_some()).collect();
+            let moyenne = |f: &dyn Fn(&MiseAJour) -> f64, v: &[&MiseAJour]| {
+                v.iter().map(|m| f(m)).sum::<f64>() / v.len().max(1) as f64
+            };
+            let toutes: Vec<&MiseAJour> = mises.iter().collect();
+            statistiques.push(StatBalayage {
+                sigma_pixels: sigma,
+                net,
+                mises_a_jour: acceptees.len(),
+                concordance_avant: moyenne(&|m| m.avant, &toutes),
+                concordance_apres: moyenne(&|m| m.apres.max(m.avant), &toutes),
+                deplacement_moyen_mm: moyenne(&|m| m.deplacement_mm, &acceptees),
+                deplacement_max_mm: acceptees.iter().map(|m| m.deplacement_mm).fold(0.0, f64::max),
+                duree_s: debut.elapsed().as_secs_f64(),
+            });
         }
         decalage_graine += balayages as u64;
     }
     for (n, &(si, k)) in coupes.iter().enumerate() {
         if let Some(depart) = preparer_coupe(&stacks[si], k, *poses.get(si, k)) {
-            let relatif = courantes.get(si, k) * poses.get(si, k).try_inverse().expect("une pose est inversible");
-            rapports[n].correction_rms_mm = (depart
+            let relatif = etat.courantes.get(si, k) * poses.get(si, k).try_inverse().expect("une pose est inversible");
+            etat.rapports[n].correction_rms_mm = (depart
                 .points
                 .iter()
                 .map(|x| ((relatif * x.push(1.0)).xyz() - x).norm_squared())
@@ -1414,10 +1650,13 @@ pub fn register_slices_s2s(
                 .sqrt();
         }
     }
-    Ok(AlignmentReport {
-        poses: courantes,
-        slices: rapports,
-    })
+    Ok((
+        AlignmentReport {
+            poses: etat.courantes,
+            slices: etat.rapports,
+        },
+        statistiques,
+    ))
 }
 
 #[cfg(test)]
