@@ -4379,6 +4379,7 @@ mod tests {
             volume: volume.clone(),
             poses: vraies.clone(),
             slices: rapports.clone(),
+            excluded: vec![(0, 5), (1, 3)],
         };
         // (a) volume
         let chemin = t.fichier("volume.nii.gz");
@@ -4472,39 +4473,67 @@ mod tests {
             sortie.write_poses(&stacks, &t.fichier("absent/poses.tsv")),
             Err(SvrError::Write { .. })
         ));
-        // (e) indicateur de qualité : une ligne par coupe dans l'ordre, valeurs relues EXACTEMENT
+        // (e) qualité par coupe : en-tête du contrat, une ligne par coupe dans l'ordre, nom de pile, valeurs relues EXACTEMENT, `n/a` pour les valeurs absentes, saut de ligne final
         let tsv_qualite = t.fichier("qualite.tsv");
-        sortie.write_quality(&tsv_qualite).unwrap();
+        sortie.write_quality(&stacks, &tsv_qualite).unwrap();
         let texte = std::fs::read_to_string(&tsv_qualite).unwrap();
+        assert!(texte.ends_with('\n') && !texte.ends_with("\n\n"));
         let lignes: Vec<&str> = texte.lines().collect();
         assert_eq!(
             lignes[0],
-            "stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm"
+            "stack\tslice\tregistered\tscore_before\tscore_after\tn_registrations\tcorrection_rms_mm\texcluded\treason"
         );
         assert_eq!(lignes.len(), rapports.len() + 1);
+        let (mut n_exclues, mut n_hors_masque) = (0, 0);
         for (ligne, r) in lignes[1..].iter().zip(&rapports) {
             let c: Vec<&str> = ligne.split('\t').collect();
+            assert_eq!(c.len(), 9, "{ligne}");
+            assert_eq!(c[0], medoxide_core::bids::nom_de_pile(stacks[r.stack].path()));
             assert_eq!(
                 (
-                    c[0].parse::<usize>().unwrap(),
                     c[1].parse::<usize>().unwrap(),
                     c[2] == "1",
                     c[5].parse::<usize>().unwrap()
                 ),
-                (r.stack, r.slice, r.registered, r.runs)
+                (r.slice, r.registered, r.runs)
             );
-            assert_eq!(
-                (
-                    c[3].parse::<f64>().unwrap(),
-                    c[4].parse::<f64>().unwrap(),
-                    c[6].parse::<f64>().unwrap()
-                ),
-                (r.ncc_first, r.ncc_final, r.correction_rms_mm)
-            );
+            if r.registered {
+                assert_eq!(
+                    (c[3].parse::<f64>().unwrap(), c[4].parse::<f64>().unwrap()),
+                    (r.ncc_first, r.ncc_final)
+                );
+            } else {
+                assert_eq!((c[3], c[4]), ("n/a", "n/a"), "coupe non recalée : pas de score");
+            }
+            assert_eq!(c[6].parse::<f64>().unwrap(), r.correction_rms_mm);
+            // motif : aucun pixel de masque (la coupe ne contribue pas), sinon écartée par la fraction, sinon rien
+            let vide = !stacks[r.stack]
+                .brain_mask()
+                .unwrap()
+                .voxels()
+                .index_axis(ndarray::Axis(2), r.slice)
+                .iter()
+                .any(|&v| v);
+            let attendu = if vide {
+                n_hors_masque += 1;
+                ("1", "hors_masque")
+            } else if sortie.excluded.contains(&(r.stack, r.slice)) {
+                n_exclues += 1;
+                ("1", "faible_concordance")
+            } else {
+                ("0", "n/a")
+            };
+            assert_eq!((c[7], c[8]), attendu, "({},{})", r.stack, r.slice);
         }
+        assert_eq!(n_exclues, 2, "les deux coupes écartées sont écrites");
+        println!("{n_hors_masque} coupes hors masque sur {}", rapports.len());
         assert!(matches!(
-            sortie.write_quality(&t.fichier("absent/q.tsv")),
+            sortie.write_quality(&stacks, &t.fichier("absent/q.tsv")),
             Err(SvrError::Write { .. })
+        ));
+        assert!(matches!(
+            sortie.write_quality(&stacks[..1], &tsv_qualite),
+            Err(SvrError::PoseMismatch)
         ));
         // (d) forme des stacks
         assert!(matches!(
@@ -4527,6 +4556,7 @@ mod tests {
             volume: Array3::from_shape_fn(grid.dims, |(i, j, k)| (i + 3 * j + 7 * k) as f64 * 0.37),
             poses,
             slices: Vec::new(),
+            excluded: Vec::new(),
         };
         let fichiers = crate::sortie::fichiers_bids(&t.fichier("etude/sourcedata"), None, "01", Some("A")).unwrap();
         let generateur = Generateur::new("medx svr recon")
@@ -4562,6 +4592,8 @@ mod tests {
         ] {
             assert!(json.contains(attendu), "{attendu} absent de {json}");
         }
+        let qualite = std::fs::read_to_string(anat.join("sub-01_ses-A_desc-svr_slicequality.tsv")).unwrap();
+        assert!(qualite.starts_with("stack\tslice\tregistered\tscore_before\t"));
         let mouvement = std::fs::read_to_string(anat.join("sub-01_ses-A_desc-svr_motion.tsv")).unwrap();
         assert!(mouvement.starts_with("stack\tslice\tm00\tm10\tm20\tm30\tm01\t"));
         let description =
@@ -7740,6 +7772,13 @@ mod tests {
             .map(|(si, k)| (sans.poses.get(si, k) - avec.poses.get(si, k)).abs().max())
             .fold(0.0_f64, f64::max);
         assert_eq!(ecart_poses, 0.0, "les poses ne doivent pas changer");
+        // la sortie porte la liste des coupes écartées (écrite dans `excluded` du fichier de qualité) : celle de `slices_to_exclude`, vide sans exclusion
+        assert!(sans.excluded.is_empty());
+        assert_eq!(avec.excluded, crate::pipeline::slices_to_exclude(&sans.slices, 0.3));
+        assert!(
+            !avec.excluded.is_empty(),
+            "0,3 des coupes recalées : au moins une coupe"
+        );
         let attendu = crate::pipeline::reconstruct_with_poses(
             &sans.grid,
             &without_excluded_slices(&stacks, &sans.slices, 0.3),

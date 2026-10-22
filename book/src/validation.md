@@ -203,7 +203,7 @@ La portée de capture d'un recalage local parti de l'en-tête est donc d'environ
 
 ## Combien de coupes sont mal recalées ?
 
-`medx svr recon --quality fichier.tsv` écrit, pour chaque coupe, la concordance de ses profils d'intersection avant et après le recalage (`score_avant`, `score_apres`, plus grand = mieux), le nombre de balayages où elle a été recalée et le déplacement appliqué. Peut-on s'en servir pour **compter** les coupes mal recalées (erreur de pose > 1,5 mm) sans vérité terrain ? Critères fixés avant de regarder les résultats (`scripts/analyse_qualite_coupes.py`) : (1) AUC ≥ 0,8 pour détecter une coupe mal recalée ; (2) nombre prédit à ±25 % (ou ±3 coupes) du nombre vrai **sur chaque jeu**, avec un seuil appris sur les autres jeux (validation « un jeu laissé de côté »).
+`medx svr recon --quality fichier.tsv` écrit, pour chaque coupe, la concordance de ses profils d'intersection avant et après le recalage (`score_before`, `score_after`, plus grand = mieux), le nombre de balayages où elle a été recalée et le déplacement appliqué. Peut-on s'en servir pour **compter** les coupes mal recalées (erreur de pose > 1,5 mm) sans vérité terrain ? Critères fixés avant de regarder les résultats (`scripts/analyse_qualite_coupes.py`) : (1) AUC ≥ 0,8 pour détecter une coupe mal recalée ; (2) nombre prédit à ±25 % (ou ±3 coupes) du nombre vrai **sur chaque jeu**, avec un seuil appris sur les autres jeux (validation « un jeu laissé de côté »).
 
 Mesuré sur 9 jeux simulés avec vérité connue (72 à 74 coupes chacun ; part de coupes mal recalées de 7 % à 100 %, 4 jeux sur 9 à 100 % dès ±6 mm) :
 

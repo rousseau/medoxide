@@ -188,6 +188,8 @@ pub struct ReconstructionOutput {
     /// Rapport du dernier recalage de chaque coupe, dans l'ordre des stacks puis des coupes : `ncc_first` et `ncc_final` sont, avec `s2s`, la concordance aux intersections avant et après le recalage, avec `s2v` la corrélation avec la
     /// référence ; `registered` vaut `false` pour une coupe non recalée. Sert d'indicateur de qualité (voir [`ReconstructionOutput::write_quality`]).
     pub slices: Vec<SliceReport>,
+    /// Coupes `(stack, coupe)` retirées de la reconstruction pour leur faible concordance (`s2s_exclude_fraction`, voir `slices_to_exclude`), triées ; vide si l'option est désactivée ou si le mouvement est estimé par coupe-volume.
+    pub excluded: Vec<(usize, usize)>,
 }
 
 impl ReconstructionOutput {
@@ -211,27 +213,68 @@ impl ReconstructionOutput {
             })
     }
 
-    /// Écrit un indicateur de qualité par coupe : une ligne `stack \t coupe \t recalée (0 ou 1) \t score_avant \t score_après \t nb_recalages \t correction_rms_mm`, dans l'ordre des stacks puis des coupes. Le score est, avec `s2s`, la
-    /// concordance aux intersections (corrélation des profils des coupes qui se croisent, de −1 à 1) ; avec `s2v`, la corrélation avec la référence. Une coupe non recalée a des scores nuls. La première ligne est l'en-tête.
+    /// Écrit la qualité de chaque coupe : un fichier TSV, une ligne par coupe dans l'ordre des stacks puis des coupes, terminé par un saut de ligne.
+    /// En-tête : `stack slice registered score_before score_after n_registrations correction_rms_mm excluded reason`.
+    ///
+    /// - `stack` : nom du fichier du stack sans extension ([`medoxide_core::bids::nom_de_pile`]) ; `slice` : indice de la coupe.
+    /// - `registered` : 1 si la coupe a été recalée, 0 sinon (moins de [`crate::align::MIN_MASK_PIXELS`] pixels de masque : elle garde sa pose). Une coupe non recalée n'a pas de score : `n/a`.
+    /// - `score_before`, `score_after` : avec `s2s`, concordance aux intersections (corrélation des profils des coupes qui se croisent, de −1 à 1) avant et après le recalage ; avec `s2v`, corrélation avec la référence.
+    /// - `n_registrations` : nombre de recalages ; `correction_rms_mm` : déplacement quadratique moyen des pixels de masque entre la pose de départ et la pose finale (mm).
+    /// - `excluded` : 1 si la coupe est retirée de la reconstruction, avec son motif dans `reason` : `faible_concordance` (écartée par `s2s_exclude_fraction`) ou `hors_masque` (aucun pixel de masque : elle ne contribue pas) ; sinon `excluded` vaut 0 et `reason` `n/a`.
+    ///
+    /// Une valeur absente ou non finie s'écrit `n/a`.
     ///
     /// # Erreurs
-    /// [`SvrError::Write`] si le fichier ne peut pas être écrit.
-    pub fn write_quality(&self, path: &Path) -> Result<(), SvrError> {
-        let mut lignes =
-            vec!["stack\tcoupe\trecalee\tscore_avant\tscore_apres\tnb_recalages\tcorrection_rms_mm".to_string()];
+    /// [`SvrError::PoseMismatch`] si `stacks` n'a pas les stacks du rapport ; [`SvrError::DuplicateStackName`] si deux stacks ont le même nom ; [`SvrError::Write`] si le fichier ne peut pas être écrit.
+    pub fn write_quality(&self, stacks: &[Stack], path: &Path) -> Result<(), SvrError> {
+        if self
+            .slices
+            .iter()
+            .any(|r| stacks.get(r.stack).is_none_or(|s| r.slice >= s.dim().2))
+        {
+            return Err(SvrError::PoseMismatch);
+        }
+        let noms = stack_names(stacks)?;
+        // valeur absente ou non finie : n/a ; `{:?}` donne la représentation la plus courte qui se relit exactement
+        let reel = |v: f64| {
+            if v.is_finite() {
+                format!("{v:?}")
+            } else {
+                "n/a".to_string()
+            }
+        };
+        let mut lignes = vec![
+            "stack\tslice\tregistered\tscore_before\tscore_after\tn_registrations\tcorrection_rms_mm\texcluded\treason"
+                .to_string(),
+        ];
         for r in &self.slices {
+            let (score_avant, score_apres) = if r.registered {
+                (reel(r.ncc_first), reel(r.ncc_final))
+            } else {
+                ("n/a".to_string(), "n/a".to_string())
+            };
+            let sans_masque = stacks[r.stack]
+                .brain_mask()
+                .is_some_and(|m| !m.voxels().index_axis(ndarray::Axis(2), r.slice).iter().any(|&v| v));
+            let motif = if sans_masque {
+                Some("hors_masque")
+            } else if self.excluded.binary_search(&(r.stack, r.slice)).is_ok() {
+                Some("faible_concordance")
+            } else {
+                None
+            };
             lignes.push(format!(
-                "{}\t{}\t{}\t{:?}\t{:?}\t{}\t{:?}",
-                r.stack,
+                "{}\t{}\t{}\t{score_avant}\t{score_apres}\t{}\t{}\t{}\t{}",
+                noms[r.stack],
                 r.slice,
                 u8::from(r.registered),
-                r.ncc_first,
-                r.ncc_final,
                 r.runs,
-                r.correction_rms_mm
+                reel(r.correction_rms_mm),
+                u8::from(motif.is_some()),
+                motif.unwrap_or("n/a")
             ));
         }
-        std::fs::write(path, lignes.join("\n")).map_err(|e| SvrError::Write {
+        std::fs::write(path, lignes.join("\n") + "\n").map_err(|e| SvrError::Write {
             path: path.to_path_buf(),
             message: e.to_string(),
         })
@@ -316,11 +359,13 @@ pub fn reconstruct(
                     &poses,
                     config,
                 )?;
+                let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
                 return Ok(ReconstructionOutput {
                     grid,
                     volume,
                     poses,
                     slices,
+                    excluded,
                 });
             }
             // alternances : champ de biais estimé aux poses courantes (celles de l'en-tête au départ), stacks corrigés, recalage depuis les poses courantes ; puis une dernière estimation aux poses finales pour la reconstruction
@@ -347,11 +392,13 @@ pub fn reconstruct(
                 &poses,
                 config,
             )?;
+            let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
             Ok(ReconstructionOutput {
                 grid,
                 volume,
                 poses,
                 slices,
+                excluded,
             })
         }
         Motion::SliceToVolume => {
@@ -370,6 +417,7 @@ pub fn reconstruct(
                 volume,
                 poses: result.poses,
                 slices,
+                excluded: Vec::new(),
             })
         }
     }

@@ -342,7 +342,7 @@ fn svr_recon(
                     sortie_reconstruction.write_poses(&stacks, p)?;
                 }
                 if let Some(q) = qualite {
-                    sortie_reconstruction.write_quality(q)?;
+                    sortie_reconstruction.write_quality(&stacks, q)?;
                 }
                 Ok(volume.clone())
             }

@@ -1569,6 +1569,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (concept)** : `pub(crate)` rend une fonction visible dans la crate seulement (`stack_names`), utile quand un test de la crate la vérifie sans l'ajouter à l'API publique.
 - **Où** : `crates/medoxide-svr/src/pipeline.rs` (`write_poses`, `stack_names`), `sortie.rs` (`convention_du_mouvement`), `book/src/svr.md`.
 
+## 2026-10-22 — Dire pourquoi une coupe est écartée : un champ de plus dans le résultat, une valeur absente écrite `n/a`
+
+- **Quoi (concept)** : la liste des coupes écartées par `s2s_exclude_fraction` n'était calculée que pour vider le masque, puis perdue. Pour l'écrire dans le fichier de qualité, `ReconstructionOutput` la garde (`excluded: Vec<(usize, usize)>`, triée, donc cherchée par `binary_search`) : on **conserve** un résultat intermédiaire au lieu de le recalculer à l'écriture. Le motif `hors_masque` se déduit autrement : des masques des stacks (aucun pixel dans la coupe : elle ne contribue pas à la reconstruction). `Option::is_none_or` (« absent, ou la condition tient ») exprime la vérification de forme sans `match`.
+- **Quoi (méthode)** : « absent » n'est pas « zéro » : une coupe non recalée avait des scores écrits `0`, indiscernables d'une vraie concordance nulle ; elle porte maintenant `n/a`, la convention BIDS. Le test relit chaque ligne et recalcule le motif attendu à partir des masques, indépendamment du code testé (2 coupes sur 36 sont réellement hors masque dans le jeu de test, donc le cas est exercé).
+- **Où** : `crates/medoxide-svr/src/pipeline.rs` (`write_quality`, `excluded`), `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

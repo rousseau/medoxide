@@ -131,7 +131,20 @@ Les nombres sont écrits avec assez de chiffres pour être relus exactement. Ava
 
 ## Fichier de qualité
 
-Avec `--quality`, un fichier texte est écrit : **une ligne par coupe**, avec l'en-tête `stack`, `coupe`, `recalee` (1 si la coupe a été recalée), `score_avant`, `score_apres` (avec `s2s`, concordance des profils d'intersection avant et après le dernier balayage ; avec `s2v`, corrélation avec la référence ; de −1 à 1, plus grand = mieux), `nb_recalages` et `correction_rms_mm` (déplacement quadratique moyen des pixels de masque entre la pose de départ et la pose finale). Une coupe non recalée a des scores nuls. Ces indicateurs, étudiés seulement avec `s2s`, permettent de reconnaître le **régime** (peu ou presque toutes les coupes mal recalées), pas de compter les coupes mal recalées de façon fiable ([Validation](validation.md#combien-de-coupes-sont-mal-recalées)).
+Avec `--quality` (ou `_desc-svr_slicequality.tsv` en BIDS), un fichier TSV est écrit : une ligne d'en-tête, puis **une ligne par coupe**, terminé par un saut de ligne. En-tête : `stack slice registered score_before score_after n_registrations correction_rms_mm excluded reason`.
+
+| Colonne | Sens |
+|---|---|
+| `stack` | nom du fichier du stack sans extension (comme dans le fichier de poses) |
+| `slice` | indice de la coupe dans son stack (0 = première) |
+| `registered` | 1 si la coupe a été recalée ; 0 si elle a moins de 500 pixels de masque (elle garde sa pose) |
+| `score_before`, `score_after` | avec `s2s`, concordance des profils d'intersection avant et après le dernier balayage ; avec `s2v`, corrélation avec la référence ; de −1 à 1, plus grand = mieux. `n/a` pour une coupe non recalée |
+| `n_registrations` | nombre de recalages |
+| `correction_rms_mm` | déplacement quadratique moyen des pixels de masque entre la pose de départ et la pose finale |
+| `excluded` | 1 si la coupe est retirée de la reconstruction, sinon 0 |
+| `reason` | motif d'exclusion, `n/a` sinon : `faible_concordance` (écartée par `--s2s-exclude-fraction`) ou `hors_masque` (aucun pixel de masque : elle ne contribue pas) |
+
+Une valeur absente s'écrit `n/a`. Ces indicateurs, étudiés seulement avec `s2s`, permettent de reconnaître le **régime** (peu ou presque toutes les coupes mal recalées), pas de compter les coupes mal recalées de façon fiable ([Validation](validation.md#combien-de-coupes-sont-mal-recalées)). Avant cette version, l'en-tête était `stack coupe recalee score_avant …`, `stack` était un indice et une coupe non recalée avait des scores nuls.
 
 ## Décrire des stacks : `medx svr info`
 

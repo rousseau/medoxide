@@ -197,7 +197,7 @@ pub fn ecrire(
     bids::creer_dossier_parent(&fichiers.volume)?;
     sortie.write_volume(&fichiers.volume)?;
     sortie.write_poses(stacks, &fichiers.mouvement)?;
-    sortie.write_quality(&fichiers.qualite)?;
+    sortie.write_quality(stacks, &fichiers.qualite)?;
     bids::ecrire_texte(
         &fichiers.description,
         &description_du_volume(stacks, config, generateur).en_texte(),

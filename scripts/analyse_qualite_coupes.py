@@ -36,11 +36,14 @@ for f in sorted(glob.glob(os.path.join(args.dossier, f"*_{args.methode}.erreurs.
     q = lire(f.replace(".erreurs.tsv", ".qualite.tsv"))
     erreurs = {(int(r["stack"]), int(r["coupe"])): float(r["erreur_mm"]) for r in lire(f)}
     lignes = []
+    noms = {}  # nouveau format : le stack est un nom, qui prend l'indice de son ordre d'apparition
     for r in q:
-        cle = (int(r["stack"]), int(r["coupe"]))
-        if r["recalee"] == "1" and cle in erreurs:
-            avant, apres = float(r["score_avant"]), float(r["score_apres"])
-            lignes.append((erreurs[cle], apres, avant, apres - avant, float(r["correction_rms_mm"]), int(r["nb_recalages"])))
+        # anciens en-têtes (recalee, coupe, nb_recalages) et en-têtes du contrat (registered, slice, n_registrations)
+        s = int(r["stack"]) if r["stack"].isdigit() else noms.setdefault(r["stack"], len(noms))
+        cle = (s, int(r.get("slice", r.get("coupe"))))
+        if r.get("registered", r.get("recalee")) == "1" and cle in erreurs:
+            avant, apres = float(r["score_before" if "score_before" in r else "score_avant"]), float(r["score_after" if "score_after" in r else "score_apres"])
+            lignes.append((erreurs[cle], apres, avant, apres - avant, float(r["correction_rms_mm"]), int(r.get("n_registrations", r.get("nb_recalages")))))
     jeux[nom] = np.array(lignes)
 INDICATEURS = {"score_apres": (1, +1), "score_avant": (2, +1), "gain": (3, +1), "correction_rms_mm": (4, -1), "nb_recalages": (5, -1)}
 # signe : +1 = plus grand veut dire mieux recalé ; -1 = plus grand veut dire plus suspect
