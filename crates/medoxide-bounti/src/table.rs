@@ -128,6 +128,24 @@ mod tests {
         assert_eq!(lignes[1], "0\tBackground\tBG\t#000000");
     }
 
+    /// Le lecteur de `medoxide-core` (celui de guioxide) relit la table écrite par `dseg_tsv()` : mêmes indices, noms, abréviations et couleurs.
+    #[test]
+    fn the_core_reader_reads_back_the_written_table() {
+        let chemin = std::env::temp_dir().join(format!("medoxide_dseg_{}.tsv", std::process::id()));
+        std::fs::write(&chemin, dseg_tsv()).unwrap();
+        let lu = medoxide_core::sorties::lire_dseg_tsv(&chemin).unwrap();
+        std::fs::remove_file(&chemin).unwrap();
+        assert_eq!(lu.len(), ETIQUETTES.len());
+        for (l, e) in lu.iter().zip(&ETIQUETTES) {
+            assert_eq!(
+                (l.index, l.name.as_str(), l.abbreviation.as_deref()),
+                (u32::from(e.index), e.name, Some(e.abbreviation))
+            );
+            let rvb: [u8; 3] = std::array::from_fn(|k| u8::from_str_radix(&e.color[1 + 2 * k..3 + 2 * k], 16).unwrap());
+            assert_eq!(l.color, Some(rvb), "{}", e.name);
+        }
+    }
+
     /// Les 20 couleurs de la table sont celles du fichier de l'atlas (RGB en décimal, recopiées du fichier brut).
     #[test]
     fn the_colors_come_from_the_atlas_file() {

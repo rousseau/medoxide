@@ -4,10 +4,11 @@
 //! dépend d'aucun module (ni de Burn, ni d'un modèle) : un module peut lire un
 //! volume sans en tirer les dépendances d'un autre.
 //!
-//! Les chemins et fichiers communs aux sorties BIDS des commandes `medx` sont dans [`bids`], l'écriture de JSON dans [`json`].
+//! Les chemins et fichiers communs aux sorties BIDS des commandes `medx` sont dans [`bids`], l'écriture de JSON dans [`json`], la lecture des tableaux de sortie (qualité et mouvement par coupe, table des étiquettes) dans [`sorties`].
 
 pub mod bids;
 pub mod json;
+pub mod sorties;
 
 use std::path::Path;
 

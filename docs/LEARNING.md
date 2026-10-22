@@ -1581,6 +1581,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode, test)** : la valeur attendue vient de nibabel (`img.affine` d'un `qform` seul, avec ses champs `quatern_b/c/d` recopiés dans l'en-tête de test), pas d'un calcul refait en Rust avec le même code : un test qui recalcule avec le code testé ne prouve rien. Les écarts de l'ordre de 1e-6 viennent du stockage du quaternion en `f32`.
 - **Où** : `crates/medoxide-svr/src/lib.rs` (`Stack::read`, `BrainMask::read`), `crates/medoxide-fetalbet/src/lib.rs` (test).
 
+## 2026-10-22 — Des lecteurs pour un autre programme : une API sans Burn, des erreurs qui nomment la ligne
+
+- **Quoi (concept)** : `medoxide-core::sorties` lit ce que `medx` écrit (qualité et mouvement par coupe, table des étiquettes) pour que guioxide n'ait pas à le deviner. Trois choix : (1) les colonnes sont repérées **par leur nom**, pas par leur position (l'écrivain peut ajouter une colonne sans casser le lecteur) ; (2) une valeur `n/a` ou vide est `None` (`Option`), pas zéro ; (3) une erreur porte le fichier et le numéro de ligne (`ErreurTableau::Format`). Une `struct Tableau<'a>` qui emprunte le chemin (`&'a Path`) montre un paramètre de **durée de vie** dans une structure : le tableau ne peut pas survivre au chemin qu'il cite.
+- **Quoi (méthode)** : le calcul du mouvement par coupe (`‖M·c − c‖`, angle de rotation) est placé du côté de medoxide, qui sait ce que veut dire `M`. Les tests le fixent par des cas qu'on calcule à la main (translation (3, 4, 0) donne 5 mm ; rotation de 90° autour de z donne √202 mm pour le centre (10, 1, k) ; une rotation autour du centre même donne 0 mm et 90°), et par un aller-retour avec les écrivains (`write_poses` puis `lire_mouvement`, valeur par valeur ; `dseg_tsv()` puis `lire_dseg_tsv`).
+- **Où** : `crates/medoxide-core/src/sorties.rs`.
+
 ---
 
 *(à compléter à la prochaine étape)*

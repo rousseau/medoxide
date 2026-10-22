@@ -4526,6 +4526,32 @@ mod tests {
             assert_eq!((c[7], c[8]), attendu, "({},{})", r.stack, r.slice);
         }
         assert_eq!(n_exclues, 2, "les deux coupes écartées sont écrites");
+        // relus par les lecteurs de medoxide-core (ceux de guioxide) : mêmes valeurs, mêmes noms de pile
+        let relue = medoxide_core::sorties::lire_qualite(&tsv_qualite).unwrap();
+        assert_eq!(relue.len(), rapports.len());
+        for (q, r) in relue.iter().zip(&rapports) {
+            assert_eq!(
+                (q.slice, q.registered, q.n_registrations, q.correction_rms_mm),
+                (r.slice, r.registered, Some(r.runs as u32), Some(r.correction_rms_mm))
+            );
+            assert_eq!(q.score_after, r.registered.then_some(r.ncc_final));
+            assert_eq!(q.excluded, q.reason.is_some());
+        }
+        assert_eq!(relue.iter().filter(|q| q.excluded).count(), n_exclues + n_hors_masque);
+        let mouvement = medoxide_core::sorties::lire_mouvement(&tsv).unwrap();
+        assert_eq!(mouvement.len(), stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        for m in &mouvement {
+            let si = stacks
+                .iter()
+                .position(|s| medoxide_core::bids::nom_de_pile(s.path()) == m.stack)
+                .unwrap();
+            let attendu = vraies.get(si, m.slice);
+            for l in 0..4 {
+                for c in 0..4 {
+                    assert_eq!(m.matrice[l][c], attendu[(l, c)], "({si},{}) m{l}{c}", m.slice);
+                }
+            }
+        }
         println!("{n_hors_masque} coupes hors masque sur {}", rapports.len());
         assert!(matches!(
             sortie.write_quality(&stacks, &t.fichier("absent/q.tsv")),

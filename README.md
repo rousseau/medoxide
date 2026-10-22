@@ -77,7 +77,7 @@ mdbook serve book --open
 
 ```
 crates/
-  medoxide-core/       briques communes (lecture de volumes NIfTI), sans dépendance vers un module
+  medoxide-core/       briques communes (lecture de volumes NIfTI, chemins BIDS, lecture des tableaux de sortie), sans dépendance vers un module
   medoxide-fetalbet/   bibliothèque : portage de Fetal-BET
   medoxide-bounti/     bibliothèque : portage de BOUNTI (segmentation en 19 tissus)
   medoxide-svr/        bibliothèque : reconstruction coupe-vers-volume (en développement)
