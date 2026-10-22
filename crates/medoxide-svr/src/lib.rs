@@ -36,7 +36,7 @@ pub mod sortie;
 
 use std::path::{Path, PathBuf};
 
-use medoxide_core::{read_volume, volume_info, CoreError};
+use medoxide_core::{affine_nifti, read_volume, volume_info, CoreError};
 use nalgebra::{Matrix3, Matrix4, Vector3, Vector4};
 use ndarray::{Array2, Array3, ArrayView2, Axis};
 
@@ -52,8 +52,6 @@ pub enum SvrError {
     /// Lecture NIfTI impossible, ou fichier qui n'est pas un volume 3D ; contient le fichier fautif
     /// et l'erreur d'origine.
     Read { path: PathBuf, source: CoreError },
-    /// L'en-tête n'a pas de `sform` (`sform_code == 0`) : pas d'affine exploitable.
-    NoSform(PathBuf),
     /// Une colonne de l'affine est nulle ou non finie : géométrie dégénérée.
     DegenerateAffine(PathBuf),
     /// Deux axes ne sont pas orthogonaux ; contient le plus grand cosinus mesuré.
@@ -102,7 +100,6 @@ impl std::fmt::Display for SvrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SvrError::Read { path, source } => write!(f, "{} : {source}", path.display()),
-            SvrError::NoSform(p) => write!(f, "{} : pas de sform (affine absente)", p.display()),
             SvrError::DegenerateAffine(p) => {
                 write!(f, "{} : affine dégénérée (colonne nulle ou non finie)", p.display())
             }
@@ -181,7 +178,7 @@ impl BrainMask {
     ///
     /// # Erreurs
     /// [`SvrError::Read`] (illisible, non 3D) ; [`SvrError::MaskGridMismatch`] (dimensions ou affine
-    /// différentes de celles du stack, ou `sform` absent) ; [`SvrError::EmptyMask`].
+    /// différentes de celles du stack) ; [`SvrError::EmptyMask`].
     pub fn read(path: &Path, stack: &Stack) -> Result<BrainMask, SvrError> {
         let lecture = |source| SvrError::Read {
             path: path.to_path_buf(),
@@ -201,10 +198,11 @@ impl BrainMask {
                 [nx, ny, nz]
             )));
         }
-        let lignes = info.affine.ok_or_else(|| incompatible("pas de sform".to_string()))?;
+        // même règle que pour le stack (sform, sinon qform, sinon pixdim) : un masque écrit avec l'en-tête de sa pile a la même affine
+        let affine = affine_nifti(path).map_err(lecture)?.matrice;
         let ecart = (0..4)
             .flat_map(|r| (0..4).map(move |c| (r, c)))
-            .map(|(r, c)| (f64::from(lignes[r][c]) - stack.affine()[(r, c)]).abs())
+            .map(|(r, c)| (affine[r][c] - stack.affine()[(r, c)]).abs())
             .fold(0.0_f64, f64::max);
         if ecart > MASK_AFFINE_TOLERANCE_MM {
             return Err(incompatible(format!(
@@ -891,12 +889,12 @@ impl Stack {
     /// Lit un stack NIfTI (`.nii` ou `.nii.gz`) et valide sa géométrie.
     ///
     /// Les voxels sont lus en `f32`, axes `[x, y, z]`, facteur d'échelle de l'en-tête appliqué.
-    /// L'affine est celle du `sform`, convertie en `f64` sans perte. L'espacement est la norme
+    /// L'affine est celle de [`medoxide_core::affine_nifti`] : le `sform`, sinon le `qform`, sinon la diagonale des `pixdim`. L'espacement est la norme
     /// de chaque colonne de l'affine (la géométrie réelle) ; il doit coïncider avec `pixdim`
     /// à 1e-3 mm près. Un déterminant négatif est accepté.
     ///
     /// # Erreurs
-    /// [`SvrError::Read`] (fichier illisible, non 3D) ; [`SvrError::NoSform`] ;
+    /// [`SvrError::Read`] (fichier illisible, non 3D) ;
     /// [`SvrError::DegenerateAffine`] ; [`SvrError::ShearedAffine`] ;
     /// [`SvrError::InconsistentSpacing`].
     pub fn read(path: &Path) -> Result<Stack, SvrError> {
@@ -906,9 +904,9 @@ impl Stack {
             source,
         };
         let info = volume_info(path).map_err(lecture)?;
-        let lignes = info.affine.ok_or_else(|| SvrError::NoSform(path.to_path_buf()))?;
-        // `f64::from` : conversion exacte du `f32` de l'en-tête.
-        let affine = Matrix4::from_fn(|r, c| f64::from(lignes[r][c]));
+        // `sform`, sinon `qform`, sinon diagonale des `pixdim` : la règle de nibabel, la même que celle de guioxide
+        let lignes = affine_nifti(path).map_err(lecture)?.matrice;
+        let affine = Matrix4::from_fn(|r, c| lignes[r][c]);
 
         // Partie linéaire 3x3 : colonne `a` = déplacement monde (mm) d'un pas d'indice sur l'axe `a`.
         let lineaire: Matrix3<f64> = affine.fixed_view::<3, 3>(0, 0).into_owned();
@@ -1273,12 +1271,67 @@ mod tests {
         assert_eq!(s.spacing(), [1.0, 2.0, 3.0]);
     }
 
+    /// Sans `sform` ni `qform`, l'affine est la diagonale des `pixdim`, volume centré sur l'origine (règle de nibabel) : la pile n'est plus refusée.
     #[test]
-    fn rejects_a_missing_sform() {
+    fn a_stack_without_sform_or_qform_is_centred_on_the_origin() {
         let t = Temp::new("sans_sform");
         let f = t.fichier("s.nii.gz");
-        ecrire_3d(&f, &en_tete(DIAG, [1.0, 2.0, 3.0], 0));
-        assert!(matches!(Stack::read(&f), Err(SvrError::NoSform(_))));
+        let mut h = en_tete(DIAG, [1.0, 2.0, 3.0], 0);
+        h.qform_code = 0;
+        ecrire_3d(&f, &h);
+        let s = Stack::read(&f).unwrap();
+        assert_eq!(s.spacing(), [1.0, 2.0, 3.0]);
+        // dimensions (4, 3, 2) : origine −(n − 1)/2 × pas sur chaque axe
+        assert_eq!(
+            [s.affine()[(0, 3)], s.affine()[(1, 3)], s.affine()[(2, 3)]],
+            [-1.5, -2.0, -1.5]
+        );
+    }
+
+    /// Pile à `qform` seul (`sform_code = 0`) : lue avec l'affine de nibabel (`img.affine`), et son masque, qui porte la même géométrie, est accepté.
+    /// Référence : nibabel 5.3.2, `set_qform(A, code=1)` avec `A` = rotation (x, y, z) de (20°, −35°, 50°) fois les pas (1,2 ; 1,2 ; 3,5) et l'origine (−20,5 ; 10,25 ; 5), `set_sform(None, code=0)`.
+    #[test]
+    #[allow(clippy::excessive_precision)]
+    fn a_qform_only_stack_is_read_with_the_nibabel_affine() {
+        let t = Temp::new("qform_seul");
+        let mut h = NiftiHeader::default();
+        h.sform_code = 0;
+        h.qform_code = 1;
+        h.pixdim = [1.0, 1.2, 1.2, 3.5, 1.0, 1.0, 1.0, 1.0];
+        (h.quatern_b, h.quatern_c, h.quatern_d) = (0.2752478, -0.19840132, 0.44425952);
+        (h.quatern_x, h.quatern_y, h.quatern_z) = (-20.5, 10.25, 5.0);
+        let (pile, masque) = (t.fichier("pile.nii.gz"), t.fichier("masque.nii.gz"));
+        ecrire_3d(&pile, &h);
+        WriterOptions::new(&masque)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::from_elem((4, 3, 2), 1.0))
+            .unwrap();
+        let attendu = [
+            [0.6318489669656095, -1.0151340083408342, -0.2955771021439306, -20.5],
+            [0.753008261335778, 0.5444931021202847, -2.2145662255400844, 10.25],
+            [0.6882917664373746, 0.3361998234595322, 2.6941289147673206, 5.0],
+        ];
+        let mut s = Stack::read(&pile).unwrap();
+        for (l, ligne) in attendu.iter().enumerate() {
+            for (c, v) in ligne.iter().enumerate() {
+                // le qform est stocké en f32 : écart de l'ordre de 1e-6
+                assert!(
+                    (s.affine()[(l, c)] - v).abs() < 1e-5,
+                    "({l},{c}) : {} contre {v}",
+                    s.affine()[(l, c)]
+                );
+            }
+        }
+        assert!(
+            s.spacing()
+                .iter()
+                .zip([1.2, 1.2, 3.5])
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "{:?}",
+            s.spacing()
+        );
+        s.set_brain_mask(&masque).unwrap();
+        assert!(s.brain_mask().is_some());
     }
 
     #[test]

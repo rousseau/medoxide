@@ -529,6 +529,37 @@ pub fn taches_bids(
 mod tests {
     use super::*;
 
+    /// Pile à `qform` seul (`sform_code = 0`) : `segment` ne lit de l'en-tête que les pas des voxels (`pixdim`), et le masque écrit reprend l'en-tête de la pile (`write_mask`) : même `qform`, donc, par la règle de `affine_nifti` (sform, sinon qform, sinon pixdim), la même affine que la pile. Le SVR lit ensuite pile et masque avec cette règle.
+    #[test]
+    #[allow(clippy::field_reassign_with_default, clippy::excessive_precision)]
+    fn a_qform_only_stack_gives_a_mask_with_the_same_affine() {
+        let dossier = std::env::temp_dir().join(format!("medoxide_fetalbet_qform_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).unwrap();
+        let mut h = nifti::NiftiHeader::default();
+        h.sform_code = 0;
+        h.qform_code = 1;
+        h.pixdim = [1.0, 1.2, 1.2, 3.5, 1.0, 1.0, 1.0, 1.0];
+        (h.quatern_b, h.quatern_c, h.quatern_d) = (0.2752478, -0.19840132, 0.44425952);
+        (h.quatern_x, h.quatern_y, h.quatern_z) = (-20.5, 10.25, 5.0);
+        let (pile, masque) = (dossier.join("pile.nii.gz"), dossier.join("masque.nii.gz"));
+        nifti::writer::WriterOptions::new(&pile)
+            .reference_header(&h)
+            .write_nifti(&Array3::<f32>::from_elem((6, 5, 4), 1.0))
+            .unwrap();
+        assert_eq!(volume_info(&pile).unwrap().affine, None, "pas de sform");
+        write_mask(&masque, &Array3::<u8>::ones((6, 5, 4)), &pile).unwrap();
+        let (a, b) = (
+            medoxide_core::affine_nifti(&pile).unwrap(),
+            medoxide_core::affine_nifti(&masque).unwrap(),
+        );
+        assert_eq!(a.source, medoxide_core::SourceAffine::Qform);
+        assert_eq!(a, b);
+        // affine de nibabel (`img.affine`) pour ce `qform`, première ligne : voir le test du SVR
+        assert!((a.matrice[0][0] - 0.6318489669656095).abs() < 1e-5 && (a.matrice[0][3] + 20.5).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
+
     /// Mode BIDS : un masque par pile `T2w`, nommé d'après les entités de la pile (le nom déjà en usage), dans `derivatives/medx-fetalbet` de l'étude ; sous `sourcedata/`, à côté d'elle ; les autres fichiers sont ignorés.
     #[test]
     fn the_bids_tasks_name_one_mask_per_stack() {

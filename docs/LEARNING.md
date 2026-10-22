@@ -1575,6 +1575,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : « absent » n'est pas « zéro » : une coupe non recalée avait des scores écrits `0`, indiscernables d'une vraie concordance nulle ; elle porte maintenant `n/a`, la convention BIDS. Le test relit chaque ligne et recalcule le motif attendu à partir des masques, indépendamment du code testé (2 coupes sur 36 sont réellement hors masque dans le jeu de test, donc le cas est exercé).
 - **Où** : `crates/medoxide-svr/src/pipeline.rs` (`write_quality`, `excluded`), `book/src/svr.md`.
 
+## 2026-10-22 — Une seule règle d'affine pour tous les lecteurs, et un test contre la référence
+
+- **Quoi (méthode)** : l'issue demandait de remplacer `volume_info` (qui ne lit que le `sform`) par `affine_nifti` dans le SVR et dans fetalbet. En relisant le code, fetalbet n'utilise que les pas de voxel (`pixdim`) et recopie l'en-tête de la pile dans le masque : il n'avait rien à changer, seulement un test qui le prouve (une pile à `qform` seul donne un masque de même affine). Le SVR, lui, refusait ces piles (`NoSform`) ; la variante d'erreur, devenue inatteignable, est supprimée plutôt que laissée comme une promesse fausse. L'affine du masque suit la même règle que celle de la pile : sans cela, un masque à `qform` seul aurait été refusé pour « grille différente ».
+- **Quoi (méthode, test)** : la valeur attendue vient de nibabel (`img.affine` d'un `qform` seul, avec ses champs `quatern_b/c/d` recopiés dans l'en-tête de test), pas d'un calcul refait en Rust avec le même code : un test qui recalcule avec le code testé ne prouve rien. Les écarts de l'ordre de 1e-6 viennent du stockage du quaternion en `f32`.
+- **Où** : `crates/medoxide-svr/src/lib.rs` (`Stack::read`, `BrainMask::read`), `crates/medoxide-fetalbet/src/lib.rs` (test).
+
 ---
 
 *(à compléter à la prochaine étape)*

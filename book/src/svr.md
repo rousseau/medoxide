@@ -82,6 +82,8 @@ sans nommer un fichier. Les piles sont les `*_T2w.nii.gz` de `sub-X[/ses-Y]/anat
 et `<étude>/derivatives/medx-svr/dataset_description.json` (`DatasetType: derivative`, `GeneratedBy` : nom, version,
 commit, ligne de commande). `--output`, `--mask`, `--poses` et `--quality` servent hors BIDS et sont refusés avec `--bids`.
 
+L'affine d'un stack (et de son masque) suit la règle de nibabel et de guioxide : le `sform` s'il est défini, sinon le `qform`, sinon la diagonale des `pixdim` (volume centré sur l'origine). Un stack qui n'a qu'un `qform` est donc lu, et non refusé.
+
 ## Choisir l'estimation du mouvement
 
 | `--motion` | Principe | Durée | À retenir |
@@ -191,5 +193,4 @@ La commande se termine par le code 0 si tout va bien, 1 en cas d'échec (message
 | `au moins deux stacks sont nécessaires pour estimer le mouvement` | Un seul stack : rien à croiser. |
 | `… : masque incompatible avec le stack (…)` | Le masque n'est pas sur la grille du stack (dimensions ou affine). |
 | `… : masque vide` | Le masque ne contient aucun voxel. |
-| `… : pas de sform (affine absente)` | L'en-tête NIfTI n'a pas d'affine exploitable. |
 | `… : écriture impossible : …` | Dossier de sortie absent ou non inscriptible. |
