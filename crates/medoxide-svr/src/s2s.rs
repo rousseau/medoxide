@@ -949,29 +949,35 @@ pub(crate) fn grille_1d(demi: f64, pas: f64) -> Vec<f64> {
 
 /// Recherche exhaustive des 6 paramètres `[rotations (mm équivalents), translations (mm)]` maximisant `evaluer`, sur la grille `grille` (de [`grille_1d`]) : d'abord la meilleure translation (rotation nulle), puis la meilleure rotation autour de CETTE translation ;
 /// `zero` est la valeur de `evaluer` au paramètre nul, que la recherche ne rend qu'à égalité ou en dessous d'un candidat strictement meilleur. Rend le meilleur point (le paramètre nul si aucun candidat ne fait mieux).
-pub(crate) fn recherche_exhaustive(evaluer: &dyn Fn([f64; 6]) -> f64, grille: &[f64], zero: f64) -> [f64; 6] {
-    let (mut meilleur, mut valeur_max) = ([0.0; 6], zero);
-    for &x in grille {
-        for &y in grille {
-            for &z in grille {
-                let p = [0.0, 0.0, 0.0, x, y, z];
-                let v = evaluer(p);
-                if v > valeur_max {
-                    (meilleur, valeur_max) = (p, v);
+///
+/// Les candidats d'une même étape sont évalués EN PARALLÈLE (chaque évaluation est indépendante des autres), puis parcourus dans l'ordre `x, y, z` : le résultat, égalités comprises (le premier candidat strictement meilleur l'emporte), est celui du parcours séquentiel, quel que soit le nombre de threads.
+pub(crate) fn recherche_exhaustive(evaluer: &(dyn Fn([f64; 6]) -> f64 + Sync), grille: &[f64], zero: f64) -> [f64; 6] {
+    // Évalue tous les candidats `[a, b, c]` de la grille (ordre x, y, z), complétés par `fixe` ; `translation` : `[a, b, c]` sont les translations, sinon les rotations.
+    let evaluer_etape = |fixe: [f64; 3], translation: bool| -> Vec<([f64; 6], f64)> {
+        let candidats: Vec<[f64; 6]> = grille
+            .iter()
+            .flat_map(|&a| grille.iter().flat_map(move |&b| grille.iter().map(move |&c| (a, b, c))))
+            .map(|(a, b, c)| {
+                if translation {
+                    [fixe[0], fixe[1], fixe[2], a, b, c]
+                } else {
+                    [a, b, c, fixe[0], fixe[1], fixe[2]]
                 }
-            }
+            })
+            .collect();
+        // `collect` d'un itérateur indexé garde l'ordre des candidats
+        candidats.into_par_iter().map(|p| (p, evaluer(p))).collect()
+    };
+    let (mut meilleur, mut valeur_max) = ([0.0; 6], zero);
+    for (p, v) in evaluer_etape([0.0; 3], true) {
+        if v > valeur_max {
+            (meilleur, valeur_max) = (p, v);
         }
     }
     let translation = [meilleur[3], meilleur[4], meilleur[5]];
-    for &a in grille {
-        for &b in grille {
-            for &c in grille {
-                let p = [a, b, c, translation[0], translation[1], translation[2]];
-                let v = evaluer(p);
-                if v > valeur_max {
-                    (meilleur, valeur_max) = (p, v);
-                }
-            }
+    for (p, v) in evaluer_etape(translation, false) {
+        if v > valeur_max {
+            (meilleur, valeur_max) = (p, v);
         }
     }
     meilleur

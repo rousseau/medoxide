@@ -8160,6 +8160,52 @@ mod tests {
         assert_eq!(recherche_exhaustive(&g, &grille, g([0.0; 6])), [0.0; 6]);
     }
 
+    /// La recherche exhaustive évalue les candidats en parallèle mais rend EXACTEMENT le résultat du parcours séquentiel (même départage des égalités : le premier candidat strictement meilleur, dans l'ordre x, y, z), avec 1, 3 et 12 threads, sur des fonctions à plateaux (beaucoup d'égalités).
+    #[test]
+    fn the_parallel_exhaustive_search_equals_the_sequential_one_including_ties() {
+        use crate::s2s::{grille_1d, recherche_exhaustive};
+        let grille = grille_1d(12.0, 4.0);
+        // référence : les deux triples boucles d'origine
+        let sequentiel = |f: &dyn Fn([f64; 6]) -> f64| {
+            let (mut meilleur, mut vmax) = ([0.0; 6], f([0.0; 6]));
+            for &x in &grille {
+                for &y in &grille {
+                    for &z in &grille {
+                        let p = [0.0, 0.0, 0.0, x, y, z];
+                        if f(p) > vmax {
+                            (meilleur, vmax) = (p, f(p));
+                        }
+                    }
+                }
+            }
+            let t = [meilleur[3], meilleur[4], meilleur[5]];
+            for &a in &grille {
+                for &b in &grille {
+                    for &c in &grille {
+                        let p = [a, b, c, t[0], t[1], t[2]];
+                        if f(p) > vmax {
+                            (meilleur, vmax) = (p, f(p));
+                        }
+                    }
+                }
+            }
+            meilleur
+        };
+        // plateaux : la valeur ne dépend que de la partie entière de la distance à un point, donc des dizaines de candidats ex æquo
+        let plateau =
+            |p: [f64; 6]| -(((p[3] - 4.0).powi(2) + (p[4] + 4.0).powi(2) + p[5].powi(2)).sqrt() / 8.0).floor();
+        let plateau_rot =
+            |p: [f64; 6]| plateau(p) - (((p[0] - 8.0).abs() + p[1].abs() + (p[2] + 4.0).abs()) / 8.0).floor();
+        for f in [&plateau as &(dyn Fn([f64; 6]) -> f64 + Sync), &plateau_rot] {
+            let attendu = sequentiel(f);
+            for fils in [1, 3, 12] {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(fils).build().unwrap();
+                let obtenu = pool.install(|| recherche_exhaustive(f, &grille, f([0.0; 6])));
+                assert_eq!(obtenu, attendu, "{fils} fils");
+            }
+        }
+    }
+
     /// Une recherche exhaustive suivie de quelques itérations d'Adam fait ce que quelques itérations d'Adam seules ne font pas (blobs, stack coronal décalé de 8 mm, 5 itérations, mesuré : concordance 0,48 sans recherche, 0,90 avec) et le point de départ d'Adam est bien le résultat de la recherche
     /// (translation estimée entre 7 et 9 mm).
     #[test]
