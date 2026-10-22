@@ -4174,6 +4174,46 @@ mod tests {
         assert!(e[4] > 3.0, "{}", e[4]);
     }
 
+    /// Mise à jour de Jacobi (branche s2s-jacobi) : critères fixés avant, blobs, 3 stacks, départ aux poses d'en-tête : (a) les poses sont IDENTIQUES au bit près avec 1, 3 et 8 fils (chaque coupe ne dépend que des poses figées au début du balayage) ;
+    /// (b) le résultat est reproductible d'un lancement à l'autre ; (c) l'erreur médiane de pose (sans mouvement commun) est inférieure à celle du départ.
+    #[test]
+    fn the_jacobi_update_is_independent_of_the_number_of_threads() {
+        use crate::s2s::{S2sConfig, S2sUpdate};
+        let t = Temp::new("s2s_jacobi");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = SlicePoses::identity(&stacks);
+        let config = S2sConfig {
+            update: S2sUpdate::Jacobi,
+            sweeps: 2,
+            ..S2sConfig::default()
+        };
+        let avec_fils = |n: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| crate::s2s::register_slices_s2s(&stacks, &depart, &config, &device).unwrap())
+        };
+        let un = avec_fils(1);
+        for n in [3, 8] {
+            let autre = avec_fils(n);
+            for (si, s) in stacks.iter().enumerate() {
+                for k in 0..s.dim().2 {
+                    assert_eq!(un.poses.get(si, k), autre.poses.get(si, k), "{n} fils, pose ({si},{k})");
+                }
+            }
+        }
+        let e0 = erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies);
+        let e1 = erreurs_de_pose_sans_mouvement_commun(&stacks, &un.poses, &vraies);
+        assert!(
+            quantile(&e1, 0.5) < quantile(&e0, 0.5),
+            "{} contre {}",
+            quantile(&e1, 0.5),
+            quantile(&e0, 0.5)
+        );
+    }
+
     /// Estimation coupe-coupe sur toutes les coupes (critères fixés avant) : blobs, 3 stacks, départ aux poses d'en-tête, vraies poses ±2°/±2 mm par coupe, 3 balayages, erreurs sans mouvement commun :
     /// (a) erreur médiane ≤ 1,0 mm et au moins 90 % des coupes ≤ 2,0 mm ; (b) erreur médiane réduite d'au moins 50 % par rapport au départ ; (c) chaque coupe recalée a une concordance finale ≥ initiale.
     /// RÉVISION EXPLICITE après la première exécution : (a) et (b) portaient sur TOUTES les coupes ; or 6 coupes sur 36 (les coupes de bord, 0 et 11, trop peu de masque ou sans partenaire) ne sont jamais recalées par

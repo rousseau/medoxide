@@ -119,6 +119,8 @@ pub struct ReconstructionConfig {
     pub s2s_coarse_levels: usize,
     /// Coupe-coupe : nombre de balayages (chaque balayage recale toutes les coupes une fois).
     pub s2s_sweeps: usize,
+    /// Coupe-coupe : mise à jour des poses pendant un balayage, Gauss–Seidel (séquentiel, défaut) ou Jacobi (parallèle), voir [`crate::s2s::S2sUpdate`].
+    pub s2s_update: crate::s2s::S2sUpdate,
     /// Coupe-volume : nombre de cycles « recaler puis reconstruire ».
     pub s2v_cycles: usize,
     /// Coupe-volume : nombre de poses de départ supplémentaires pour une coupe mal recalée.
@@ -149,6 +151,7 @@ impl Default for ReconstructionConfig {
             cg_max_iterations: 300,
             cg_tolerance: 1e-4,
             s2s_sweeps: 3,
+            s2s_update: crate::s2s::S2sUpdate::GaussSeidel,
             s2s_coarse_sigma_pixels: 1.0,
             s2s_coarse_sweeps: 3,
             s2s_coarse_levels: 2,
@@ -549,6 +552,7 @@ pub(crate) fn reconstruct_with_poses(
 /// Réglages du recalage coupe-coupe correspondant à `config`.
 pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
     S2sConfig {
+        update: config.s2s_update,
         sweeps: config.s2s_sweeps,
         coarse_sigma_pixels: config.s2s_coarse_sigma_pixels,
         coarse_sweeps: config.s2s_coarse_sweeps,

@@ -36,6 +36,24 @@ impl From<MotionArg> for Motion {
     }
 }
 
+/// Mise à jour des poses pendant un balayage coupe-coupe, telle qu'écrite sur la ligne de commande (`--s2s-update`).
+#[derive(Clone, Copy, ValueEnum)]
+enum UpdateArg {
+    /// Coupes recalées l'une après l'autre, chacune voit les poses déjà mises à jour (séquentiel)
+    GaussSeidel,
+    /// Toutes les coupes d'un balayage recalées contre les poses du balayage précédent, en parallèle
+    Jacobi,
+}
+
+impl From<UpdateArg> for medoxide_svr::s2s::S2sUpdate {
+    fn from(u: UpdateArg) -> Self {
+        match u {
+            UpdateArg::GaussSeidel => Self::GaussSeidel,
+            UpdateArg::Jacobi => Self::Jacobi,
+        }
+    }
+}
+
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
@@ -122,6 +140,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : nombre de balayages de toutes les coupes
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_sweeps)]
         s2s_sweeps: usize,
+        /// Avec `--motion s2s` : mise à jour des poses pendant un balayage (expérimental)
+        #[arg(long, value_enum, default_value_t = UpdateArg::GaussSeidel)]
+        s2s_update: UpdateArg,
         /// Avec `--motion s2s` : écart type (en pixels) du flou des coupes pour des balayages préliminaires du gros vers le fin, qui élargissent la portée de capture (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_sigma_pixels)]
         s2s_coarse_sigma: f64,
@@ -663,6 +684,7 @@ fn main() -> ExitCode {
                     min_stack_coverage,
                     edge_kappa,
                     s2s_sweeps,
+                    s2s_update,
                     s2s_coarse_sigma,
                     s2s_coarse_sweeps,
                     s2s_coarse_levels,
@@ -689,6 +711,7 @@ fn main() -> ExitCode {
                 min_stack_coverage,
                 edge_kappa,
                 s2s_sweeps,
+                s2s_update: s2s_update.into(),
                 s2s_coarse_sigma_pixels: s2s_coarse_sigma,
                 s2s_coarse_sweeps,
                 s2s_coarse_levels,

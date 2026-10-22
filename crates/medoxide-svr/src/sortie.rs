@@ -98,6 +98,13 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("cg_max_iterations", entier(c.cg_max_iterations)),
         ("cg_tolerance", reel(c.cg_tolerance)),
         ("s2s_sweeps", entier(c.s2s_sweeps)),
+        (
+            "s2s_update",
+            Json::texte(match c.s2s_update {
+                crate::s2s::S2sUpdate::GaussSeidel => "gauss-seidel",
+                crate::s2s::S2sUpdate::Jacobi => "jacobi",
+            }),
+        ),
         ("s2s_coarse_sigma_pixels", reel(c.s2s_coarse_sigma_pixels)),
         ("s2s_coarse_sweeps", entier(c.s2s_coarse_sweeps)),
         ("s2s_coarse_levels", entier(c.s2s_coarse_levels)),
