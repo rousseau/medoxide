@@ -1557,6 +1557,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : la règle « les dérivées vont à côté de `sourcedata/` » était fausse dans `bounti` (elles allaient dedans). Plutôt que de corriger l'appelant, la règle est une fonction pure (`racine_etude`) testée seule, et `fichiers_bids` la reçoit en paramètre : un seul endroit à tester, et les deux autres commandes ne peuvent pas diverger.
 - **Où** : `crates/medoxide-core/src/bids.rs`, `json.rs`, `crates/medx/build.rs`, `crates/medoxide-bounti/src/sortie.rs`.
 
+## 2026-10-22 — Une commande, deux façons de la lancer : `enum` de destination, `unzip`, un test qui compte les champs
+
+- **Quoi (concept)** : (1) quand une commande a deux modes qui ne partagent pas leurs options (chemins libres ou arborescence BIDS), on le dit dans le type : `enum DestinationSvr { Libre { … }, Bids(Fichiers) }`, et `svr_recon` fait un `match` dessus au lieu de tester des `Option` en désordre (même idée que `Extraction` plus haut). (2) `Iterator::unzip` sépare un itérateur de paires en deux `Vec` (`piles`, `masques`) en un passage. (3) Un `match` sur un **tuple** (`match (&bids, output)`) traite ensemble les combinaisons d'options ; la branche impossible (clap l'interdit) est quand même écrite, avec un message, plutôt qu'un `unwrap`.
+- **Quoi (méthode)** : les réglages de la reconstruction sont écrits dans le `.json` à la main, champ par champ ; un champ ajouté plus tard serait oublié sans bruit. Le test lit donc la sortie `{:#?}` (le `Debug` dérivé) de la configuration, en extrait les noms des champs, et vérifie que chacun est dans le JSON : l'oubli fait échouer le test. Les piles et masques d'une session sont désignés par les mêmes règles de nommage dans `fetalbet` (qui écrit) et le SVR (qui lit), toutes deux dans `medoxide-core::bids` : un seul endroit où elles peuvent diverger.
+- **Où** : `crates/medoxide-svr/src/sortie.rs`, `crates/medoxide-fetalbet/src/lib.rs` (`taches_bids`), `crates/medx/src/main.rs` (`DestinationSvr`, `fetalbet_bids`).
+
 ---
 
 *(à compléter à la prochaine étape)*

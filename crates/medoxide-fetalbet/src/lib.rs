@@ -39,6 +39,15 @@ pub enum MaskError {
     /// Échec du téléchargement des poids par défaut (réseau, disque, SHA-256) ;
     /// contient un message explicatif.
     ModelDownload(String),
+    /// Chemins ou fichiers BIDS : identifiant invalide, dossier illisible, aucune pile, écriture impossible.
+    Bids(medoxide_core::bids::ErreurBids),
+}
+
+/// Permet à `?` de convertir une erreur BIDS de `medoxide-core` en `MaskError::Bids`.
+impl From<medoxide_core::bids::ErreurBids> for MaskError {
+    fn from(e: medoxide_core::bids::ErreurBids) -> Self {
+        MaskError::Bids(e)
+    }
 }
 
 /// Permet à `?` de convertir une erreur de `medoxide-core` en `MaskError::Core`.
@@ -62,6 +71,7 @@ impl std::fmt::Display for MaskError {
             MaskError::ModelDownload(message) => {
                 write!(f, "téléchargement des poids impossible : {message}")
             }
+            MaskError::Bids(e) => write!(f, "{e}"),
         }
     }
 }
@@ -483,9 +493,80 @@ pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>)
     write_mask(output_path, &masque, input_path)
 }
 
+/// Un masque à produire en mode BIDS.
+#[derive(Debug, PartialEq)]
+pub struct TacheBids {
+    /// Pile à segmenter (`sub-X[/ses-Y]/anat/*_T2w.nii.gz` de la racine BIDS).
+    pub pile: PathBuf,
+    /// Masque à écrire : `<étude>/derivatives/medx-fetalbet/sub-X[/ses-Y]/anat/<entités de la pile>_desc-brain_mask.nii.gz`.
+    pub masque: PathBuf,
+}
+
+/// Masques à produire pour un participant (et une session) : un par pile `*_T2w.nii.gz`, triés par nom de pile. Rend aussi la racine du pipeline (`<étude>/derivatives/medx-fetalbet`), où va `dataset_description.json`.
+/// L'étude est celle de [`medoxide_core::bids::racine_etude`]`(racine_bids, sortie)`.
+///
+/// # Erreurs
+/// [`MaskError::Bids`] : identifiant invalide, dossier illisible, aucune pile.
+pub fn taches_bids(
+    racine_bids: &Path,
+    sortie: Option<&Path>,
+    participant: &str,
+    session: Option<&str>,
+) -> Result<(PathBuf, Vec<TacheBids>), MaskError> {
+    use medoxide_core::bids::{dossier_derive, masque_de_pile, piles_bids, PIPELINE_FETALBET};
+    let derive = dossier_derive(racine_bids, sortie, PIPELINE_FETALBET, participant, session)?;
+    let taches = piles_bids(racine_bids, participant, session)?
+        .into_iter()
+        .map(|pile| TacheBids {
+            masque: masque_de_pile(&derive.anat, &pile),
+            pile,
+        })
+        .collect();
+    Ok((derive.pipeline, taches))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mode BIDS : un masque par pile `T2w`, nommé d'après les entités de la pile (le nom déjà en usage), dans `derivatives/medx-fetalbet` de l'étude ; sous `sourcedata/`, à côté d'elle ; les autres fichiers sont ignorés.
+    #[test]
+    fn the_bids_tasks_name_one_mask_per_stack() {
+        let racine = std::env::temp_dir().join(format!("medoxide_fetalbet_bids_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&racine);
+        let anat = racine.join("sourcedata/sub-X/ses-Y/anat");
+        std::fs::create_dir_all(&anat).unwrap();
+        for nom in [
+            "sub-X_ses-Y_acq-ax_run-1_T2w.nii.gz",
+            "sub-X_ses-Y_acq-sag_run-1_T2w.nii.gz",
+            "sub-X_ses-Y_acq-ax_run-1_T2w.json",
+        ] {
+            std::fs::write(anat.join(nom), b"").unwrap();
+        }
+        let (pipeline, taches) = taches_bids(&racine.join("sourcedata"), None, "X", Some("Y")).unwrap();
+        assert_eq!(pipeline, racine.join("derivatives/medx-fetalbet"));
+        let dossier = racine.join("derivatives/medx-fetalbet/sub-X/ses-Y/anat");
+        assert_eq!(
+            taches,
+            vec![
+                TacheBids {
+                    pile: anat.join("sub-X_ses-Y_acq-ax_run-1_T2w.nii.gz"),
+                    masque: dossier.join("sub-X_ses-Y_acq-ax_run-1_desc-brain_mask.nii.gz"),
+                },
+                TacheBids {
+                    pile: anat.join("sub-X_ses-Y_acq-sag_run-1_T2w.nii.gz"),
+                    masque: dossier.join("sub-X_ses-Y_acq-sag_run-1_desc-brain_mask.nii.gz"),
+                },
+            ]
+        );
+        let (autre, _) = taches_bids(&racine.join("sourcedata"), Some(Path::new("/o")), "X", Some("Y")).unwrap();
+        assert_eq!(autre, Path::new("/o/derivatives/medx-fetalbet"));
+        assert!(matches!(
+            taches_bids(&racine.join("sourcedata"), None, "Z", None),
+            Err(MaskError::Bids(_))
+        ));
+        let _ = std::fs::remove_dir_all(&racine);
+    }
 
     /// Lit un fichier de `f32` bruts en little-endian (4 octets par valeur).
     fn lire_f32(chemin: &str) -> Vec<f32> {

@@ -56,6 +56,32 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 
+## Dans une arborescence BIDS
+
+Avec `--bids`, la commande lit et écrit dans les dossiers que lit [guioxide](https://github.com/rousseau/guioxide),
+sans nommer un fichier. Les piles sont les `*_T2w.nii.gz` de `sub-X[/ses-Y]/anat/` ; leurs masques sont ceux de
+`medx fetalbet --bids` (`derivatives/medx-fetalbet/…/<entités de la pile>_desc-brain_mask.nii.gz`).
+
+```bash
+./target/release/medx fetalbet --bids /chemin/jeu --participant 01 --session 1
+./target/release/medx svr recon --bids /chemin/jeu --participant 01 --session 1
+```
+
+`<étude>` désigne la racine du jeu, ou son parent si elle s'appelle `sourcedata` (buckets Garage : `sourcedata/` et
+`derivatives/` côte à côte) ; `--output-dir <dossier>` la remplace, pour les masques comme pour les résultats.
+`--input` restreint la liste des piles (au moins deux). Les résultats vont dans
+`<étude>/derivatives/medx-svr/sub-X[/ses-Y]/anat/` :
+
+| Fichier | Contenu |
+|---|---|
+| `sub-X_ses-Y_desc-svr_T2w.nii.gz` | volume reconstruit (`sform` et `qform` écrits) |
+| `sub-X_ses-Y_desc-svr_T2w.json` | résolution, mode de mouvement, réglages, piles utilisées (noms sans extension), ligne de commande |
+| `sub-X_ses-Y_desc-svr_motion.tsv` | mouvement estimé de chaque coupe |
+| `sub-X_ses-Y_desc-svr_slicequality.tsv` | qualité de chaque coupe |
+
+et `<étude>/derivatives/medx-svr/dataset_description.json` (`DatasetType: derivative`, `GeneratedBy` : nom, version,
+commit, ligne de commande). `--output`, `--mask`, `--poses` et `--quality` servent hors BIDS et sont refusés avec `--bids`.
+
 ## Choisir l'estimation du mouvement
 
 | `--motion` | Principe | Durée | À retenir |

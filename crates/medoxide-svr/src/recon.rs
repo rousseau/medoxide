@@ -4482,6 +4482,63 @@ mod tests {
         ));
     }
 
+    /// Sorties BIDS (blobs à 3 stacks) : `sortie::ecrire` crée sous `<étude>/derivatives/medx-svr/sub-X/ses-Y/anat/` le volume (affine relue égale à celle de la grille), le fichier voisin du volume (piles utilisées par leur nom sans extension, réglages, ligne de commande),
+    /// le mouvement et la qualité par coupe, et `dataset_description.json` à la racine du pipeline ; une racine BIDS `sourcedata/` place `derivatives/` à côté d'elle.
+    #[test]
+    fn the_bids_writer_creates_the_five_files_of_the_contract() {
+        use crate::pipeline::{ReconstructionConfig, ReconstructionOutput};
+        use medoxide_core::bids::Generateur;
+        let t = Temp::new("sortie_bids");
+        let (stacks, poses) = jeu_de_blobs_pour_s2s(&t);
+        let grid = reconstruction_grid(&stacks, 2.0, 4.0).unwrap();
+        let sortie = ReconstructionOutput {
+            grid: grid.clone(),
+            volume: Array3::from_shape_fn(grid.dims, |(i, j, k)| (i + 3 * j + 7 * k) as f64 * 0.37),
+            poses,
+            slices: Vec::new(),
+        };
+        let fichiers = crate::sortie::fichiers_bids(&t.fichier("etude/sourcedata"), None, "01", Some("A")).unwrap();
+        let generateur = Generateur::new("medx svr recon")
+            .avec_commit(Some("abc1234"))
+            .avec_ligne_de_commande("medx svr recon --bids etude/sourcedata");
+        let config = ReconstructionConfig::default();
+        crate::sortie::ecrire(&fichiers, &sortie, &stacks, &config, &generateur).unwrap();
+
+        let anat = t.fichier("etude/derivatives/medx-svr/sub-01/ses-A/anat");
+        for nom in [
+            "sub-01_ses-A_desc-svr_T2w.nii.gz",
+            "sub-01_ses-A_desc-svr_T2w.json",
+            "sub-01_ses-A_desc-svr_motion.tsv",
+            "sub-01_ses-A_desc-svr_slicequality.tsv",
+        ] {
+            assert!(anat.join(nom).is_file(), "{nom} absent");
+        }
+        let volume = Stack::read(&anat.join("sub-01_ses-A_desc-svr_T2w.nii.gz")).unwrap();
+        assert!((volume.affine() - grid.affine).abs().max() < 1e-4);
+        let json = std::fs::read_to_string(anat.join("sub-01_ses-A_desc-svr_T2w.json")).unwrap();
+        for stack in &stacks {
+            let nom = medoxide_core::bids::nom_de_pile(stack.path());
+            assert!(json.contains(&format!("\"{nom}\"")), "pile {nom} absente de {json}");
+        }
+        for attendu in [
+            "\"MotionMode\": \"s2s\"",
+            "\"ResolutionMm\": 0.8",
+            "\"alpha\": 0.1",
+            "\"CommandLine\": \"medx svr recon --bids etude/sourcedata\"",
+        ] {
+            assert!(json.contains(attendu), "{attendu} absent de {json}");
+        }
+        let description =
+            std::fs::read_to_string(t.fichier("etude/derivatives/medx-svr/dataset_description.json")).unwrap();
+        assert!(
+            description.contains("\"DatasetType\": \"derivative\"") && description.contains("\"Commit\": \"abc1234\"")
+        );
+        assert!(
+            !t.fichier("etude/sourcedata/derivatives").exists(),
+            "les dérivées ne vont pas dans sourcedata/"
+        );
+    }
+
     /// Reconstruction préservant les contours dans la chaîne (critère fixé avant, blobs, 2 stacks) : `reconstruct_with_poses` avec `edge_kappa > 0` égale EXACTEMENT l'appel direct de `conjugate_gradient_edge_preserving` (mêmes α, κ, nombre de
     /// repondérations, itérations, tolérance) et diffère de la reconstruction de Tikhonov ; avec `edge_kappa = 0` elle égale la reconstruction de Tikhonov.
     #[test]

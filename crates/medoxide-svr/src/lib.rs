@@ -32,6 +32,7 @@ pub mod optimizers;
 pub mod pipeline;
 pub mod recon;
 pub mod s2s;
+pub mod sortie;
 
 use std::path::{Path, PathBuf};
 
@@ -81,6 +82,8 @@ pub enum SvrError {
     InvalidGrid,
     /// Écriture d'un fichier impossible ; contient le fichier fautif et la cause.
     Write { path: PathBuf, message: String },
+    /// Chemins ou fichiers BIDS : identifiant de participant ou de session invalide, dossier illisible, aucune pile, écriture impossible.
+    Bids(medoxide_core::bids::ErreurBids),
     /// Moins de deux stacks : le mouvement ne peut pas être estimé (une coupe n'a pas de coupe d'un autre stack à croiser, ni de reconstruction indépendante d'elle).
     NotEnoughStacks,
     /// Aucune paire de coupes de stacks différents ne se croise assez : le champ de biais n'est pas estimable.
@@ -114,6 +117,7 @@ impl std::fmt::Display for SvrError {
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
             SvrError::Write { path, message } => write!(f, "{} : écriture impossible : {message}", path.display()),
+            SvrError::Bids(e) => write!(f, "{e}"),
             SvrError::NotEnoughStacks => write!(f, "au moins deux stacks sont nécessaires pour estimer le mouvement"),
             SvrError::PoseMismatch => write!(
                 f,
@@ -144,6 +148,12 @@ impl std::fmt::Display for SvrError {
 }
 
 impl std::error::Error for SvrError {}
+
+impl From<medoxide_core::bids::ErreurBids> for SvrError {
+    fn from(e: medoxide_core::bids::ErreurBids) -> Self {
+        SvrError::Bids(e)
+    }
+}
 
 /// Écart maximal toléré, en mm, entre l'affine d'un masque et celle de son stack.
 const MASK_AFFINE_TOLERANCE_MM: f64 = 1e-3;

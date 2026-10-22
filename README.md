@@ -34,6 +34,17 @@ masque cérébral chacun, par exemple obtenus par `medx fetalbet`) :
   --mask masque_ax.nii.gz masque_cor.nii.gz masque_sag.nii.gz --output volume.nii.gz --poses poses.tsv
 ```
 
+Dans une arborescence BIDS (racine du jeu, ou `sourcedata/` d'un bucket Garage), les trois commandes se
+suivent sans nommer un seul fichier. Les dérivées vont dans `<étude>/derivatives/<pipeline>/` (`<étude>` est la
+racine du jeu, ou son parent si elle s'appelle `sourcedata` ; `--output-dir` la remplace), avec un
+`dataset_description.json` par pipeline :
+
+```bash
+medx fetalbet --bids /chemin/jeu --participant 01 --session 1   # derivatives/medx-fetalbet/…_desc-brain_mask.nii.gz
+medx svr recon --bids /chemin/jeu --participant 01 --session 1   # derivatives/medx-svr/…_desc-svr_T2w.nii.gz, .json, _motion.tsv, _slicequality.tsv
+medx bounti --bids /chemin/jeu --participant 01 --session 1      # derivatives/medx-bounti/…_desc-bounti_dseg.nii.gz, .tsv
+```
+
 Calculs sur le CPU par défaut ; voir [la page SVR](https://rousseau.github.io/medoxide/svr.html) pour les
 options, les durées et les limites.
 

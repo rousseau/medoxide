@@ -69,21 +69,38 @@ impl From<DeviceArg> for DeviceKind {
 enum SvrAction {
     /// Reconstruit un volume 3D à partir de stacks 2D (IRM fœtale) : estime le mouvement de chaque coupe, puis reconstruit
     Recon {
-        /// Deux stacks NIfTI au moins (`.nii` ou `.nii.gz`), de plans différents
-        #[arg(long, num_args = 2.., required = true)]
+        /// Deux stacks NIfTI au moins (`.nii` ou `.nii.gz`), de plans différents. Avec --bids : restreint la liste des
+        /// stacks (par défaut, tous les `*_T2w.nii.gz` de la session)
+        #[arg(long, num_args = 2.., required_unless_present = "bids")]
         input: Vec<PathBuf>,
-        /// Masques cérébraux (par exemple produits par `medx fetalbet`), un par stack et dans le même ordre
-        #[arg(long, num_args = 2.., required = true)]
+        /// Masques cérébraux (par exemple produits par `medx fetalbet`), un par stack et dans le même ordre. Hors BIDS
+        #[arg(long, num_args = 2.., required_unless_present = "bids", conflicts_with = "bids")]
         mask: Vec<PathBuf>,
-        /// Volume NIfTI reconstruit (compressé si le nom finit par `.gz`)
-        #[arg(long)]
-        output: PathBuf,
-        /// Écrit aussi un indicateur de qualité par coupe (texte : stack, coupe, recalée, score avant, score après, nombre de recalages, correction) : le score est la concordance aux intersections avec `s2s`
-        #[arg(long)]
+        /// Volume NIfTI reconstruit (compressé si le nom finit par `.gz`). Hors BIDS
+        #[arg(long, required_unless_present = "bids", conflicts_with = "bids")]
+        output: Option<PathBuf>,
+        /// Écrit aussi un indicateur de qualité par coupe (texte : stack, coupe, recalée, score avant, score après, nombre de recalages, correction) : le score est la concordance aux intersections avec `s2s`. Hors BIDS
+        #[arg(long, conflicts_with = "bids")]
         quality: Option<PathBuf>,
-        /// Écrit aussi le mouvement estimé de chaque coupe (texte : stack, coupe, matrice 4 x 4 en ordre colonne)
-        #[arg(long)]
+        /// Écrit aussi le mouvement estimé de chaque coupe (texte : stack, coupe, matrice 4 x 4 en ordre colonne). Hors BIDS
+        #[arg(long, conflicts_with = "bids")]
         poses: Option<PathBuf>,
+        /// Racine d'un jeu de données BIDS : lit les stacks de `sub-X/ses-Y/anat/` et leurs masques dans
+        /// `<étude>/derivatives/medx-fetalbet/`, écrit dans `<étude>/derivatives/medx-svr/sub-X/ses-Y/anat/` (volume
+        /// `_desc-svr_T2w.nii.gz` et son `.json`, `_desc-svr_motion.tsv`, `_desc-svr_slicequality.tsv`) ; `<étude>` est le
+        /// parent de la racine si elle s'appelle `sourcedata`, sinon la racine elle-même
+        #[arg(long, requires = "participant")]
+        bids: Option<PathBuf>,
+        /// Identifiant du participant, sans préfixe `sub-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        participant: Option<String>,
+        /// Identifiant de la session, sans préfixe `ses-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        session: Option<String>,
+        /// Dossier racine de l'étude à la place de la racine BIDS ou de son parent : les dérivées sont lues et écrites
+        /// dans `<dossier>/derivatives/` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<PathBuf>,
         /// Estimation du mouvement
         #[arg(long, value_enum, default_value_t = MotionArg::S2s)]
         motion: MotionArg,
@@ -172,13 +189,16 @@ enum SvrAction {
     },
 }
 
+// Même raison que pour `SvrAction` : l'énumération est construite une seule fois par appel du programme.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Segmentation du cerveau fœtal en 19 tissus (portage de BOUNTI) d'une reconstruction 3D T2
     Bounti {
-        /// Reconstruction 3D (NIfTI)
-        #[arg(long)]
-        input: PathBuf,
+        /// Reconstruction 3D (NIfTI). Avec --bids : par défaut, le volume écrit par `medx svr recon --bids`
+        /// (`<étude>/derivatives/medx-svr/sub-X/ses-Y/anat/sub-X_ses-Y_desc-svr_T2w.nii.gz`)
+        #[arg(long, required_unless_present = "bids")]
+        input: Option<PathBuf>,
         /// Étiquettes de sortie (NIfTI) ; la table `.tsv` est écrite à côté. Hors BIDS
         #[arg(long, conflicts_with = "bids", required_unless_present = "bids")]
         output: Option<PathBuf>,
@@ -225,12 +245,27 @@ enum Command {
     },
     /// Extraction du masque cérébral en IRM fœtale (portage de Fetal-BET)
     Fetalbet {
-        /// Volume NIfTI d'entrée
-        #[arg(long)]
-        input: PathBuf,
-        /// Masque NIfTI de sortie
-        #[arg(long)]
-        output: PathBuf,
+        /// Volume NIfTI d'entrée. Hors BIDS
+        #[arg(long, conflicts_with = "bids", required_unless_present = "bids")]
+        input: Option<PathBuf>,
+        /// Masque NIfTI de sortie. Hors BIDS
+        #[arg(long, conflicts_with = "bids", required_unless_present = "bids")]
+        output: Option<PathBuf>,
+        /// Racine d'un jeu de données BIDS : segmente les `*_T2w.nii.gz` de `sub-X/ses-Y/anat/` et écrit
+        /// `<étude>/derivatives/medx-fetalbet/sub-X/ses-Y/anat/<entités de la pile>_desc-brain_mask.nii.gz` ;
+        /// `<étude>` est le parent de la racine si elle s'appelle `sourcedata`, sinon la racine elle-même
+        #[arg(long, requires = "participant")]
+        bids: Option<PathBuf>,
+        /// Identifiant du participant, sans préfixe `sub-` (avec --bids)
+        #[arg(long, conflicts_with_all = ["input", "output"])]
+        participant: Option<String>,
+        /// Identifiant de la session, sans préfixe `ses-` (avec --bids)
+        #[arg(long, conflicts_with_all = ["input", "output"])]
+        session: Option<String>,
+        /// Dossier racine de l'étude à la place de la racine BIDS ou de son parent : les dérivées vont dans
+        /// `<dossier>/derivatives/` (avec --bids)
+        #[arg(long, conflicts_with_all = ["input", "output"])]
+        output_dir: Option<PathBuf>,
         /// Poids du modèle (fichier .bpk). Priorité : cette option, puis la
         /// variable d'environnement MEDOXIDE_MODEL, puis le cache
         /// (~/.cache/medoxide/attunet.bpk), où ils sont téléchargés depuis Hugging
@@ -245,13 +280,23 @@ enum Command {
     },
 }
 
-/// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit le volume (et les poses si demandé).
+/// Où `medx svr recon` écrit ses résultats.
+enum DestinationSvr {
+    /// Chemins donnés par l'appelant : volume, et mouvement et qualité s'ils sont demandés.
+    Libre {
+        volume: PathBuf,
+        poses: Option<PathBuf>,
+        qualite: Option<PathBuf>,
+    },
+    /// Arborescence BIDS dérivée (voir `medoxide_svr::sortie`).
+    Bids(medoxide_svr::sortie::Fichiers),
+}
+
+/// Reconstruit un volume depuis des stacks : lit les stacks et leurs masques, estime le mouvement, reconstruit, écrit les résultats à `destination`.
 fn svr_recon(
     entrees: &[PathBuf],
     masques: &[PathBuf],
-    sortie: &std::path::Path,
-    poses: Option<&std::path::Path>,
-    qualite: Option<&std::path::Path>,
+    destination: &DestinationSvr,
     device: Option<DeviceArg>,
     config: &ReconstructionConfig,
 ) -> ExitCode {
@@ -264,7 +309,7 @@ fn svr_recon(
         return ExitCode::FAILURE;
     }
     let debut = std::time::Instant::now();
-    let resultat = (|| -> Result<(), medoxide_svr::SvrError> {
+    let resultat = (|| -> Result<PathBuf, medoxide_svr::SvrError> {
         let mut stacks = medoxide_svr::read_stacks(entrees)?;
         for (s, m) in stacks.iter_mut().zip(masques) {
             s.set_brain_mask(m)?;
@@ -290,18 +335,32 @@ fn svr_recon(
         );
         let sortie_reconstruction =
             medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
-        sortie_reconstruction.write_volume(sortie)?;
-        if let Some(p) = poses {
-            sortie_reconstruction.write_poses(&stacks, p)?;
+        match destination {
+            DestinationSvr::Libre { volume, poses, qualite } => {
+                sortie_reconstruction.write_volume(volume)?;
+                if let Some(p) = poses {
+                    sortie_reconstruction.write_poses(&stacks, p)?;
+                }
+                if let Some(q) = qualite {
+                    sortie_reconstruction.write_quality(q)?;
+                }
+                Ok(volume.clone())
+            }
+            DestinationSvr::Bids(fichiers) => {
+                medoxide_svr::sortie::ecrire(
+                    fichiers,
+                    &sortie_reconstruction,
+                    &stacks,
+                    config,
+                    &generateur("medx svr recon"),
+                )?;
+                Ok(fichiers.volume.clone())
+            }
         }
-        if let Some(q) = qualite {
-            sortie_reconstruction.write_quality(q)?;
-        }
-        Ok(())
     })();
     match resultat {
-        Ok(()) => {
-            println!("Volume écrit dans {sortie:?} en {:.0} s", debut.elapsed().as_secs_f64());
+        Ok(volume) => {
+            println!("Volume écrit dans {volume:?} en {:.0} s", debut.elapsed().as_secs_f64());
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -309,6 +368,21 @@ fn svr_recon(
             ExitCode::FAILURE
         }
     }
+}
+
+/// Masque de chaque pile de `medx svr recon --bids`, les mêmes règles que `medx fetalbet --bids` : les piles de la session (ou celles de `--input`) et leurs masques.
+fn svr_recon_bids(
+    racine: &std::path::Path,
+    sortie: Option<&std::path::Path>,
+    participant: &str,
+    session: Option<&str>,
+    restriction: &[PathBuf],
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>, DestinationSvr), medoxide_svr::SvrError> {
+    use medoxide_svr::sortie;
+    let paires = sortie::piles_et_masques(racine, sortie, participant, session, restriction)?;
+    let fichiers = sortie::fichiers_bids(racine, sortie, participant, session)?;
+    let (piles, masques) = paires.into_iter().unzip();
+    Ok((piles, masques, DestinationSvr::Bids(fichiers)))
 }
 
 /// Affiche la géométrie de chaque stack, puis la boîte de l'ensemble (repère monde RAS+, mm).
@@ -517,6 +591,28 @@ fn main() -> ExitCode {
             device,
         } => {
             use medoxide_bounti::sortie;
+            let entree = match (&input, &bids) {
+                (Some(entree), _) => Ok(entree.clone()),
+                // volume du SVR de la même session, dans la même étude
+                (None, Some(racine)) => medoxide_svr::sortie::fichiers_bids(
+                    racine,
+                    output_dir.as_deref(),
+                    participant.as_deref().unwrap_or_default(),
+                    session.as_deref(),
+                )
+                .map(|f| f.volume),
+                // clap l'interdit (`required_unless_present`) ; cas traité sans paniquer
+                (None, None) => Err(medoxide_svr::SvrError::Bids(
+                    medoxide_core::bids::ErreurBids::Identifiant("--input ou --bids requis".to_string()),
+                )),
+            };
+            let entree = match entree {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("medx bounti : {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let fichiers = match (&bids, &output) {
                 (Some(racine), _) => sortie::fichiers_bids(
                     racine,
@@ -532,7 +628,7 @@ fn main() -> ExitCode {
                     "--output ou --bids requis".to_string(),
                 )),
             };
-            bounti(&input, fichiers, weights.as_deref(), device.into())
+            bounti(&entree, fichiers, weights.as_deref(), device.into())
         }
         Command::Multibounti {
             input,
@@ -556,6 +652,10 @@ fn main() -> ExitCode {
                     output,
                     quality,
                     poses,
+                    bids,
+                    participant,
+                    session,
+                    output_dir,
                     motion,
                     device,
                     resolution_mm,
@@ -608,31 +708,113 @@ fn main() -> ExitCode {
                 s2v_cycles,
                 ..Default::default()
             };
-            svr_recon(
-                &input,
-                &mask,
-                &output,
-                poses.as_deref(),
-                quality.as_deref(),
-                device,
-                &config,
-            )
-        }
-        Command::Fetalbet { input, output, model } => {
-            // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;
-            // `None` : `segment` télécharge les poids par défaut au besoin.
-            match medoxide_fetalbet::segment(&input, &output, model.as_deref()) {
-                Ok(()) => {
-                    println!("Masque écrit dans {output:?}");
-                    ExitCode::SUCCESS
+            let (entrees, masques, destination) = match (&bids, output) {
+                (Some(racine), _) => {
+                    match svr_recon_bids(
+                        racine,
+                        output_dir.as_deref(),
+                        participant.as_deref().unwrap_or_default(),
+                        session.as_deref(),
+                        &input,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("medx svr recon : {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("medx fetalbet : {e}");
-                    ExitCode::FAILURE
+                (None, Some(volume)) => (
+                    input,
+                    mask,
+                    DestinationSvr::Libre {
+                        volume,
+                        poses,
+                        qualite: quality,
+                    },
+                ),
+                // clap l'interdit (`required_unless_present`) ; cas traité sans paniquer
+                (None, None) => {
+                    eprintln!("medx svr recon : --output ou --bids requis");
+                    return ExitCode::FAILURE;
+                }
+            };
+            svr_recon(&entrees, &masques, &destination, device, &config)
+        }
+        Command::Fetalbet {
+            input,
+            output,
+            bids,
+            participant,
+            session,
+            output_dir,
+            model,
+        } => match (bids, input, output) {
+            (Some(racine), _, _) => fetalbet_bids(
+                &racine,
+                output_dir.as_deref(),
+                participant.as_deref().unwrap_or_default(),
+                session.as_deref(),
+                model.as_deref(),
+            ),
+            (None, Some(entree), Some(sortie)) => {
+                // `model.as_deref()` donne un `Option<&Path>` sans consommer l'`Option` ;
+                // `None` : `segment` télécharge les poids par défaut au besoin.
+                match medoxide_fetalbet::segment(&entree, &sortie, model.as_deref()) {
+                    Ok(()) => {
+                        println!("Masque écrit dans {sortie:?}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("medx fetalbet : {e}");
+                        ExitCode::FAILURE
+                    }
                 }
             }
-        }
+            // clap l'interdit (`required_unless_present`) ; cas traité sans paniquer
+            _ => {
+                eprintln!("medx fetalbet : --input et --output, ou --bids, requis");
+                ExitCode::FAILURE
+            }
+        },
     }
+}
+
+/// `medx fetalbet --bids` : un masque par pile `T2w` de la session, dans `derivatives/medx-fetalbet` de l'étude, puis `dataset_description.json`. Les piles et les chemins sont déterminés avant le premier calcul.
+fn fetalbet_bids(
+    racine: &std::path::Path,
+    sortie: Option<&std::path::Path>,
+    participant: &str,
+    session: Option<&str>,
+    modele: Option<&std::path::Path>,
+) -> ExitCode {
+    let (pipeline, taches) = match medoxide_fetalbet::taches_bids(racine, sortie, participant, session) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("medx fetalbet : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for (n, tache) in taches.iter().enumerate() {
+        eprintln!("pile {}/{} : {}", n + 1, taches.len(), tache.pile.display());
+        let fait = medoxide_core::bids::creer_dossier_parent(&tache.masque)
+            .map_err(medoxide_fetalbet::MaskError::from)
+            .and_then(|()| medoxide_fetalbet::segment(&tache.pile, &tache.masque, modele));
+        if let Err(e) = fait {
+            eprintln!("medx fetalbet : {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("Masque écrit dans {:?}", tache.masque);
+    }
+    if let Err(e) = medoxide_core::bids::ecrire_description_derivee(
+        &pipeline,
+        medoxide_core::bids::PIPELINE_FETALBET,
+        &generateur("medx fetalbet"),
+    ) {
+        eprintln!("medx fetalbet : {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -679,6 +861,10 @@ mod tests {
             "--output-dir",
             "o"
         ]));
+        assert!(
+            essai(&["bounti", "--bids", "r", "--participant", "01"]),
+            "--input par défaut en BIDS"
+        );
         assert!(!essai(&["bounti", "--input", "a"]), "ni --output ni --bids");
         assert!(!essai(&["bounti", "--output", "b"]), "sans --input");
         assert!(
@@ -724,6 +910,114 @@ mod tests {
         assert!(
             !essai(&["bounti", "--input", "a", "--output", "b", "--output-dir", "o"]),
             "--output-dir sans --bids"
+        );
+    }
+
+    /// Arguments de `medx fetalbet` : hors BIDS `--input` et `--output` sont requis ; en BIDS `--participant` est requis ; `--input` et `--output` sont exclusifs de `--bids` ; `--participant`, `--session` et `--output-dir` demandent `--bids`.
+    #[test]
+    fn the_fetalbet_arguments_are_exclusive_or_required_as_documented() {
+        let essai = |args: &[&str]| Cli::try_parse_from(std::iter::once("medx").chain(args.iter().copied())).is_ok();
+        assert!(essai(&["fetalbet", "--input", "a", "--output", "b"]));
+        assert!(essai(&["fetalbet", "--bids", "r", "--participant", "01"]));
+        assert!(essai(&[
+            "fetalbet",
+            "--bids",
+            "r",
+            "--participant",
+            "01",
+            "--session",
+            "1",
+            "--output-dir",
+            "o"
+        ]));
+        assert!(!essai(&["fetalbet"]), "ni --input ni --bids");
+        assert!(!essai(&["fetalbet", "--input", "a"]), "--input sans --output");
+        assert!(!essai(&["fetalbet", "--bids", "r"]), "--bids sans --participant");
+        assert!(
+            !essai(&["fetalbet", "--bids", "r", "--participant", "01", "--input", "a"]),
+            "--input avec --bids"
+        );
+        assert!(
+            !essai(&["fetalbet", "--bids", "r", "--participant", "01", "--output", "b"]),
+            "--output avec --bids"
+        );
+        assert!(
+            !essai(&["fetalbet", "--input", "a", "--output", "b", "--participant", "01"]),
+            "--participant sans --bids"
+        );
+        assert!(
+            !essai(&["fetalbet", "--input", "a", "--output", "b", "--output-dir", "o"]),
+            "--output-dir sans --bids"
+        );
+    }
+
+    /// Arguments de `medx svr recon` : hors BIDS `--input`, `--mask` et `--output` sont requis ; en BIDS seul `--participant` l'est, `--input` restreint la liste des piles (au moins deux) ; `--mask`, `--output`, `--poses` et `--quality` sont exclusifs de `--bids` ; `--participant`, `--session` et `--output-dir` demandent `--bids`.
+    #[test]
+    fn the_svr_recon_arguments_are_exclusive_or_required_as_documented() {
+        let essai = |args: &[&str]| {
+            Cli::try_parse_from(["medx", "svr", "recon"].into_iter().chain(args.iter().copied())).is_ok()
+        };
+        assert!(essai(&["--input", "a", "b", "--mask", "m", "n", "--output", "v"]));
+        assert!(essai(&[
+            "--input",
+            "a",
+            "b",
+            "--mask",
+            "m",
+            "n",
+            "--output",
+            "v",
+            "--poses",
+            "p",
+            "--quality",
+            "q"
+        ]));
+        assert!(essai(&["--bids", "r", "--participant", "01"]));
+        assert!(essai(&[
+            "--bids",
+            "r",
+            "--participant",
+            "01",
+            "--session",
+            "1",
+            "--output-dir",
+            "o",
+            "--input",
+            "a",
+            "b"
+        ]));
+        assert!(!essai(&[]), "ni --input ni --bids");
+        assert!(
+            !essai(&["--input", "a", "b", "--mask", "m", "n"]),
+            "hors BIDS sans --output"
+        );
+        assert!(!essai(&["--input", "a", "b", "--output", "v"]), "hors BIDS sans --mask");
+        assert!(!essai(&["--bids", "r"]), "--bids sans --participant");
+        assert!(
+            !essai(&["--bids", "r", "--participant", "01", "--input", "a"]),
+            "une seule pile"
+        );
+        for exclusif in [["--output", "v"], ["--poses", "p"], ["--quality", "q"], ["--mask", "m"]] {
+            assert!(
+                !essai(&["--bids", "r", "--participant", "01", exclusif[0], exclusif[1]]),
+                "{} avec --bids",
+                exclusif[0]
+            );
+        }
+        assert!(
+            !essai(&[
+                "--input",
+                "a",
+                "b",
+                "--mask",
+                "m",
+                "n",
+                "--output",
+                "v",
+                "--participant",
+                "01"
+            ]),
+            "--participant sans --bids"
         );
     }
 
