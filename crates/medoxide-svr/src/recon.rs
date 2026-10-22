@@ -5049,7 +5049,7 @@ mod tests {
     /// DIAGNOSTIC (sans critère) : pourquoi des coupes ne sont-elles pas recalées par le coupe-coupe ? Pour un sujet réel (MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACKS_RETENUS), aux poses
     /// d'en-tête, compte les coupes selon : moins de `MIN_MASK_PIXELS` pixels de masque, sans partenaire, ou recalables ; et affiche la distribution des pixels de masque et du nombre de partenaires.
     #[test]
-    #[ignore = "données réelles locales"]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_unregistered_slices_for_slice_to_slice() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
@@ -5891,7 +5891,7 @@ mod tests {
     /// avec un mouvement vrai (`MEDOXIDE_MODELE` : `independante`, `lisse`, `sauts`, `stack` ; amplitudes `MEDOXIDE_AMPLITUDES`, graines `MEDOXIDE_GRAINES`), du bruit (`MEDOXIDE_BRUIT_PCT`, défaut 5) et un biais (`MEDOXIDE_BIAIS_PCT`, défaut 0). Chaque variante (`MEDOXIDE_VARIANTES`, voir `variantes_s2s` ; `bias=1` corrige
     /// les stacks du biais aux poses d'en-tête avant le recalage) part des poses d'en-tête. Écrit `SEMISYN modèle amplitude graine variante part_à_1,5_mm médiane_mm p90_mm` : l'erreur est mesurée contre le mouvement vrai, après retrait du mouvement commun. La ligne `entete` donne l'erreur sans correction. Avec `MEDOXIDE_DETAIL=1`, une ligne `SLICE modèle amplitude graine variante stack coupe déplacement_vrai_mm erreur_mm surface_du_masque_en_pixels concordance_finale` par coupe suit chaque variante.
     #[test]
-    #[ignore = "diagnostic sur données réelles locales"]
+    #[ignore = "diagnostic sur données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_the_semi_synthetic_benchmark() {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::pipeline::correct_stacks;
@@ -6029,7 +6029,7 @@ mod tests {
     /// avec le réglage fin seul et avec le gros-vers-fin (σ = 6 puis 3 pixels, 2 balayages chacun). Écrit `CAPTURE amplitude réglage part_à_1,5_mm médiane_mm p90_mm` : l'erreur de pose est mesurée par rapport à la référence, après retrait du mouvement commun. Question : le gros-vers-fin
     /// conserve-t-il la bonne solution quand on part d'elle (amplitude 0), et la retrouve-t-il depuis une perturbation, sur du réel comme en simulation ?
     #[test]
-    #[ignore = "diagnostic sur données réelles locales"]
+    #[ignore = "diagnostic sur données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_the_capture_range_on_real_data() {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::pipeline::correct_stacks;
@@ -6111,7 +6111,7 @@ mod tests {
     /// Écrit `CANDIDATS amplitude partenaires coupes erreur_départ_médiane part_Adam part_meilleur_candidat part_top5_maxima part_grille` : part des coupes dont la pose est à ≤ 1,5 mm de la référence (écart quadratique des pixels de masque) pour, dans l'ordre, la pose obtenue par Adam,
     /// le candidat de concordance maximale, le meilleur des 5 maxima locaux de la grille (« le bon bassin est-il dans la liste ? »), le meilleur de tous les candidats de la grille.
     #[test]
-    #[ignore = "diagnostic sur données réelles locales"]
+    #[ignore = "diagnostic sur données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_the_multistart_candidates_on_real_data() {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::diff::{pose_to_matrix, RegistrationConfig};
@@ -6307,7 +6307,7 @@ mod tests {
     /// depuis le volume `MEDOXIDE_VOLUME` (NIfTI) sur les pixels de son masque, et écrit sur la sortie standard une ligne `COUPE stack coupe pixels_masque déplacement_rms_mm ncc rmse_relatif` : la corrélation entre la coupe simulée et la coupe réelle
     /// (les coupes dont le volume est incohérent avec les données ont une corrélation basse).
     #[test]
-    #[ignore = "données réelles locales"]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_slice_residuals_on_real_data() {
         let tous = stacks_reels();
         let poses = lire_poses_tsv(
@@ -6360,7 +6360,7 @@ mod tests {
     /// DIAGNOSTIC (sans critère) : pour un sujet réel et les poses `MEDOXIDE_POSES`, nombre de stacks (0 à 3) dont le support atteint chaque voxel du domaine de la reconstruction (grille de `medx svr recon`), écrit dans `MEDOXIDE_SORTIE` (NIfTI), avec
     /// le décompte des voxels du domaine couverts par 1, 2 ou 3 stacks sur la sortie standard.
     #[test]
-    #[ignore = "données réelles locales"]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_stack_coverage_on_real_data() {
         let tous = stacks_reels();
         let poses = lire_poses_tsv(
@@ -8557,7 +8557,7 @@ mod tests {
     /// COMPARAISON avec la référence Python (`scripts/prototype_champ_biais.py`) sur un jeu simulé de l'atlas (poses vraies) : écart type du log du champ estimé par stack et rapports de gain.
     /// Python (jeu `STA31_mvt4_b5_biais30`, régularisation 1e-3, sans écrêtage) : écarts types 0,076 / 0,220 / 0,202 ; gains (log, par rapport au stack 0) −0,202 / −0,053. Le défaut de Rust est une régularisation de 0,1 avec écrêtage : la comparaison utilise 1e-3. Variable `MEDOXIDE_JEU_SIMULE` : dossier du jeu.
     #[test]
-    #[ignore = "comparaison avec la référence Python, données locales"]
+    #[ignore = "comparaison avec la référence Python, données locales ; échoue sans la variable d'environnement MEDOXIDE_JEU_SIMULE (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn compare_the_bias_estimation_with_the_python_reference() {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         let dossier = PathBuf::from(std::env::var("MEDOXIDE_JEU_SIMULE").expect("MEDOXIDE_JEU_SIMULE"));
@@ -10219,7 +10219,7 @@ mod tests {
     /// même format que les jeux simulés). Pas de vérité terrain : voir `judge_a_volume_with_a_held_out_stack`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
-    #[ignore = "données réelles locales ; longue"]
+    #[ignore = "données réelles locales ; longue ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn reconstruct_a_real_subject() {
         let device = burn::tensor::Device::flex().autodiff();
         let tous = stacks_reels();
@@ -10424,7 +10424,7 @@ mod tests {
     /// NCC finale, et la correction moyenne. Variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
-    #[ignore = "données réelles locales"]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_STACK_TEST (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn judge_a_volume_with_a_held_out_stack() {
         let device = burn::tensor::Device::flex().autodiff();
         let indice: usize = std::env::var("MEDOXIDE_STACK_TEST")
@@ -10480,7 +10480,7 @@ mod tests {
     /// (variables MEDOXIDE_MODELE, MEDOXIDE_AMPLITUDES = une amplitude, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME). Écrit `<volume>.juge.tsv`.
     /// À lancer en `--release --ignored --nocapture`.
     #[test]
-    #[ignore = "données locales"]
+    #[ignore = "données locales ; échoue sans la variable d'environnement MEDOXIDE_STACK_TEST (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn judge_a_synthetic_volume_with_a_held_out_stack() {
         let device = burn::tensor::Device::flex().autodiff();
         let indice: usize = std::env::var("MEDOXIDE_STACK_TEST")
@@ -10679,7 +10679,7 @@ mod tests {
     /// d'intensité entre coupes (les erreurs de pose et de modèle ajoutent du bruit à l'estimation).
     /// Variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_STACK_TEST, MEDOXIDE_VOLUME, MEDOXIDE_POSES. À lancer en `--release --ignored --nocapture`.
     #[test]
-    #[ignore = "données réelles locales"]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_STACK_TEST (diagnostic sur données locales hors dépôt ; les autres variables sont dans la documentation du test)"]
     fn diagnose_slice_scales_on_real_data() {
         let h: usize = std::env::var("MEDOXIDE_STACK_TEST")
             .expect("MEDOXIDE_STACK_TEST")

@@ -2083,7 +2083,7 @@ mod tests {
     /// Essai sur vrais stacks : voir `docs/svr/etude-05-estimation-mouvement.md` §9 pour le protocole et les critères. À lancer
     /// en `--release --ignored --nocapture` (données locales).
     #[test]
-    #[ignore = "données locales ; lent en debug"]
+    #[ignore = "données locales ; lent en debug ; échoue : les sujets attendus (sub-S01…) ne sont plus dans data/svr/jeu_reel_tru_haste (les identifiants de sujets ont changé) : à réadapter avant de les relancer"]
     fn registration_on_real_stacks_with_two_independent_references() {
         let device = device().autodiff();
         let sujets = sujets_de_test();
@@ -2259,7 +2259,7 @@ mod tests {
     /// recalée depuis la pose nulle et depuis 6 poses tirées dans ±5 mm ; on compare la NCC finale du départ nul au meilleur départ.
     /// À lancer en `--release --ignored --nocapture` (longue : une dizaine de minutes).
     #[test]
-    #[ignore = "données locales ; longue"]
+    #[ignore = "données locales ; longue ; échoue : les sujets attendus (sub-S01…) ne sont plus dans data/svr/jeu_reel_tru_haste (les identifiants de sujets ont changé) : à réadapter avant de les relancer"]
     fn multi_start_diagnostic_on_real_stacks() {
         let device = device().autodiff();
         let mut alea = Alea(8675309);
@@ -2535,7 +2535,7 @@ mod tests {
     /// coupes « bloquées » (gain du meilleur des 7 départs > 0,02) atteignent leur meilleure NCC à 0,005 près ; coût moyen ≤ 2,3
     /// recalages par coupe ; jamais de NCC inférieure à celle du premier recalage. À lancer en `--release --ignored --nocapture`.
     #[test]
-    #[ignore = "données locales ; longue (≈ 5 min en release)"]
+    #[ignore = "données locales ; longue (≈ 5 min en release) ; échoue : les sujets attendus (sub-S01…) ne sont plus dans data/svr/jeu_reel_tru_haste (les identifiants de sujets ont changé) : à réadapter avant de les relancer"]
     fn robust_registration_on_real_stacks() {
         let device = device().autodiff();
         let departs: Vec<[f64; 6]> = std::iter::once([0.0; 6])
