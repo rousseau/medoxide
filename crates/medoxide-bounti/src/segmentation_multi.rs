@@ -338,7 +338,7 @@ mod tests {
     /// **Critère M5** (`docs/MULTIBOUNTI.md`), chaîne de bout en bout avec NOTRE recalage : Dice moyen ≥ 0,98 sur les étiquettes présentes et Dice ≥ 0,95 pour toute étiquette d'au moins 1 000 voxels contre `sortie_officielle`, pour chaque volume de `MEDOXIDE_MULTI_IDS` (séparés par des virgules, `calme1` par défaut).
     /// Très long (343 fenêtres par volume). À lancer sous le garde-fou mémoire : `python scripts/garde_memoire.py 18 cargo test --release -p medoxide-bounti with_our_registration -- --ignored --nocapture`.
     #[test]
-    #[ignore = "demande les poids de Multi-BOUNTI et les références de data/multibounti (hors dépôt) ; très long"]
+    #[ignore = "demande les poids de Multi-BOUNTI et les références de data/multibounti (hors dépôt) ; très long ; critère M5 non atteint avec notre recalage (Dice moyen 0,715 pour 0,98, M5′ atteint) : voir docs/MULTIBOUNTI.md, section 11"]
     fn the_full_multibounti_chain_matches_the_official_one_with_our_registration() {
         let device = appareil();
         let reseaux = ReseauxMulti::charger(&racine().join("burn"), &device);

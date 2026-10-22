@@ -417,7 +417,7 @@ mod tests {
     /// **Critère de M4** (`docs/MULTIBOUNTI.md`, écrit avant la validation), sur les volumes de VALIDATION `calme3` et `feta005` à `feta010` : (i) pour au moins 6 volumes sur 7, l'écart de notre transformation à celle de MIRTK ne dépasse pas le plus grand écart des huit essais de MIRTK
     /// (départs perturbés, `scripts/multibounti_repetabilite.py`) à la même transformation officielle ; (ii) aucun écart à l'officielle ne dépasse 10 mm. Les volumes de mise au point (`calme1`, `calme2`, `feta001` à `feta004`) sont seulement affichés.
     #[test]
-    #[ignore = "demande les références et les essais de répétabilité de data/multibounti (hors dépôt)"]
+    #[ignore = "demande les références et les essais de répétabilité de data/multibounti (hors dépôt) ; critère M4 (i) non atteint (4 volumes sur 7 dans la dispersion de MIRTK, pire écart 5,00 mm) : voir docs/MULTIBOUNTI.md, section 8"]
     fn the_registration_stays_within_the_dispersion_of_mirtk() {
         use std::path::PathBuf;
         let racine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/multibounti");
