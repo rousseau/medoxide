@@ -1540,6 +1540,17 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : un critère fixé avant la mesure peut échouer, et c'est un résultat. Ici il a échoué largement (Dice moyen de 0,01 à 0,56 pour un seuil de 0,95) ; on l'a localisé avant de conclure (la commande existante sans mon code donne le même masque, donc pas d'erreur d'intégration ; changer d'axe de coupe fait varier le Dice de 0,63 à 0,87 ; le masque est précis à 98 % mais trop étroit : deux définitions différentes du « masque du cerveau »), consigné tel quel, et l'option marquée expérimentale, sans toucher au seuil ni arranger les chiffres. Les corrections possibles sont des choix de conception à valider sur des volumes qui n'ont pas servi à les régler.
 - **Où** : `Extraction` dans `crates/medoxide-bounti/src/segmentation.rs` au commit 068e72a (**code retiré ensuite**, à la demande de l'utilisateur : le mode `fetalbet` n'avait pas de raison d'être, Fetal-BET servant à la reconstruction) ; la leçon reste valable. `docs/BOUNTI.md` (sous-étape 5d-4).
 
+## 2026-10-21 — Lire un format binaire, composer une transformation affine, reconnaître un mutant équivalent
+
+- **Quoi (concept)** : (1) un fichier `.dof` de MIRTK est une suite d'entiers et de réels de 64 bits en **gros-boutiste** : `u32::from_be_bytes(octets.get(i..i + 4)?.try_into().ok()?)` lit un entier sans `unsafe` ni dépendance, et `get` rend `None` si le fichier est trop court (d'où `ErreurDof::Invalide` plutôt qu'une panique). (2) Une transformation affine en 3D est une matrice 4 × 4 produit de quatre matrices simples, `A = T·R·K·S` (translation, rotation, cisaillement, échelle) ; l'ordre du produit compte, et on l'a vérifié en comparant `A` à celle qu'affiche MIRTK (écart ≤ 5e-7). (3) Un **mutant équivalent** est une modification du code qui ne change aucun résultat : `< 5` au lieu de `< 4` dans la garde d'`amincir_le_cortex` survit, parce que la boucle `2..n - 2` est déjà vide jusqu'à n = 4. Un mutant qui survit n'est donc pas toujours un test manquant : on le prouve équivalent (ou on écrit le test), puis on le documente.
+- **Quoi (méthode)** : écrire d'abord le test qui distingue les cas (ici une marge de 2 voxels sur CHACUN des trois axes, avec le voisin et l'autre voxel placés sur un axe perpendiculaire, à l'intérieur de l'image) : les trois premiers survivants sont morts parce que le test d'origine ne regardait qu'un axe.
+- **Où** : `crates/medoxide-bounti/src/affine.rs`, `cortex.rs`, `docs/MULTIBOUNTI.md` (section 7).
+
+## 2026-10-21 — Mesurer le bruit de l'outil de référence avant de fixer un critère
+
+- **Quoi (méthode)** : le recalage de MIRTK dépend de son point de départ. Avant de demander au nôtre de « coller » à une sortie officielle, on a relancé MIRTK huit fois depuis des départs perturbés : écart moyen entre deux résultats de 2,7 à 4,7 mm (médiane). Un critère plus serré que ce bruit n'aurait pas de sens (il mesurerait la chance), et un critère fixé avant d'avoir mesuré aurait été arbitraire : c'est pourquoi la ligne M4 du tableau disait « à fixer après avoir mesuré ». On mesure aussi la **sensibilité de la sortie finale** à ce bruit (mêmes réseaux, recalages différents), qui donne le plancher réaliste du Dice.
+- **Où** : `scripts/multibounti_repetabilite.py`, `scripts/multibounti_repetabilite_mesure.py`, `docs/MULTIBOUNTI.md` (section 8).
+
 ---
 
 *(à compléter à la prochaine étape)*

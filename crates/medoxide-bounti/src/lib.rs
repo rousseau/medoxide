@@ -3,15 +3,23 @@
 //! Chaque réseau est le code généré par `onnx2burn` à partir de l'export ONNX du réseau MONAI d'origine, sans réentraînement. Les poids (GPL v3) restent hors du dépôt.
 //! Cette étape ne contient que l'U-Net 3D à 20 sorties, validé contre PyTorch (critère C1) ; la fusion des deux réseaux, le retournement et le pré/post-traitement viendront ensuite.
 
+pub mod affine;
 pub mod attunet;
 pub mod bet;
+pub mod cortex;
 pub mod etiquettes;
+pub mod fenetres;
 pub mod fusion;
 pub mod geometrie;
+pub mod lr;
 pub mod masque;
+pub mod multi;
+pub mod multibounti;
 pub mod norme;
 pub mod poids;
+pub mod recalage;
 pub mod segmentation;
+pub mod segmentation_multi;
 pub mod sortie;
 pub mod table;
 pub mod unet;
@@ -26,6 +34,11 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/bounti")
     }
 
+    /// Dossier des données locales de Multi-BOUNTI (poids convertis, références), ignoré par Git.
+    fn donnees_multi() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/multibounti")
+    }
+
     /// Lit un tableau brut `float32` petit-boutiste.
     fn lire_f32(chemin: &Path) -> Vec<f32> {
         let octets = std::fs::read(chemin)
@@ -38,9 +51,10 @@ mod tests {
             .collect()
     }
 
-    /// **Critère C1** pour un réseau (cube de `n`³, `data/bounti/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
+    /// **Critère C1** pour un réseau (cube de `n`³, `<racine>/reference/<nom>_<n>_*.f32` produit par `scripts/make_bounti_reference.py` ou `scripts/make_multibounti_reference.py`) : les logits du réseau Burn (`passe_avant`, GPU) égalent ceux de PyTorch/MONAI à un écart RELATIF maximal (max |Δ| / max |logit|) de 1e-5,
     /// et au moins 99,9 % des voxels ont la même étiquette (argmax sur les 20 canaux).
-    fn verifier_c1(
+    fn verifier_c1_dans(
+        racine: &Path,
         nom: &str,
         canaux: usize,
         n: usize,
@@ -48,8 +62,8 @@ mod tests {
         passe_avant: impl Fn(Tensor<5>) -> Tensor<5>,
         device: &Device,
     ) {
-        let entree = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_input.f32")));
-        let attendus = lire_f32(&donnees().join(format!("reference/{nom}_{n}{tag}_logits.f32")));
+        let entree = lire_f32(&racine.join(format!("reference/{nom}_{n}{tag}_input.f32")));
+        let attendus = lire_f32(&racine.join(format!("reference/{nom}_{n}{tag}_logits.f32")));
         assert_eq!(entree.len(), n * n * n);
         assert_eq!(attendus.len(), canaux * n * n * n);
 
@@ -62,7 +76,7 @@ mod tests {
             let suffixe = std::env::var("MEDOXIDE_DEVICE").unwrap_or_else(|_| "gpu".into());
             let octets: Vec<u8> = obtenus.iter().flat_map(|v| v.to_le_bytes()).collect();
             std::fs::write(
-                donnees().join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")),
+                racine.join(format!("reference/{nom}_{n}{tag}_burn_{suffixe}.f32")),
                 octets,
             )
             .unwrap();
@@ -89,6 +103,18 @@ mod tests {
             ecart / amplitude
         );
         assert!(accord >= 0.999, "accord des étiquettes {accord}");
+    }
+
+    /// [`verifier_c1_dans`] sur les références de BOUNTI (`data/bounti/reference/`).
+    fn verifier_c1(
+        nom: &str,
+        canaux: usize,
+        n: usize,
+        tag: &str,
+        passe_avant: impl Fn(Tensor<5>) -> Tensor<5>,
+        device: &Device,
+    ) {
+        verifier_c1_dans(&donnees(), nom, canaux, n, tag, passe_avant, device);
     }
 
     /// Appareil de calcul des tests : le GPU par défaut, ou le CPU de Burn (`flex`) avec `MEDOXIDE_DEVICE=flex` (diagnostic : sépare l'erreur de conversion de l'arithmétique du GPU).
@@ -318,5 +344,58 @@ mod tests {
         for n in [64usize, 128] {
             verifier_c1("bet", 2, n, "_reel", |x| modele.forward(x), &device);
         }
+    }
+
+    /// **Critère C1** des trois réseaux de Multi-BOUNTI (extraction du cerveau, gauche/droite, 43 étiquettes ; `docs/MULTIBOUNTI.md`, sous-étape M1) à 128³ sur des entrées réelles de la chaîne de `calme1`
+    /// (`scripts/make_multibounti_reference.py`) : écart relatif des logits ≤ 1e-5 contre PyTorch f32 et ≥ 99,9 % d'étiquettes identiques.
+    #[test]
+    #[ignore = "demande les poids de Multi-BOUNTI convertis et les références PyTorch dans data/multibounti (hors dépôt)"]
+    fn the_multibounti_networks_match_pytorch_on_real_inputs() {
+        let device = appareil();
+        let racine = donnees_multi();
+        let bet = crate::bet::Model::from_file(racine.join("burn/bet/bet_64.bpk"), &device);
+        verifier_c1_dans(&racine, "bet", 2, 128, "", |x| bet.forward(x), &device);
+        let lr = crate::lr::Model::from_file(racine.join("burn/lr/lr_64.bpk"), &device);
+        verifier_c1_dans(&racine, "lr", 3, 128, "", |x| lr.forward(x), &device);
+        let multi = crate::multi::Model::from_file(racine.join("burn/multi/multi_64.bpk"), &device);
+        verifier_c1_dans(&racine, "multi", 44, 128, "", |x| multi.forward(x), &device);
+    }
+
+    /// **Critère de la sous-étape M2** (`docs/MULTIBOUNTI.md`) : le réseau 43 étiquettes en Burn, appliqué par les 343 fenêtres de 128³ (recouvrement 0,8) à l'entrée de 256³ de `calme1` (`pad-reo-n4-masked-t2-256.nii.gz`, mise à l'échelle sur tout le volume comme le fait le script officiel),
+    /// donne des étiquettes **identiques à au moins 99,9 %** à la sortie officielle `multi-lab-reo-t2.nii.gz` (MONAI `sliding_window_inference`, PyTorch sur CPU). Très long (343 passes du réseau).
+    #[test]
+    #[ignore = "demande les poids de Multi-BOUNTI convertis et la référence officielle de calme1 dans data/multibounti (hors dépôt) ; long"]
+    fn the_multibounti_windows_match_the_official_labels() {
+        use crate::fenetres::etiquettes_par_fenetres;
+        use crate::geometrie::Volume;
+        let device = appareil();
+        let racine = donnees_multi();
+        let multi = crate::multi::Model::from_file(racine.join("burn/multi/multi_64.bpk"), &device);
+        let entree = Volume::lire(&racine.join("ref/calme1/pad-reo-n4-masked-t2-256.nii.gz")).unwrap();
+        let officiel = Volume::lire(&racine.join("ref/calme1/multi-lab-reo-t2.nii.gz")).unwrap();
+        let (min, max) = entree
+            .donnees
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        let image = entree.donnees.mapv(|v| (v - min) / (max - min));
+        let debut = std::time::Instant::now();
+        let reseau = |fenetre: &ndarray::Array3<f32>| -> Vec<f32> {
+            let valeurs: Vec<f32> = fenetre.iter().copied().collect();
+            let x = Tensor::<5>::from_data(TensorData::new(valeurs, [1, 1, 128, 128, 128]), &device);
+            multi.forward(x).into_data().try_to_vec::<f32>().unwrap()
+        };
+        let obtenu = etiquettes_par_fenetres(&image, 128, 0.8, 44, reseau).unwrap();
+        let duree = debut.elapsed().as_secs_f64();
+        let attendu = officiel.donnees.mapv(|v| v as u8);
+        let differents = obtenu.iter().zip(attendu.iter()).filter(|(a, b)| a != b).count();
+        let voxels = obtenu.len();
+        println!(
+            "FENETRES calme1 : {differents} voxels différents sur {voxels} ({:.5} % identiques), {duree:.0} s",
+            100.0 * (1.0 - differents as f64 / voxels as f64)
+        );
+        assert!(
+            differents as f64 <= 1e-3 * voxels as f64,
+            "{differents} voxels différents sur {voxels}"
+        );
     }
 }

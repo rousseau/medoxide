@@ -31,8 +31,20 @@ pub fn etiquettes_vers_la_grille(
     affine_source: &nalgebra::Matrix4<f64>,
     cible: &Volume,
 ) -> Array3<u8> {
+    etiquettes_vers_la_grille_par(etiquettes, affine_source, &nalgebra::Matrix4::identity(), cible)
+}
+
+/// Comme [`etiquettes_vers_la_grille`] avec une transformation (`transform-image … -labels -dofin`) : la lecture se fait au point `transformation × (position du voxel de la cible)`, exprimé dans le repère de la grille source.
+/// Pour appliquer l'INVERSE d'une transformation (`-dofin_i`), passer son inverse.
+pub fn etiquettes_vers_la_grille_par(
+    etiquettes: &Array3<u8>,
+    affine_source: &nalgebra::Matrix4<f64>,
+    transformation: &nalgebra::Matrix4<f64>,
+    cible: &Volume,
+) -> Array3<u8> {
     let dimensions = cible.dimensions();
-    let vers_source = affine_source.try_inverse().expect("affine inversible") * cible.affine;
+    let affine_cible = transformation * cible.affine;
+    let vers_source = affine_source.try_inverse().expect("affine inversible") * affine_cible;
     let mut resultat = Array3::<u8>::zeros((dimensions[0], dimensions[1], dimensions[2]));
     for ((i, j, k), sortie) in resultat.indexed_iter_mut() {
         let voxel = (vers_source * nalgebra::Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
@@ -47,7 +59,7 @@ pub fn etiquettes_vers_la_grille(
             affine: *affine_source,
         };
         let interpolee = carte
-            .reechantillonner_avec_marge(&cible.affine, dimensions, MARGE_ETIQUETTES)
+            .reechantillonner_avec_marge(&affine_cible, dimensions, MARGE_ETIQUETTES)
             .donnees;
         for (&valeur, sortie) in interpolee.iter().zip(resultat.iter_mut()) {
             if valeur > SEUIL {
