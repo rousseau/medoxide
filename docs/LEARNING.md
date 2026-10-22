@@ -1587,6 +1587,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : le calcul du mouvement par coupe (`‖M·c − c‖`, angle de rotation) est placé du côté de medoxide, qui sait ce que veut dire `M`. Les tests le fixent par des cas qu'on calcule à la main (translation (3, 4, 0) donne 5 mm ; rotation de 90° autour de z donne √202 mm pour le centre (10, 1, k) ; une rotation autour du centre même donne 0 mm et 90°), et par un aller-retour avec les écrivains (`write_poses` puis `lire_mouvement`, valeur par valeur ; `dseg_tsv()` puis `lire_dseg_tsv`).
 - **Où** : `crates/medoxide-core/src/sorties.rs`.
 
+## 2026-10-22 — Séquentiel par construction : Gauss–Seidel contre Jacobi, et mesurer avant de croire
+
+- **Quoi (concept)** : deux façons de mettre à jour des inconnues qui dépendent les unes des autres. **Gauss–Seidel** utilise tout de suite la valeur mise à jour (chaque coupe voit les poses déjà corrigées des précédentes) : converge vite, mais l'ordre compte et rien ne se parallélise. **Jacobi** fige l'état au début du balayage : chaque coupe se calcule seule (`par_iter` de rayon, puis `collect` qui garde l'ordre), donc le résultat ne dépend pas du nombre de threads, au prix d'une convergence plus lente. En Rust : un `enum S2sUpdate`, le corps du calcul d'une coupe sorti dans une fonction pure (`recaler_coupe`, qui lit un état et rend une `MiseAJour`) et un petit `struct Etat` qui applique les résultats ; le refactor a gardé Gauss–Seidel identique au bit près (comparaison de fichiers de poses).
+- **Quoi (méthode)** : trois hypothèses fausses écartées par la mesure : (1) « 1ff2672 a fait perdre du parallélisme » (la phase lente, s2s, n'a jamais utilisé rayon : poses et temps identiques à 5138f80) ; (2) « la réduction par blocs coûte 40 % de mémoire » (le même binaire donne de 3,1 à 4,9 Go d'un lancement à l'autre sur un calcul identique ; une seule mesure par version ne prouve rien) ; (3) « Jacobi est meilleur parce qu'il est plus rapide » (même qualité en mouvement modéré, moins bon à 8 mm). Un critère de convergence écrit avant de regarder les chiffres s'est révélé trop bruité (il se déclenche sur un palier) : on le dit et on montre les courbes.
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`recaler_coupe`, `Etat`, `register_slices_s2s_traced`), `scripts/analyse_jacobi.py`, `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

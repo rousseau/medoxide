@@ -54,6 +54,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--s2v-refine-cycles`, `--s2v-refine-resolution-mm` | Raffinement coupe-volume après le coupe-coupe : `N` cycles de la boucle coupe-volume partant des poses du coupe-coupe, sur les stacks corrigés du biais, avec une reconstruction à la résolution indiquée (2 mm, pour borner le coût) ; la reconstruction finale se fait ensuite à la résolution demandée. **Désactivé par défaut (0)** : sur le banc semi-synthétique il gagne +27 à +48 points (mouvements difficiles) sans dégrader la médiane, mais sur six sujets réels l'accord des poses avec SVRTK, NeSVoR et NiftyMIC baisse légèrement (part de coupes à plus de 3 mm de 20,6 à 24,2 % en moyenne) et la concordance de 0,813 à 0,773. Voir [Validation](validation.md#régularisation-temporelle). | 0, 2 |
 | `--s2s-exclude-fraction` | Écarte de la RECONSTRUCTION la fraction indiquée (0 à 1) des coupes recalées de plus faible concordance finale (masque de coupe vidé ; les poses ne changent pas). **Désactivé par défaut (0)** : la concordance finale prédit modérément l'échec de pose (AUC 0,72 à 0,86 sur le banc semi-synthétique), mais exclure 15 % des coupes dégrade la netteté de 2 à 4 % et le juge hors échantillon sur trois sujets. Voir [Validation](validation.md#régularisation-temporelle). | 0 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
+| `--s2s-update` | Avec `s2s` : mise à jour des poses pendant un balayage. `gauss-seidel` : les coupes sont recalées l'une après l'autre, chacune voit les poses déjà mises à jour (séquentiel). `jacobi` : toutes les coupes d'un balayage sont recalées en parallèle contre les poses du balayage précédent. Voir [ci-dessous](#gauss-seidel-ou-jacobi). | `gauss-seidel` |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 
 ## Dans une arborescence BIDS
@@ -93,6 +94,23 @@ L'affine d'un stack (et de son masque) suit la règle de nibabel et de guioxide 
 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
 et la reconstruction du volume est la même.
+
+## Gauss–Seidel ou Jacobi
+
+Le recalage coupe-coupe fait plusieurs balayages de toutes les coupes. Par défaut (`--s2s-update gauss-seidel`) il les recale **une à une** : la phase est séquentielle (un seul cœur) et ses résultats sont ceux de toutes les mesures de cette page. `--s2s-update jacobi` recale toutes les coupes d'un balayage **en parallèle**, contre les poses figées au début du balayage, puis les met à jour ensemble. Le résultat ne dépend ni de l'ordre des coupes ni du nombre de threads (poses identiques au bit près avec 1, 3 ou 8 threads).
+
+Mesures (3 stacks, 6 balayages nets, un lancement par cas, Mac à 12 cœurs partagé avec d'autres calculs ; `scripts/analyse_jacobi.py`) :
+
+| Jeu | Durée totale GS / Jacobi | Par balayage net | Erreur médiane de pose | Concordance finale |
+|---|---|---|---|---|
+| Réel (un sujet, trois stacks trufi) | 913 / 479 s | 48 / 9 s | (pas de vérité) | 0,866 / 0,867 |
+| Simulé, mouvement lisse de 4 mm | 960 / 471 s | 50 / 9 s | 0,46 / 0,48 mm | 0,914 / 0,915 |
+| Simulé, mouvement lisse de 8 mm | 974 / 599 s | 51 / 15 s | 3,75 / 4,32 mm | 0,668 / 0,617 |
+| Simulé, mouvement non lisse de 8 mm | 839 / 455 s | 40 / 9 s | 9,19 / 10,09 mm | 0,268 / 0,249 |
+
+Pour un mouvement modéré, Jacobi donne la même qualité en deux fois moins de temps (le balayage est 4 à 5 fois plus rapide, mais l'alignement par blocs, séquentiel, reste). Il consomme environ 1,4 fois plus de CPU au total. Pour un mouvement de 8 mm, **aucune des deux variantes ne corrige correctement** (l'erreur dépasse même celle sans correction pour le mouvement non lisse), et Jacobi est un peu moins bon. Il converge aussi plus lentement (déplacement moyen sous 0,1 mm au balayage 2 contre 1 sur le sujet réel). Il n'a pas été validé sur les six sujets réels : c'est pourquoi Gauss–Seidel reste le défaut.
+
+Pour inspecter la convergence, `MEDX_S2S_TRACE=1` affiche une ligne par balayage (nombre de mises à jour, concordance, déplacement moyen, durée) et la concordance finale mesurée de la même façon pour les deux variantes ; `MEDX_S2S_TRACE_DIR=<dossier>` écrit les poses après chaque balayage.
 
 ## CPU ou GPU
 
