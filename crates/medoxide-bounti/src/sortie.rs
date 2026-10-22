@@ -1,7 +1,9 @@
 //! Écriture des résultats de BOUNTI : étiquettes de tissus (`dseg.nii.gz`), table des étiquettes (`dseg.tsv`) et masque du cerveau, dans un dossier au choix ou dans l'arborescence BIDS dérivée que lit guioxide (`docs/donnees.md` de guioxide) :
-//! `<racine>/derivatives/medx-bounti/sub-X/ses-Y/anat/sub-X_ses-Y_desc-bounti_dseg.nii.gz`, `…_dseg.tsv`, `…_desc-bounti_mask.nii.gz`, avec `derivatives/medx-bounti/dataset_description.json`.
+//! `<étude>/derivatives/medx-bounti/sub-X/ses-Y/anat/sub-X_ses-Y_desc-bounti_dseg.nii.gz`, `…_dseg.tsv`, `…_desc-bounti_mask.nii.gz`, avec `derivatives/medx-bounti/dataset_description.json`.
+//! `<étude>` est la racine de l'étude de [`medoxide_core::bids::racine_etude`] : le parent de la racine BIDS si elle s'appelle `sourcedata`, sinon la racine BIDS, ou le dossier donné à `--output-dir`.
 use crate::segmentation::Segmentation;
 use crate::table::dseg_tsv;
+use medoxide_core::bids::{self, ErreurBids, Generateur};
 use nalgebra::Matrix4;
 use ndarray::Array3;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,20 @@ impl std::fmt::Display for ErreurSortie {
 
 impl std::error::Error for ErreurSortie {}
 
+impl From<ErreurBids> for ErreurSortie {
+    fn from(e: ErreurBids) -> Self {
+        match e {
+            ErreurBids::Identifiant(v) => ErreurSortie::Identifiant(v),
+            ErreurBids::Fichier { chemin, message } => ErreurSortie::Ecriture { chemin, message },
+            // `bounti` ne liste pas de piles
+            ErreurBids::AucunePile(chemin) => ErreurSortie::Ecriture {
+                chemin,
+                message: "aucune pile".to_string(),
+            },
+        }
+    }
+}
+
 /// Chemins des fichiers à écrire.
 #[derive(Debug, PartialEq)]
 pub struct Fichiers {
@@ -43,39 +59,27 @@ pub struct Fichiers {
     pub table: PathBuf,
     /// Masque du cerveau (`uint8`, 0 ou 1), s'il est demandé.
     pub masque: Option<PathBuf>,
-    /// Racine de l'arborescence dérivée (`<racine>/derivatives/medx-bounti`) en mode BIDS : elle reçoit `dataset_description.json`.
+    /// Racine de l'arborescence dérivée (`<étude>/derivatives/medx-bounti`) en mode BIDS : elle reçoit `dataset_description.json`.
     pub derive: Option<PathBuf>,
 }
 
-/// Un identifiant BIDS : lettres et chiffres ASCII, non vide.
-fn verifier_identifiant(valeur: &str) -> Result<(), ErreurSortie> {
-    if !valeur.is_empty() && valeur.chars().all(|c| c.is_ascii_alphanumeric()) {
-        Ok(())
-    } else {
-        Err(ErreurSortie::Identifiant(valeur.to_string()))
-    }
-}
-
-/// Chemins BIDS des résultats : `<racine>/derivatives/medx-bounti/sub-<participant>[/ses-<session>]/anat/` et les noms `sub-<participant>[_ses-<session>]_desc-bounti_dseg.nii.gz`, `…_dseg.tsv`, `…_desc-bounti_mask.nii.gz`.
+/// Chemins BIDS des résultats : `<étude>/derivatives/medx-bounti/sub-<participant>[/ses-<session>]/anat/` et les noms `sub-<participant>[_ses-<session>]_desc-bounti_dseg.nii.gz`, `…_dseg.tsv`, `…_desc-bounti_mask.nii.gz`.
+/// L'étude est celle de [`medoxide_core::bids::racine_etude`]`(racine_bids, sortie)`.
 ///
 /// # Erreurs
 /// [`ErreurSortie::Identifiant`] si le participant ou la session n'est pas alphanumérique (la valeur entre dans un chemin : pas de séparateur ni de `..`).
-pub fn fichiers_bids(racine: &Path, participant: &str, session: Option<&str>) -> Result<Fichiers, ErreurSortie> {
-    verifier_identifiant(participant)?;
-    let derive = racine.join("derivatives/medx-bounti");
-    let mut dossier = derive.join(format!("sub-{participant}"));
-    let mut prefixe = format!("sub-{participant}");
-    if let Some(s) = session {
-        verifier_identifiant(s)?;
-        dossier = dossier.join(format!("ses-{s}"));
-        prefixe = format!("{prefixe}_ses-{s}");
-    }
-    let dossier = dossier.join("anat");
+pub fn fichiers_bids(
+    racine_bids: &Path,
+    sortie: Option<&Path>,
+    participant: &str,
+    session: Option<&str>,
+) -> Result<Fichiers, ErreurSortie> {
+    let d = bids::dossier_derive(racine_bids, sortie, bids::PIPELINE_BOUNTI, participant, session)?;
     Ok(Fichiers {
-        etiquettes: dossier.join(format!("{prefixe}_desc-bounti_dseg.nii.gz")),
-        table: dossier.join(format!("{prefixe}_desc-bounti_dseg.tsv")),
-        masque: Some(dossier.join(format!("{prefixe}_desc-bounti_mask.nii.gz"))),
-        derive: Some(derive),
+        etiquettes: d.anat.join(format!("{}_desc-bounti_dseg.nii.gz", d.prefixe)),
+        table: d.anat.join(format!("{}_desc-bounti_dseg.tsv", d.prefixe)),
+        masque: Some(d.anat.join(format!("{}_desc-bounti_mask.nii.gz", d.prefixe))),
+        derive: Some(d.pipeline),
     })
 }
 
@@ -97,13 +101,6 @@ pub fn fichiers_libres(etiquettes: &Path, masque: Option<&Path>) -> Fichiers {
     }
 }
 
-fn ecrire_texte(chemin: &Path, texte: &str) -> Result<(), ErreurSortie> {
-    std::fs::write(chemin, texte).map_err(|e| ErreurSortie::Ecriture {
-        chemin: chemin.to_path_buf(),
-        message: e.to_string(),
-    })
-}
-
 /// Écrit un volume `uint8` avec l'affine donnée (`sform` et `qform` cohérents, voir [`medoxide_core::definir_affine`]).
 pub fn ecrire_volume(chemin: &Path, donnees: &Array3<u8>, affine: &Matrix4<f64>) -> Result<(), ErreurSortie> {
     let mut en_tete = nifti::NiftiHeader::default();
@@ -120,38 +117,25 @@ pub fn ecrire_volume(chemin: &Path, donnees: &Array3<u8>, affine: &Matrix4<f64>)
         })
 }
 
-/// Contenu de `dataset_description.json` d'un dossier dérivé BIDS (nom, version de BIDS, générateur et sa version).
-fn description_du_jeu() -> String {
-    format!(
-        "{{\n  \"Name\": \"medx-bounti\",\n  \"BIDSVersion\": \"1.9.0\",\n  \"DatasetType\": \"derivative\",\n  \"GeneratedBy\": [\n    {{\n      \"Name\": \"medx bounti\",\n      \"Version\": \"{}\",\n      \"CodeURL\": \"https://github.com/rousseau/medoxide\"\n    }}\n  ]\n}}\n",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-/// Écrit les résultats aux chemins `fichiers` (dossiers créés au besoin) : étiquettes, table, masque du cerveau s'il y a un chemin pour lui, et `dataset_description.json` en mode BIDS. `affine` est celle de l'image segmentée.
+/// Écrit les résultats aux chemins `fichiers` (dossiers créés au besoin) : étiquettes, table, masque du cerveau s'il y a un chemin pour lui, et `dataset_description.json` (décrit par `generateur`) en mode BIDS. `affine` est celle de l'image segmentée.
 ///
 /// # Erreurs
 /// [`ErreurSortie::Ecriture`] si un dossier ou un fichier ne peut pas être écrit.
-pub fn ecrire(fichiers: &Fichiers, resultat: &Segmentation, affine: &Matrix4<f64>) -> Result<(), ErreurSortie> {
-    let creer = |chemin: &Path| {
-        if let Some(parent) = chemin.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).map_err(|e| ErreurSortie::Ecriture {
-                chemin: parent.to_path_buf(),
-                message: e.to_string(),
-            })?;
-        }
-        Ok(())
-    };
-    creer(&fichiers.etiquettes)?;
+pub fn ecrire(
+    fichiers: &Fichiers,
+    resultat: &Segmentation,
+    affine: &Matrix4<f64>,
+    generateur: &Generateur,
+) -> Result<(), ErreurSortie> {
+    bids::creer_dossier_parent(&fichiers.etiquettes)?;
     ecrire_volume(&fichiers.etiquettes, &resultat.etiquettes, affine)?;
-    creer(&fichiers.table)?;
-    ecrire_texte(&fichiers.table, &dseg_tsv())?;
+    bids::ecrire_texte(&fichiers.table, &dseg_tsv())?;
     if let Some(masque) = &fichiers.masque {
-        creer(masque)?;
+        bids::creer_dossier_parent(masque)?;
         ecrire_volume(masque, &resultat.cerveau.mapv(u8::from), affine)?;
     }
     if let Some(derive) = &fichiers.derive {
-        ecrire_texte(&derive.join("dataset_description.json"), &description_du_jeu())?;
+        bids::ecrire_description_derivee(derive, bids::PIPELINE_BOUNTI, generateur)?;
     }
     Ok(())
 }
@@ -164,7 +148,7 @@ mod tests {
     /// Chemins BIDS avec session, sans session, et refus des identifiants qui sortiraient de l'arborescence ou portent un préfixe.
     #[test]
     fn the_bids_paths_follow_the_derivative_layout() {
-        let f = fichiers_bids(Path::new("/d"), "01", Some("A2")).unwrap();
+        let f = fichiers_bids(Path::new("/d"), None, "01", Some("A2")).unwrap();
         assert_eq!(
             f.etiquettes,
             Path::new("/d/derivatives/medx-bounti/sub-01/ses-A2/anat/sub-01_ses-A2_desc-bounti_dseg.nii.gz")
@@ -180,21 +164,42 @@ mod tests {
             ))
         );
         assert_eq!(f.derive.as_deref(), Some(Path::new("/d/derivatives/medx-bounti")));
-        let sans = fichiers_bids(Path::new("/d"), "01", None).unwrap();
+        let sans = fichiers_bids(Path::new("/d"), None, "01", None).unwrap();
         assert_eq!(
             sans.etiquettes,
             Path::new("/d/derivatives/medx-bounti/sub-01/anat/sub-01_desc-bounti_dseg.nii.gz")
         );
         for mauvais in ["", "sub-01", "../x", "a/b", "a b", "é"] {
             assert!(
-                fichiers_bids(Path::new("/d"), mauvais, None).is_err(),
+                fichiers_bids(Path::new("/d"), None, mauvais, None).is_err(),
                 "participant {mauvais:?}"
             );
             assert!(
-                fichiers_bids(Path::new("/d"), "01", Some(mauvais)).is_err(),
+                fichiers_bids(Path::new("/d"), None, "01", Some(mauvais)).is_err(),
                 "session {mauvais:?}"
             );
         }
+    }
+
+    /// Racine de l'étude : sous une racine BIDS `sourcedata/` (buckets Garage), les dérivées vont à côté, dans `<parent>/derivatives/medx-bounti/`, et non dans `sourcedata/derivatives/` ; `--output-dir` remplace la racine de l'étude.
+    #[test]
+    fn the_derivatives_sit_next_to_sourcedata_not_inside() {
+        let f = fichiers_bids(Path::new("/g/fetal-x/sourcedata"), None, "01", Some("1")).unwrap();
+        let dossier = "/g/fetal-x/derivatives/medx-bounti/sub-01/ses-1/anat";
+        assert_eq!(
+            f.etiquettes,
+            Path::new(&format!("{dossier}/sub-01_ses-1_desc-bounti_dseg.nii.gz"))
+        );
+        assert_eq!(
+            f.derive.as_deref(),
+            Some(Path::new("/g/fetal-x/derivatives/medx-bounti"))
+        );
+        // une racine BIDS d'un autre nom garde ses dérivées à l'intérieur
+        let f = fichiers_bids(Path::new("/g/jeu"), None, "01", None).unwrap();
+        assert_eq!(f.derive.as_deref(), Some(Path::new("/g/jeu/derivatives/medx-bounti")));
+        // --output-dir remplace la racine de l'étude, `sourcedata` ou non
+        let f = fichiers_bids(Path::new("/g/fetal-x/sourcedata"), Some(Path::new("/o")), "01", None).unwrap();
+        assert_eq!(f.derive.as_deref(), Some(Path::new("/o/derivatives/medx-bounti")));
     }
 
     /// Hors BIDS : la table est à côté des étiquettes, `.nii.gz` ou `.nii` remplacé par `.tsv` (un nom sans extension NIfTI reçoit `.tsv`).
@@ -223,8 +228,8 @@ mod tests {
             etiquettes: etiquettes.clone(),
             cerveau: cerveau.clone(),
         };
-        let fichiers = fichiers_bids(&racine, "01", Some("1")).unwrap();
-        ecrire(&fichiers, &resultat, &affine).unwrap();
+        let fichiers = fichiers_bids(&racine, None, "01", Some("1")).unwrap();
+        ecrire(&fichiers, &resultat, &affine, &Generateur::new("medx bounti")).unwrap();
 
         let lu = Volume::lire(&fichiers.etiquettes).unwrap();
         assert_eq!(lu.donnees.mapv(|v| v as u8), etiquettes);
@@ -253,7 +258,13 @@ mod tests {
             cerveau: Array3::from_elem((2, 2, 2), true),
         };
         let fichiers = fichiers_libres(&racine.join("a/b/seg.nii.gz"), None);
-        ecrire(&fichiers, &resultat, &Matrix4::identity()).unwrap();
+        ecrire(
+            &fichiers,
+            &resultat,
+            &Matrix4::identity(),
+            &Generateur::new("medx bounti"),
+        )
+        .unwrap();
         assert!(racine.join("a/b/seg.nii.gz").is_file() && racine.join("a/b/seg.tsv").is_file());
         assert_eq!(std::fs::read_dir(racine.join("a/b")).unwrap().count(), 2);
         let _ = std::fs::remove_dir_all(&racine);

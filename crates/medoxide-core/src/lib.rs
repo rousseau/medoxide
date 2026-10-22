@@ -3,6 +3,11 @@
 //! Pour l'instant : la lecture de volumes NIfTI (en-tête et voxels). Ce crate ne
 //! dépend d'aucun module (ni de Burn, ni d'un modèle) : un module peut lire un
 //! volume sans en tirer les dépendances d'un autre.
+//!
+//! Les chemins et fichiers communs aux sorties BIDS des commandes `medx` sont dans [`bids`], l'écriture de JSON dans [`json`].
+
+pub mod bids;
+pub mod json;
 
 use std::path::Path;
 

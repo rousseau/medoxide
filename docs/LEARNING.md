@@ -1551,6 +1551,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : le recalage de MIRTK dépend de son point de départ. Avant de demander au nôtre de « coller » à une sortie officielle, on a relancé MIRTK huit fois depuis des départs perturbés : écart moyen entre deux résultats de 2,7 à 4,7 mm (médiane). Un critère plus serré que ce bruit n'aurait pas de sens (il mesurerait la chance), et un critère fixé avant d'avoir mesuré aurait été arbitraire : c'est pourquoi la ligne M4 du tableau disait « à fixer après avoir mesuré ». On mesure aussi la **sensibilité de la sortie finale** à ce bruit (mêmes réseaux, recalages différents), qui donne le plancher réaliste du Dice.
 - **Où** : `scripts/multibounti_repetabilite.py`, `scripts/multibounti_repetabilite_mesure.py`, `docs/MULTIBOUNTI.md` (section 8).
 
+## 2026-10-22 — Un module commun aux trois commandes, un JSON écrit à la main, un script de compilation
+
+- **Quoi (concept)** : (1) **factoriser vers le bas** : ce que `bounti`, `fetalbet` et le SVR doivent faire pareil (chemins BIDS, racine de l'étude, `dataset_description.json`) vit dans `medoxide-core::bids`, que les trois crates dépendent déjà d'utiliser ; chaque crate garde son type d'erreur et le convertit par `impl From<ErreurBids>`, ce qui laisse `?` faire la conversion. (2) Une `enum` **récursive** (`Json` : une liste ou un objet contient des `Json`) n'a pas besoin de `Box` quand le contenant est un `Vec`, qui range ses éléments sur le tas ; deux dizaines de lignes remplacent `serde_json` pour des fichiers petits dont on écrit la forme. (3) Un **script de compilation** (`build.rs`) s'exécute avant la crate : celui de `medx` demande à `git` le commit courant et le passe au compilateur par `cargo:rustc-env=MEDX_COMMIT=…` ; la crate le lit par `option_env!` (qui vaut `None` sans git, au lieu d'échouer comme `env!`).
+- **Quoi (méthode)** : la règle « les dérivées vont à côté de `sourcedata/` » était fausse dans `bounti` (elles allaient dedans). Plutôt que de corriger l'appelant, la règle est une fonction pure (`racine_etude`) testée seule, et `fichiers_bids` la reçoit en paramètre : un seul endroit à tester, et les deux autres commandes ne peuvent pas diverger.
+- **Où** : `crates/medoxide-core/src/bids.rs`, `json.rs`, `crates/medx/build.rs`, `crates/medoxide-bounti/src/sortie.rs`.
+
 ---
 
 *(à compléter à la prochaine étape)*

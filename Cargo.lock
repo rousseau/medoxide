@@ -3920,6 +3920,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "medoxide-bounti",
+ "medoxide-core",
  "medoxide-fetalbet",
  "medoxide-svr",
 ]

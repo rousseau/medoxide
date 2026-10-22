@@ -185,8 +185,9 @@ enum Command {
         /// Masque du cerveau (NIfTI), en plus des étiquettes. Hors BIDS
         #[arg(long, conflicts_with = "bids")]
         brain_mask: Option<PathBuf>,
-        /// Racine d'un jeu de données BIDS : écrit dans `<sortie>/derivatives/medx-bounti/sub-X/ses-Y/anat/`
-        /// (`_desc-bounti_dseg.nii.gz`, `_dseg.tsv`, `_desc-bounti_mask.nii.gz`)
+        /// Racine d'un jeu de données BIDS : écrit dans `<étude>/derivatives/medx-bounti/sub-X/ses-Y/anat/`
+        /// (`_desc-bounti_dseg.nii.gz`, `_dseg.tsv`, `_desc-bounti_mask.nii.gz`) ; `<étude>` est le parent de la racine
+        /// si elle s'appelle `sourcedata`, sinon la racine elle-même
         #[arg(long, requires = "participant")]
         bids: Option<PathBuf>,
         /// Identifiant du participant, sans préfixe `sub-` (avec --bids)
@@ -195,7 +196,8 @@ enum Command {
         /// Identifiant de la session, sans préfixe `ses-` (avec --bids)
         #[arg(long, conflicts_with = "output")]
         session: Option<String>,
-        /// Dossier racine de sortie à la place de la racine BIDS (avec --bids)
+        /// Dossier racine de l'étude à la place de la racine BIDS ou de son parent : les dérivées vont dans
+        /// `<dossier>/derivatives/` (avec --bids)
         #[arg(long, conflicts_with = "output")]
         output_dir: Option<PathBuf>,
         /// Dossier des poids convertis. Priorité : cette option, puis la variable d'environnement
@@ -399,6 +401,14 @@ fn format_boite(b: &medoxide_svr::BoundingBox) -> String {
     )
 }
 
+/// Générateur déclaré dans `dataset_description.json` : nom de la commande, version, commit de la compilation (voir `build.rs`) et ligne de commande de ce lancement.
+fn generateur(nom: &str) -> medoxide_core::bids::Generateur {
+    let ligne: Vec<String> = std::env::args().collect();
+    medoxide_core::bids::Generateur::new(nom)
+        .avec_commit(option_env!("MEDX_COMMIT"))
+        .avec_ligne_de_commande(&ligne.join(" "))
+}
+
 /// Segmente une reconstruction en 19 tissus et écrit les résultats : les chemins de sortie et les poids sont vérifiés avant tout calcul.
 fn bounti(
     entree: &std::path::Path,
@@ -437,7 +447,7 @@ fn bounti(
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = sortie::ecrire(&fichiers, &resultat, &volume.affine) {
+    if let Err(e) = sortie::ecrire(&fichiers, &resultat, &volume.affine, &generateur("medx bounti")) {
         eprintln!("medx bounti : {e}");
         return ExitCode::FAILURE;
     }
@@ -509,7 +519,8 @@ fn main() -> ExitCode {
             use medoxide_bounti::sortie;
             let fichiers = match (&bids, &output) {
                 (Some(racine), _) => sortie::fichiers_bids(
-                    output_dir.as_deref().unwrap_or(racine),
+                    racine,
+                    output_dir.as_deref(),
                     participant.as_deref().unwrap_or_default(),
                     session.as_deref(),
                 ),
