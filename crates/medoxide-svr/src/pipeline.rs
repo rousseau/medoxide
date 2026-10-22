@@ -237,28 +237,53 @@ impl ReconstructionOutput {
         })
     }
 
-    /// Écrit le mouvement de chaque coupe : un fichier texte, une ligne par coupe, `stack \t coupe \t` puis les 16 valeurs de la matrice 4 × 4 **en ordre colonne**
-    /// (lisible en Python par `reshape(4, 4, order="F")`). `stacks` donne les stacks de `poses`, dans le même ordre ; l'indice de stack écrit est celui de cette liste.
+    /// Écrit le mouvement de chaque coupe : un fichier TSV, une ligne par coupe dans l'ordre des stacks puis des coupes, terminé par un saut de ligne.
+    /// En-tête : `stack slice m00 m10 m20 m30 m01 m11 … m33`. `stack` est le nom du fichier du stack sans extension ([`medoxide_core::bids::nom_de_pile`]), `slice` l'indice de la coupe, puis les 16 valeurs de la matrice 4 × 4 `M` **en ordre colonne** (`m<ligne><colonne>` ;
+    /// lisible en Python par `reshape(4, 4, order="F")`).
+    ///
+    /// `M` est le mouvement rigide de la coupe, **absolu** par rapport à la géométrie d'en-tête de son stack et composé dans le repère monde : la coupe `k` du stack d'affine d'en-tête `A` est placée par `M · A · T(0, 0, k)` (voir [`crate::Slice::with_motion`]).
     /// Les nombres sont écrits avec leur représentation décimale la plus courte qui se relit exactement.
     ///
+    /// `stacks` donne les stacks de `poses`, dans le même ordre.
+    ///
     /// # Erreurs
-    /// [`SvrError::PoseMismatch`] si `stacks` n'a pas la forme des poses ; [`SvrError::Write`] si le fichier ne peut pas être écrit.
+    /// [`SvrError::PoseMismatch`] si `stacks` n'a pas la forme des poses ; [`SvrError::DuplicateStackName`] si deux stacks ont le même nom ; [`SvrError::Write`] si le fichier ne peut pas être écrit.
     pub fn write_poses(&self, stacks: &[Stack], path: &Path) -> Result<(), SvrError> {
         if !self.poses.matches(stacks) {
             return Err(SvrError::PoseMismatch);
         }
-        let mut lines = Vec::new();
+        let noms = stack_names(stacks)?;
+        // ordre colonne : m00 m10 m20 m30 m01 …
+        let colonnes: Vec<String> = (0..4).flat_map(|c| (0..4).map(move |l| format!("m{l}{c}"))).collect();
+        let mut lines = vec![format!("stack\tslice\t{}", colonnes.join("\t"))];
         for (s, stack) in stacks.iter().enumerate() {
             for k in 0..stack.dim().2 {
                 let values: Vec<String> = self.poses.get(s, k).iter().map(|v| format!("{v:?}")).collect();
-                lines.push(format!("{s}\t{k}\t{}", values.join("\t")));
+                lines.push(format!("{}\t{k}\t{}", noms[s], values.join("\t")));
             }
         }
-        std::fs::write(path, lines.join("\n")).map_err(|e| SvrError::Write {
+        std::fs::write(path, lines.join("\n") + "\n").map_err(|e| SvrError::Write {
             path: path.to_path_buf(),
             message: e.to_string(),
         })
     }
+}
+
+/// Noms des `stacks` (nom de fichier sans extension), qui doivent être deux à deux différents : un tableau de sortie désigne un stack par son nom.
+///
+/// # Erreurs
+/// [`SvrError::DuplicateStackName`] avec le nom répété.
+pub(crate) fn stack_names(stacks: &[Stack]) -> Result<Vec<String>, SvrError> {
+    let noms: Vec<String> = stacks
+        .iter()
+        .map(|s| medoxide_core::bids::nom_de_pile(s.path()))
+        .collect();
+    for (i, nom) in noms.iter().enumerate() {
+        if noms[..i].contains(nom) {
+            return Err(SvrError::DuplicateStackName(nom.clone()));
+        }
+    }
+    Ok(noms)
 }
 
 /// **Reconstruit un volume** à partir de stacks (avec masque cérébral) : définit la grille, estime le mouvement de chaque coupe selon

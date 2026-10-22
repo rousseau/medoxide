@@ -112,21 +112,22 @@ Pour le coupe-volume, le calcul sur GPU coupe par coupe a été interrompu aprè
 
 ## Fichier de poses
 
-Avec `--poses`, un fichier texte est écrit : **une ligne par coupe**, de la forme
+Avec `--poses` (ou `_desc-svr_motion.tsv` en BIDS), un fichier TSV est écrit : une ligne d'en-tête, puis **une ligne par coupe**, terminé par un saut de ligne.
 
 ```text
-stack<TAB>coupe<TAB>m11<TAB>m21<TAB>m31<TAB>m41<TAB>m12 … m44
+stack<TAB>slice<TAB>m00<TAB>m10<TAB>m20<TAB>m30<TAB>m01<TAB>m11 … m33
 ```
 
-`stack` et `coupe` sont comptés à partir de 0 (le stack est repéré par sa position dans `--input`).
-Les 16 valeurs sont la matrice 4 × 4 **en ordre colonne**, en coordonnées monde (mm, RAS+) : le
-mouvement rigide de la coupe, composé **après** l'affine de son en-tête. En Python :
+`stack` est le **nom du fichier du stack sans extension** (`sub-X_ses-Y_acq-ax_run-1_T2w`) : deux stacks de même nom sont refusés. `slice` est l'indice de la coupe dans son stack (0 = première).
+Les 16 valeurs sont la matrice `M` de 4 × 4 **en ordre colonne** (`m<ligne><colonne>`) : le mouvement rigide de la coupe, en coordonnées monde (mm, RAS+),
+**absolu** par rapport à la géométrie d'en-tête de son stack. La coupe `k` d'un stack d'affine d'en-tête `A` est placée par `M · A · T(0, 0, k)`, où `T(0, 0, k)` est la translation de `k` voxels le long de la troisième
+colonne de `A` : `M` est composé **après** l'affine de l'en-tête. En BIDS, ce sens est aussi écrit dans `_desc-svr_T2w.json` (clé `MotionConvention`). En Python :
 
 ```python
 m = np.array([float(v) for v in champs[2:]]).reshape(4, 4, order="F")
 ```
 
-Les nombres sont écrits avec assez de chiffres pour être relus exactement.
+Les nombres sont écrits avec assez de chiffres pour être relus exactement. Avant cette version, le fichier n'avait pas d'en-tête et `stack` était la position du stack dans `--input` ; les scripts de `scripts/` lisent les deux formes.
 
 ## Fichier de qualité
 

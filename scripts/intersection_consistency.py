@@ -23,11 +23,13 @@ from scipy import ndimage
 
 
 def lire_poses(chemin):
-    poses = {}
+    """Poses d'un fichier TSV (`stack coupe` puis 16 valeurs en ordre colonne) ; le stack est un indice (anciens fichiers) ou un nom, qui prend l'indice de son ordre d'apparition ; l'en-tête est ignoré."""
+    noms, poses = {}, {}
     for ligne in open(chemin):
         c = ligne.strip().split("\t")
-        if len(c) == 18:
-            poses[(int(c[0]), int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
+        if len(c) == 18 and c[0] != "stack":
+            s = int(c[0]) if c[0].isdigit() else noms.setdefault(c[0], len(noms))
+            poses[(s, int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
     return poses
 
 

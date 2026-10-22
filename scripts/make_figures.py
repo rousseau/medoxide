@@ -99,10 +99,13 @@ def synthetique():
 
 def deplacements_par_coupe(sujet, racine, plans, poses_tsv):
     """Déplacement (mm) du centre de chaque coupe sous la pose estimée par medoxide, par stack."""
-    poses = {}
+    poses, noms = {}, {}
     for ligne in open(poses_tsv):
         c = ligne.split("\t")
-        poses[(int(c[0]), int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
+        if c[0] == "stack":
+            continue
+        s = int(c[0]) if c[0].isdigit() else noms.setdefault(c[0], len(noms))
+        poses[(s, int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
     ses = sorted(d for d in os.listdir(f"{racine}/{sujet}") if d.startswith("ses-"))[0]
     sorties = []
     for n, plan in enumerate(plans):

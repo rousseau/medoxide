@@ -1563,6 +1563,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : les réglages de la reconstruction sont écrits dans le `.json` à la main, champ par champ ; un champ ajouté plus tard serait oublié sans bruit. Le test lit donc la sortie `{:#?}` (le `Debug` dérivé) de la configuration, en extrait les noms des champs, et vérifie que chacun est dans le JSON : l'oubli fait échouer le test. Les piles et masques d'une session sont désignés par les mêmes règles de nommage dans `fetalbet` (qui écrit) et le SVR (qui lit), toutes deux dans `medoxide-core::bids` : un seul endroit où elles peuvent diverger.
 - **Où** : `crates/medoxide-svr/src/sortie.rs`, `crates/medoxide-fetalbet/src/lib.rs` (`taches_bids`), `crates/medx/src/main.rs` (`DestinationSvr`, `fetalbet_bids`).
 
+## 2026-10-22 — Un format de fichier est un contrat : en-tête, noms, et le sens d'une matrice écrit à côté
+
+- **Quoi (méthode)** : un fichier de sortie lu par un autre programme se documente par lui-même : en-tête de colonnes (`stack slice m00 m10 …`, ordre colonne), pile désignée par son **nom** et non par sa position dans une liste d'arguments (qui n'existe plus pour le lecteur), et le sens de la matrice (`M` absolu, composé après l'affine d'en-tête : coupe → monde = `M · A · T(0, 0, k)`) écrit dans le `.json` voisin. Le sens a été relu dans `Slice::with_motion` et `Slice::affine` avant d'être écrit, pas recopié de l'issue. Changer un format casse ses lecteurs : les scripts Python de `scripts/` qui lisaient l'ancien fichier (indice, sans en-tête) lisent maintenant les deux formes, et un test compare à un fichier relu EXACTEMENT, avec une pose non symétrique pour qu'un ordre ligne/colonne inversé soit vu.
+- **Quoi (concept)** : `pub(crate)` rend une fonction visible dans la crate seulement (`stack_names`), utile quand un test de la crate la vérifie sans l'ajouter à l'API publique.
+- **Où** : `crates/medoxide-svr/src/pipeline.rs` (`write_poses`, `stack_names`), `sortie.rs` (`convention_du_mouvement`), `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

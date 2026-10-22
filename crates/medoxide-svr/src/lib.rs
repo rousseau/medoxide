@@ -82,6 +82,8 @@ pub enum SvrError {
     InvalidGrid,
     /// Écriture d'un fichier impossible ; contient le fichier fautif et la cause.
     Write { path: PathBuf, message: String },
+    /// Deux stacks ont le même nom de fichier (sans extension) : les tableaux de sortie (mouvement, qualité) les confondraient.
+    DuplicateStackName(String),
     /// Chemins ou fichiers BIDS : identifiant de participant ou de session invalide, dossier illisible, aucune pile, écriture impossible.
     Bids(medoxide_core::bids::ErreurBids),
     /// Moins de deux stacks : le mouvement ne peut pas être estimé (une coupe n'a pas de coupe d'un autre stack à croiser, ni de reconstruction indépendante d'elle).
@@ -117,6 +119,10 @@ impl std::fmt::Display for SvrError {
             SvrError::NoMask(p) => write!(f, "{} : pas de masque cérébral attaché", p.display()),
             SvrError::InvalidPsf => write!(f, "PSF invalide : écart type non strictement positif ou axe non fini"),
             SvrError::Write { path, message } => write!(f, "{} : écriture impossible : {message}", path.display()),
+            SvrError::DuplicateStackName(nom) => write!(
+                f,
+                "deux stacks ont le même nom « {nom} » : les fichiers de sortie les désignent par leur nom"
+            ),
             SvrError::Bids(e) => write!(f, "{e}"),
             SvrError::NotEnoughStacks => write!(f, "au moins deux stacks sont nécessaires pour estimer le mouvement"),
             SvrError::PoseMismatch => write!(

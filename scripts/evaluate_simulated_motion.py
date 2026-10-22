@@ -28,7 +28,15 @@ os.makedirs(args.sortie, exist_ok=True)
 
 
 def lire_poses(f):
-    return {(int(l.split("\t")[0]), int(l.split("\t")[1])): np.array([float(v) for v in l.split("\t")[2:]]).reshape(4, 4, order="F") for l in open(f).read().strip().split("\n")}
+    """Poses d'un fichier TSV : `stack coupe` puis 16 valeurs en ordre colonne. Le stack est un indice (anciens fichiers, sans en-tête) ou un nom (en-tête `stack slice m00 …`) : un nom prend l'indice de son ordre d'apparition."""
+    noms, poses = {}, {}
+    for l in open(f).read().strip().split("\n"):
+        c = l.split("\t")
+        if c[0] == "stack":
+            continue
+        s = int(c[0]) if c[0].isdigit() else noms.setdefault(c[0], len(noms))
+        poses[(s, int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
+    return poses
 
 
 def kabsch(P, Q):

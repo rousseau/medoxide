@@ -4434,6 +4434,37 @@ mod tests {
             vraies.get(0, 4) != &vraies.get(0, 4).transpose(),
             "les poses de test sont symétriques : le test ne voit pas un ordre inversé"
         );
+        // format du fichier : en-tête `stack slice m00 m10 … m33` (ordre colonne), nom de pile sans extension à la place de l'indice, une ligne par coupe, saut de ligne final
+        let texte = std::fs::read_to_string(&tsv).unwrap();
+        assert!(texte.ends_with('\n') && !texte.ends_with("\n\n"));
+        let lignes: Vec<&str> = texte.lines().collect();
+        assert_eq!(
+            lignes[0],
+            "stack\tslice\tm00\tm10\tm20\tm30\tm01\tm11\tm21\tm31\tm02\tm12\tm22\tm32\tm03\tm13\tm23\tm33"
+        );
+        assert_eq!(lignes.len(), 1 + stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        let champs: Vec<&str> = lignes[1].split('\t').collect();
+        assert_eq!(champs.len(), 18);
+        assert_eq!(
+            (champs[0].to_string(), champs[1]),
+            (medoxide_core::bids::nom_de_pile(stacks[0].path()), "0")
+        );
+        // la translation est la 4e colonne de la matrice : m03 m13 m23 sont aux positions 14, 15 et 16 de la ligne (après `stack`, `slice` et les 12 premières valeurs)
+        let m = vraies.get(0, 0);
+        assert_eq!(
+            [champs[14], champs[15], champs[16]].map(|v| v.parse::<f64>().unwrap()),
+            [m[(0, 3)], m[(1, 3)], m[(2, 3)]]
+        );
+        // deux stacks de même nom : refusés, un tableau ne pourrait pas les distinguer
+        assert_eq!(
+            crate::pipeline::stack_names(&stacks).unwrap().len(),
+            stacks.len(),
+            "noms distincts"
+        );
+        assert!(matches!(
+            crate::pipeline::stack_names(&[stacks[0].clone(), stacks[1].clone(), stacks[0].clone()]),
+            Err(SvrError::DuplicateStackName(_))
+        ));
         // (c) dossier inexistant
         let absent = t.fichier("absent/volume.nii.gz");
         assert!(matches!(sortie.write_volume(&absent), Err(SvrError::Write { .. })));
@@ -4525,9 +4556,14 @@ mod tests {
             "\"ResolutionMm\": 0.8",
             "\"alpha\": 0.1",
             "\"CommandLine\": \"medx svr recon --bids etude/sourcedata\"",
+            "\"MotionConvention\"",
+            "coupe → monde = M · A · T(0, 0, k)",
+            "absolu par rapport à la géométrie d'en-tête",
         ] {
             assert!(json.contains(attendu), "{attendu} absent de {json}");
         }
+        let mouvement = std::fs::read_to_string(anat.join("sub-01_ses-A_desc-svr_motion.tsv")).unwrap();
+        assert!(mouvement.starts_with("stack\tslice\tm00\tm10\tm20\tm30\tm01\t"));
         let description =
             std::fs::read_to_string(t.fichier("etude/derivatives/medx-svr/dataset_description.json")).unwrap();
         assert!(
@@ -10469,11 +10505,17 @@ mod tests {
         for ligne in std::fs::read_to_string(chemin)
             .expect("fichier de poses absent")
             .lines()
+            .filter(|l| !l.starts_with("stack\t"))
         {
             let c: Vec<&str> = ligne.split('\t').collect();
             let valeurs: Vec<f64> = c[2..].iter().map(|v| v.parse().unwrap()).collect();
+            // le stack est désigné par son nom (format actuel) ou par son indice (anciens fichiers sans en-tête)
+            let stack = stacks
+                .iter()
+                .position(|s| medoxide_core::bids::nom_de_pile(s.path()) == c[0])
+                .unwrap_or_else(|| c[0].parse().expect("stack inconnu"));
             poses.set(
-                c[0].parse().unwrap(),
+                stack,
                 c[1].parse().unwrap(),
                 Matrix4::from_iterator(valeurs.iter().copied()),
             );

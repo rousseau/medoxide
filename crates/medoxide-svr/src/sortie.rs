@@ -127,6 +127,35 @@ fn reglages(c: &ReconstructionConfig) -> Json {
     ])
 }
 
+/// Sens des matrices de `…_desc-svr_motion.tsv`, pour un lecteur qui n'a pas le code : voir [`ReconstructionOutput::write_poses`].
+fn convention_du_mouvement() -> Json {
+    Json::objet([
+        ("File", Json::texte("*_desc-svr_motion.tsv")),
+        (
+            "Matrix",
+            Json::texte(
+                "M : mouvement rigide de la coupe (matrice 4x4, mm), absolu par rapport à la géométrie d'en-tête de sa pile et composé dans le repère monde (RAS+, mm)",
+            ),
+        ),
+        (
+            "SliceToWorld",
+            Json::texte(
+                "coupe → monde = M · A · T(0, 0, k), où A est l'affine voxel → monde de l'en-tête de la pile et T(0, 0, k) la translation de k voxels selon la 3e colonne de A (k : indice de la coupe)",
+            ),
+        ),
+        (
+            "ColumnOrder",
+            Json::texte(
+                "colonnes m00 m10 m20 m30 m01 … m33 : m<ligne><colonne>, matrice rangée colonne par colonne (numpy : reshape(4, 4, order=\"F\"))",
+            ),
+        ),
+        (
+            "Stack",
+            Json::texte("nom du fichier de la pile sans extension, tel que listé dans Stacks"),
+        ),
+    ])
+}
+
 /// Contenu du fichier voisin du volume : résolution, mode de mouvement, réglages, piles utilisées (noms sans extension) et ligne de commande.
 fn description_du_volume(stacks: &[Stack], config: &ReconstructionConfig, generateur: &Generateur) -> Json {
     let mut champs = vec![
@@ -146,6 +175,7 @@ fn description_du_volume(stacks: &[Stack], config: &ReconstructionConfig, genera
             ),
         ),
         ("Settings", reglages(config)),
+        ("MotionConvention", convention_du_mouvement()),
     ];
     if let Some(ligne) = &generateur.ligne_de_commande {
         champs.push(("CommandLine", Json::texte(ligne)));
