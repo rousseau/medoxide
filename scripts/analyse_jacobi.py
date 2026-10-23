@@ -1,9 +1,12 @@
-"""Compare Gauss-Seidel et Jacobi du recalage coupe-coupe : temps, balayages jusqu'à convergence, erreur de pose (vérité connue sur les jeux simulés), concordance finale (mesure commune)."""
+"""Compare Gauss-Seidel et Jacobi du recalage coupe-coupe : temps, balayages jusqu'à convergence, erreur de pose (vérité connue sur les jeux simulés), concordance finale (mesure commune).
+
+Usage : python scripts/analyse_jacobi.py <dossier> <jeu> [<jeu> ...] ; le dossier contient jac/<jeu>-<gauss-seidel|jacobi>/{stderr.txt,time.txt,traces/} (lancements avec MEDX_S2S_TRACE=1 et MEDX_S2S_TRACE_DIR) ; `real3` désigne un jeu réel sans vérité."""
 import glob, os, re, sys
 import numpy as np, nibabel as nib
 
 S = sys.argv[1]
-SIM = "/Users/rousseau/Exp/medoxide/data/atlas/sim_pyrecon"
+# jeux simulés avec vérité (make_pyrecon_benchmark.py), relatifs à la racine du dépôt
+SIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "atlas", "sim_pyrecon")
 
 def lire_poses(f):
     d = {}
