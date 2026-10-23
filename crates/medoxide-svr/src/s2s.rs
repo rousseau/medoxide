@@ -844,6 +844,8 @@ pub struct S2sConfig {
     pub reliability_floor: f64,
     /// Façon de mettre à jour les poses pendant un balayage (voir [`S2sUpdate`]).
     pub update: S2sUpdate,
+    /// Façon de mettre à jour les poses pendant un balayage de l'alignement par blocs (voir [`S2sUpdate`]) : Gauss–Seidel, un bloc après l'autre, ou Jacobi, tous les blocs d'un balayage en parallèle contre les poses du début du balayage.
+    pub block_update: S2sUpdate,
 }
 
 /// Mise à jour des poses pendant un balayage de [`register_slices_s2s`].
@@ -894,6 +896,7 @@ impl Default for S2sConfig {
             reliability_high: 0.0,
             reliability_floor: 0.05,
             update: S2sUpdate::GaussSeidel,
+            block_update: S2sUpdate::GaussSeidel,
         }
     }
 }
@@ -1140,71 +1143,119 @@ pub(crate) fn align_blocks_level(
     niveau: usize,
     device: &Device,
 ) {
+    // tous les blocs du niveau, dans l'ordre des stacks puis des blocs (le premier stack est l'ancre au niveau 0)
+    let blocs: Vec<(usize, std::ops::Range<usize>)> = (0..stacks.len())
+        .filter(|&si| !(niveau == 0 && si == 0))
+        .flat_map(|si| {
+            block_partition(stacks[si].dim().2, niveau)
+                .into_iter()
+                .map(move |bloc| (si, bloc))
+        })
+        .collect();
     for _ in 0..config.block_sweeps {
-        for si in 0..stacks.len() {
-            if niveau == 0 && si == 0 {
-                continue;
+        match config.block_update {
+            S2sUpdate::GaussSeidel => {
+                for (si, bloc) in &blocs {
+                    if let Some(correction) = recaler_bloc(stacks, poses, atlas, config, *si, bloc.clone(), device) {
+                        correction.appliquer(poses);
+                    }
+                }
             }
-            for bloc in block_partition(stacks[si].dim().2, niveau) {
-                let mut problemes = Vec::new();
-                let (mut pivots, mut echelles, mut ks) = (Vec::new(), Vec::new(), Vec::new());
-                for k in bloc {
-                    let courante = *poses.get(si, k);
-                    let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else {
-                        continue;
-                    };
-                    let Some(probleme) =
-                        IntersectionProblem::build(atlas, stacks, poses, si, k, &config.intersection, device)
-                    else {
-                        continue;
-                    };
-                    problemes.push(probleme);
-                    pivots.push(preparee.pivot);
-                    echelles.push(preparee.echelle);
-                    ks.push(k);
-                }
-                if problemes.len() < 3 {
-                    continue;
-                }
-                let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
-                let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
-                let t_pivot = Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device);
-                let mut resultat = register_block_s2s(
-                    &problemes,
-                    t_pivot.clone(),
-                    echelle,
-                    config.registration,
-                    config.block_search_mm,
-                    config.block_search_step_mm,
-                );
-                if config.block_multistart_deg > 0.0 {
-                    let d = config.block_multistart_deg;
-                    let multi = register_block_multistart(
-                        &problemes,
-                        t_pivot,
-                        echelle,
-                        config.registration,
-                        &[-d, 0.0, d],
-                        3,
-                        config.block_multistart_keep,
-                        10,
-                        1.0,
-                    );
-                    if multi.ncc_history[1] > resultat.ncc_history[1] {
-                        resultat.params = multi.params;
-                        resultat.ncc_history[1] = multi.ncc_history[1];
-                    }
-                }
-                if resultat.ncc_history[1] >= resultat.ncc_history[0] {
-                    let delta = pose_to_matrix(&resultat.params, &pivot, echelle);
-                    for k in ks {
-                        let nouvelle = delta * poses.get(si, k);
-                        poses.set(si, k, nouvelle);
-                    }
+            S2sUpdate::Jacobi => {
+                // tous les blocs voient les poses du début du balayage ; les corrections sont appliquées ensemble ensuite
+                let figees = poses.clone();
+                let corrections: Vec<Option<CorrectionBloc>> = blocs
+                    .par_iter()
+                    .map(|(si, bloc)| recaler_bloc(stacks, &figees, atlas, config, *si, bloc.clone(), device))
+                    .collect();
+                for correction in corrections.into_iter().flatten() {
+                    correction.appliquer(poses);
                 }
             }
         }
     }
+}
+
+/// Correction rigide commune d'un bloc de coupes : à composer à gauche de la pose de chacune de ses coupes.
+struct CorrectionBloc {
+    stack: usize,
+    coupes: Vec<usize>,
+    delta: Matrix4<f64>,
+}
+
+impl CorrectionBloc {
+    /// Compose la correction à la pose de chaque coupe du bloc.
+    fn appliquer(&self, poses: &mut SlicePoses) {
+        for &k in &self.coupes {
+            let nouvelle = self.delta * poses.get(self.stack, k);
+            poses.set(self.stack, k, nouvelle);
+        }
+    }
+}
+
+/// Recale le bloc `bloc` (coupes consécutives) du stack `si` contre les poses `poses` : la correction rigide commune, acceptée seulement si la concordance du bloc ne baisse pas. `None` si le bloc a moins de trois coupes recalables ou si la correction est refusée.
+fn recaler_bloc(
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    atlas: &SliceAtlas,
+    config: &S2sConfig,
+    si: usize,
+    bloc: std::ops::Range<usize>,
+    device: &Device,
+) -> Option<CorrectionBloc> {
+    let mut problemes = Vec::new();
+    let (mut pivots, mut echelles, mut ks) = (Vec::new(), Vec::new(), Vec::new());
+    for k in bloc {
+        let courante = *poses.get(si, k);
+        let Some(preparee) = preparer_coupe(&stacks[si], k, courante) else {
+            continue;
+        };
+        let Some(probleme) = IntersectionProblem::build(atlas, stacks, poses, si, k, &config.intersection, device)
+        else {
+            continue;
+        };
+        problemes.push(probleme);
+        pivots.push(preparee.pivot);
+        echelles.push(preparee.echelle);
+        ks.push(k);
+    }
+    if problemes.len() < 3 {
+        return None;
+    }
+    let pivot = pivots.iter().fold(Vector3::zeros(), |a, p| a + p) / pivots.len() as f64;
+    let echelle = (echelles.iter().map(|e| e * e).sum::<f64>() / echelles.len() as f64).sqrt();
+    let t_pivot = Tensor::<1>::from_floats([pivot.x as f32, pivot.y as f32, pivot.z as f32], device);
+    let mut resultat = register_block_s2s(
+        &problemes,
+        t_pivot.clone(),
+        echelle,
+        config.registration,
+        config.block_search_mm,
+        config.block_search_step_mm,
+    );
+    if config.block_multistart_deg > 0.0 {
+        let d = config.block_multistart_deg;
+        let multi = register_block_multistart(
+            &problemes,
+            t_pivot,
+            echelle,
+            config.registration,
+            &[-d, 0.0, d],
+            3,
+            config.block_multistart_keep,
+            10,
+            1.0,
+        );
+        if multi.ncc_history[1] > resultat.ncc_history[1] {
+            resultat.params = multi.params;
+            resultat.ncc_history[1] = multi.ncc_history[1];
+        }
+    }
+    (resultat.ncc_history[1] >= resultat.ncc_history[0]).then(|| CorrectionBloc {
+        stack: si,
+        coupes: ks,
+        delta: pose_to_matrix(&resultat.params, &pivot, echelle),
+    })
 }
 
 /// Calendrier des balayages de [`register_slices_s2s`] : une liste de `(écart type du flou en pixels, nombre de balayages, net)`. D'abord les niveaux grossiers (`coarse_levels` niveaux, le flou `coarse_sigma_pixels` divisé par 2 à chaque niveau,
@@ -1557,6 +1608,23 @@ pub fn register_slices_s2s_traced(
         phase("alignement par blocs", || {
             align_blocks(stacks, &mut courantes, &atlas, config, device)
         });
+        // expérience : poses après l'alignement par blocs (MEDX_S2S_TRACE_DIR)
+        if let Some(dossier) = std::env::var_os("MEDX_S2S_TRACE_DIR") {
+            let lignes: Vec<String> = stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| {
+                    let m: Vec<String> = courantes.get(si, k).iter().map(|v| format!("{v:?}")).collect();
+                    format!("{si}\t{k}\t{}", m.join("\t"))
+                })
+                .collect();
+            let _ = std::fs::create_dir_all(&dossier);
+            let _ = std::fs::write(
+                std::path::Path::new(&dossier).join("blocs.tsv"),
+                lignes.join("\n") + "\n",
+            );
+        }
     }
     let niveaux = sweep_schedule(config);
     let total_balayages: usize = niveaux.iter().map(|n| n.1).sum();

@@ -83,6 +83,14 @@ fn nom_du_mouvement(motion: Motion) -> &'static str {
     }
 }
 
+/// Nom d'une mise à jour des poses dans les fichiers (celui de l'option `--s2s-update`).
+fn nom_de_la_mise_a_jour(u: crate::s2s::S2sUpdate) -> &'static str {
+    match u {
+        crate::s2s::S2sUpdate::GaussSeidel => "gauss-seidel",
+        crate::s2s::S2sUpdate::Jacobi => "jacobi",
+    }
+}
+
 /// Réglages de la reconstruction, tous les champs de [`ReconstructionConfig`] sous leur nom (un test vérifie qu'aucun ne manque).
 fn reglages(c: &ReconstructionConfig) -> Json {
     let reel = Json::Nombre;
@@ -98,12 +106,10 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("cg_max_iterations", entier(c.cg_max_iterations)),
         ("cg_tolerance", reel(c.cg_tolerance)),
         ("s2s_sweeps", entier(c.s2s_sweeps)),
+        ("s2s_update", Json::texte(nom_de_la_mise_a_jour(c.s2s_update))),
         (
-            "s2s_update",
-            Json::texte(match c.s2s_update {
-                crate::s2s::S2sUpdate::GaussSeidel => "gauss-seidel",
-                crate::s2s::S2sUpdate::Jacobi => "jacobi",
-            }),
+            "s2s_block_update",
+            Json::texte(nom_de_la_mise_a_jour(c.s2s_block_update)),
         ),
         ("s2s_coarse_sigma_pixels", reel(c.s2s_coarse_sigma_pixels)),
         ("s2s_coarse_sweeps", entier(c.s2s_coarse_sweeps)),

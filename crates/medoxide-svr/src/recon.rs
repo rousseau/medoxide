@@ -8251,6 +8251,68 @@ mod tests {
         );
     }
 
+    /// Alignement par blocs de Jacobi (branche s2s-jacobi-blocs) : critères fixés avant, blobs, 3 stacks, niveau 1 (blocs de 6 coupes : 5 blocs en parallèle, dont ceux de deux stacks mobiles) : (a) poses IDENTIQUES au bit près avec 1, 3 et 8 fils ;
+    /// (b) le premier stack (ancre) ne bouge pas au niveau 0 ; (c) la mise à jour de Jacobi diffère de celle de Gauss–Seidel (elle voit d'autres poses) mais corrige aussi : l'erreur médiane de pose baisse.
+    #[test]
+    fn the_jacobi_block_alignment_is_independent_of_the_number_of_threads() {
+        use crate::s2s::{align_blocks_level, S2sConfig, S2sUpdate, SliceAtlas};
+        let t = Temp::new("blocs_jacobi");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_par_stack(&modeles, 3.0, 3.0, 17);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let depart = SlicePoses::identity(&stacks);
+        let device = burn::tensor::Device::flex().autodiff();
+        let atlas = SliceAtlas::new(&stacks, &device).unwrap();
+        let config = |mise_a_jour| S2sConfig {
+            block_sweeps: 2,
+            block_search_mm: 8.0,
+            block_search_step_mm: 4.0,
+            block_update: mise_a_jour,
+            ..Default::default()
+        };
+        let aligner = |niveau: usize, mise_a_jour: S2sUpdate, fils: usize| {
+            let mut poses = depart.clone();
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(fils)
+                .build()
+                .unwrap()
+                .install(|| align_blocks_level(&stacks, &mut poses, &atlas, &config(mise_a_jour), niveau, &device));
+            poses
+        };
+        let un = aligner(1, S2sUpdate::Jacobi, 1);
+        for fils in [3, 8] {
+            let autre = aligner(1, S2sUpdate::Jacobi, fils);
+            for (si, s) in stacks.iter().enumerate() {
+                for k in 0..s.dim().2 {
+                    assert_eq!(un.get(si, k), autre.get(si, k), "{fils} fils, pose ({si},{k})");
+                }
+            }
+        }
+        // (b) niveau 0 : l'ancre ne bouge pas
+        let niveau0 = aligner(0, S2sUpdate::Jacobi, 4);
+        assert!(
+            (0..12).all(|k| niveau0.get(0, k) == depart.get(0, k)),
+            "l'ancre a bougé"
+        );
+        assert!(
+            (0..12).any(|k| niveau0.get(1, k) != depart.get(1, k)),
+            "le stack 1 n'a pas bougé"
+        );
+        // (c) Jacobi corrige (erreur médiane en baisse) et diffère de Gauss–Seidel
+        let gs = aligner(1, S2sUpdate::GaussSeidel, 4);
+        let e0 = erreurs_de_pose_sans_mouvement_commun(&stacks, &depart, &vraies);
+        let ej = erreurs_de_pose_sans_mouvement_commun(&stacks, &un, &vraies);
+        println!(
+            "erreur médiane : départ {:.2}, Jacobi {:.2}, Gauss–Seidel {:.2}",
+            quantile(&e0, 0.5),
+            quantile(&ej, 0.5),
+            quantile(&erreurs_de_pose_sans_mouvement_commun(&stacks, &gs, &vraies), 0.5)
+        );
+        assert!(quantile(&ej, 0.5) < quantile(&e0, 0.5));
+        assert!((0..3).any(|si| (0..12).any(|k| gs.get(si, k) != un.get(si, k))));
+    }
+
     /// Un niveau de l'alignement par blocs, sur des blobs, depuis des poses de départ DIFFÉRENTES pour chaque coupe : (a) niveau 0 : le premier stack ne bouge pas (exactement), chaque autre stack reçoit UNE transformation commune (`après · avant⁻¹` identique pour toutes ses coupes, à 1e-6 près, et
     /// différente de l'identité), égale à celle que donne directement `register_block_s2s` sur les mêmes problèmes (recherche, pas de grille, pivot moyen, échelle quadratique, composition à gauche) ; (b) niveau 3 : 12 coupes en 8 blocs de 1 ou 2 coupes (moins de 3) : aucune pose ne change ;
     /// (c) niveau 2 : blocs de 3 coupes : des poses changent ; (d) niveau 1 : le premier stack est aligné aussi (blocs de 6) ; (e) une mise à jour qui dégrade la concordance du bloc (pas d'Adam énorme depuis les poses vraies) est rejetée : poses inchangées.

@@ -143,6 +143,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : mise à jour des poses pendant un balayage (expérimental)
         #[arg(long, value_enum, default_value_t = UpdateArg::GaussSeidel)]
         s2s_update: UpdateArg,
+        /// Avec `--motion s2s` : mise à jour des poses pendant un balayage de l'alignement par blocs (expérimental)
+        #[arg(long, value_enum, default_value_t = UpdateArg::GaussSeidel)]
+        s2s_block_update: UpdateArg,
         /// Avec `--motion s2s` : écart type (en pixels) du flou des coupes pour des balayages préliminaires du gros vers le fin, qui élargissent la portée de capture (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_coarse_sigma_pixels)]
         s2s_coarse_sigma: f64,
@@ -685,6 +688,7 @@ fn main() -> ExitCode {
                     edge_kappa,
                     s2s_sweeps,
                     s2s_update,
+                    s2s_block_update,
                     s2s_coarse_sigma,
                     s2s_coarse_sweeps,
                     s2s_coarse_levels,
@@ -712,6 +716,7 @@ fn main() -> ExitCode {
                 edge_kappa,
                 s2s_sweeps,
                 s2s_update: s2s_update.into(),
+                s2s_block_update: s2s_block_update.into(),
                 s2s_coarse_sigma_pixels: s2s_coarse_sigma,
                 s2s_coarse_sweeps,
                 s2s_coarse_levels,
