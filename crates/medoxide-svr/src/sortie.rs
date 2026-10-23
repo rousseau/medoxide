@@ -98,6 +98,7 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("cg_max_iterations", entier(c.cg_max_iterations)),
         ("cg_tolerance", reel(c.cg_tolerance)),
         ("s2s_sweeps", entier(c.s2s_sweeps)),
+        ("s2s_block_parallel_gradient", Json::Bool(c.s2s_block_parallel_gradient)),
         (
             "s2s_update",
             Json::texte(match c.s2s_update {

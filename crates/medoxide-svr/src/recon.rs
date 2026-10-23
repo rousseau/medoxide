@@ -8209,6 +8209,56 @@ mod tests {
         }
     }
 
+    /// Gradient de bloc coupe par coupe en parallèle (branche s2s-adam-blocs) : critères fixés avant, blobs, stack coronal décalé de 8 mm, recherche puis 30 itérations d'Adam : (a) le résultat est IDENTIQUE au bit près avec 1, 3 et 8 fils ;
+    /// (b) il est proche de celui du graphe unique (écart de chaque paramètre < 0,05 : seul l'ordre des sommes flottantes change, pas le calcul) ; (c) la concordance finale est la même à 1e-3 près.
+    #[test]
+    fn the_parallel_block_gradient_is_independent_of_the_threads_and_close_to_the_single_graph() {
+        use crate::diff::RegistrationConfig;
+        let t = Temp::new("blocs_gradient");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let mut vraies = SlicePoses::identity(&modeles);
+        for k in 0..12 {
+            vraies.set(
+                1,
+                k,
+                mouvement_rigide(&Vector3::zeros(), &Vector3::new(8.0, 0.0, 0.0), &Vector3::zeros()),
+            );
+        }
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let (problemes, pivot, _, echelle) = problemes_de_bloc(&stacks, &SlicePoses::identity(&stacks), 1, &device);
+        let config = RegistrationConfig {
+            learning_rate: 0.3,
+            iterations: 30,
+            lr_decay: 0.97,
+            initial: [0.0; 6],
+        };
+        let lancer = |parallele: bool, fils: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(fils)
+                .build()
+                .unwrap()
+                .install(|| {
+                    crate::s2s::register_block_s2s(&problemes, pivot.clone(), echelle, config, 8.0, 4.0, parallele)
+                })
+        };
+        let un = lancer(true, 1);
+        for fils in [3, 8] {
+            assert_eq!(lancer(true, fils).params, un.params, "{fils} fils");
+        }
+        let seq = lancer(false, 4);
+        let ecart = (0..6)
+            .map(|i| (un.params[i] - seq.params[i]).abs())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "écart max des paramètres : {ecart:.2e} ; concordance {:.4} contre {:.4}",
+            un.ncc_history[1], seq.ncc_history[1]
+        );
+        assert!(ecart < 0.05, "écart {ecart}");
+        assert!((un.ncc_history[1] - seq.ncc_history[1]).abs() < 1e-3);
+    }
+
     /// Une recherche exhaustive suivie de quelques itérations d'Adam fait ce que quelques itérations d'Adam seules ne font pas (blobs, stack coronal décalé de 8 mm, 5 itérations, mesuré : concordance 0,48 sans recherche, 0,90 avec) et le point de départ d'Adam est bien le résultat de la recherche
     /// (translation estimée entre 7 et 9 mm).
     #[test]
@@ -8234,8 +8284,8 @@ mod tests {
             lr_decay: 1.0,
             initial: [0.0; 6],
         };
-        let sans = crate::s2s::register_block_s2s(&problemes, pivot.clone(), echelle, config, 0.0, 4.0);
-        let avec = crate::s2s::register_block_s2s(&problemes, pivot, echelle, config, 8.0, 4.0);
+        let sans = crate::s2s::register_block_s2s(&problemes, pivot.clone(), echelle, config, 0.0, 4.0, false);
+        let avec = crate::s2s::register_block_s2s(&problemes, pivot, echelle, config, 8.0, 4.0, false);
         println!(
             "concordance sans recherche {:.3}, avec {:.3} ; translation estimée {:.2?}",
             sans.ncc_history[1],
@@ -8306,6 +8356,7 @@ mod tests {
             config.registration,
             config.block_search_mm,
             config.block_search_step_mm,
+            false,
         );
         let attendu = crate::diff::pose_to_matrix(&r.params, &pivot, echelle);
         let obtenu = deltas(&niveau0, 1)[1];

@@ -844,6 +844,8 @@ pub struct S2sConfig {
     pub reliability_floor: f64,
     /// Façon de mettre à jour les poses pendant un balayage (voir [`S2sUpdate`]).
     pub update: S2sUpdate,
+    /// Alignement par blocs : calcule le gradient du coût d'un bloc coupe par coupe, en parallèle (un graphe d'autodiff par coupe), puis le somme dans l'ordre des coupes ; sinon un seul graphe pour tout le bloc, séquentiel (défaut). Le résultat ne dépend pas du nombre de threads, mais l'ordre des sommes flottantes diffère de celui du graphe unique.
+    pub block_parallel_gradient: bool,
 }
 
 /// Mise à jour des poses pendant un balayage de [`register_slices_s2s`].
@@ -894,6 +896,7 @@ impl Default for S2sConfig {
             reliability_high: 0.0,
             reliability_floor: 0.05,
             update: S2sUpdate::GaussSeidel,
+            block_parallel_gradient: false,
         }
     }
 }
@@ -983,6 +986,39 @@ pub(crate) fn recherche_exhaustive(evaluer: &(dyn Fn([f64; 6]) -> f64 + Sync), g
     meilleur
 }
 
+/// Gradient, par rapport aux six paramètres, de la perte `−concordance moyenne` d'un bloc (la moyenne des coûts de ses coupes), calculé coupe par coupe EN PARALLÈLE : chaque coupe a son propre graphe d'autodiff, libéré aussitôt. Les gradients des coupes sont ensuite sommés dans l'ordre des coupes (résultat indépendant du nombre de threads).
+fn block_gradient(
+    problems: &[IntersectionProblem],
+    params: [f32; 6],
+    pivot: &Tensor<1>,
+    rotation_scale_mm: f64,
+) -> [f32; 6] {
+    let device = pivot.device();
+    let par_coupe: Vec<[f32; 6]> = problems
+        .par_iter()
+        .map(|p| {
+            let feuille = Tensor::<1>::from_floats(params, &device).require_grad();
+            let cout = p.cost(feuille.clone(), pivot.clone(), rotation_scale_mm);
+            let gradients = cout.sum().backward();
+            let g = feuille
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
+            [g[0], g[1], g[2], g[3], g[4], g[5]]
+        })
+        .collect();
+    let n = problems.len() as f32;
+    let mut somme = [0.0_f32; 6];
+    for g in &par_coupe {
+        for (s, v) in somme.iter_mut().zip(g) {
+            *s += v;
+        }
+    }
+    somme.map(|s| -s / n)
+}
+
 /// **Recalage rigide commun d'un bloc de coupes** : un seul jeu de 6 paramètres (autour de `pivot`, rotations en mm équivalents) pour toutes les coupes de `problems`. Avec `search_mm > 0`, une recherche exhaustive précède
 /// l'optimisation : d'abord la meilleure translation de la grille `[-search_mm, search_mm]³` (pas `step_mm`, rotation nulle), puis la meilleure rotation de la grille (mêmes bornes, en mm équivalents) autour de cette translation ; Adam part de ce point.
 /// Rend les paramètres et l'historique de la concordance (première valeur : au zéro ; dernière : finale).
@@ -993,6 +1029,7 @@ pub(crate) fn register_block_s2s(
     config: RegistrationConfig,
     search_mm: f64,
     step_mm: f64,
+    gradient_parallele: bool,
 ) -> RegistrationResult {
     let device = pivot.device();
     let valeur = |t: Tensor<1>| f64::from(t.into_data().try_to_vec::<f32>().unwrap()[0]);
@@ -1016,8 +1053,21 @@ pub(crate) fn register_block_s2s(
     let mut optimiseur = AdamConfig::new().init();
     let mut pas = config.learning_rate;
     for _ in 0..config.iterations {
-        let concordance = block_cost(problems, module.params.val(), pivot.clone(), rotation_scale_mm);
-        let gradients = GradientsParams::from_grads(concordance.neg().sum().backward(), &module);
+        let gradients = if gradient_parallele {
+            // gradient de la perte `−concordance moyenne`, coupe par coupe en parallèle, puis une perte de substitution `params · G` (G constant) dont le gradient est exactement G
+            let c: Vec<f32> = module.params.val().into_data().try_to_vec::<f32>().unwrap();
+            let g = block_gradient(
+                problems,
+                [c[0], c[1], c[2], c[3], c[4], c[5]],
+                &pivot,
+                rotation_scale_mm,
+            );
+            let substitution = (module.params.val() * Tensor::<1>::from_floats(g, &device)).sum();
+            GradientsParams::from_grads(substitution.backward(), &module)
+        } else {
+            let concordance = block_cost(problems, module.params.val(), pivot.clone(), rotation_scale_mm);
+            GradientsParams::from_grads(concordance.neg().sum().backward(), &module)
+        };
         module = optimiseur.step(pas, module, gradients);
         pas *= config.lr_decay;
     }
@@ -1176,6 +1226,7 @@ pub(crate) fn align_blocks_level(
                     config.registration,
                     config.block_search_mm,
                     config.block_search_step_mm,
+                    config.block_parallel_gradient,
                 );
                 if config.block_multistart_deg > 0.0 {
                     let d = config.block_multistart_deg;

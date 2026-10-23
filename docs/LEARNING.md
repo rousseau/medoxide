@@ -1599,6 +1599,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (concept)** : `par_iter().map().collect()` rend les résultats dans l'ordre des entrées ; appliquer ensuite les corrections dans cet ordre donne un résultat qui ne dépend pas du nombre de threads (test avec 1, 3 et 8 threads), mais qui reste un autre algorithme que Gauss–Seidel.
 - **Où** : branche `s2s-jacobi-blocs` (`crates/medoxide-svr/src/s2s.rs`, `recaler_bloc`, `CorrectionBloc`), `scripts/analyse_jacobi_blocs.py`, `book/src/svr.md`.
 
+## 2026-10-23 — Paralléliser un gradient : une perte de substitution, et ce que « identique » veut dire
+
+- **Quoi (concept)** : l'autodiff de Burn construit un graphe pour tout le calcul avant le `backward`. Pour le paralléliser coupe par coupe, chaque coupe a son graphe (feuille `require_grad`, `cost`, `backward`, `grad`), libéré aussitôt ; les gradients se somment dans l'ordre des coupes, puis on les redonne à l'optimiseur par une **perte de substitution** `params · G` (G constant) dont le gradient est exactement G. L'Adam de Burn reste inchangé.
+- **Quoi (méthode)** : on espérait des poses identiques au bit près ; ce n'est pas le cas, parce que l'ordre des additions flottantes n'est plus celui du graphe unique (le test mesure 1,5e-6 d'écart sur un cas convergé). Un calcul peut être **déterministe** (indépendant du nombre de threads : testé) sans être **identique** à l'ancien. Ce bruit d'arrondi suffit à faire passer un jeu non convexe de 9,1 à 15,0 mm d'erreur : sur les cas où le recalage est hors de sa portée, une différence de résultat ne prouve ni un bug ni un progrès. Donc : option désactivée par défaut, le défaut reste identique au bit près, et le tableau est écrit tel quel.
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`block_gradient`, `register_block_s2s`), `scripts/analyse_adam_blocs.py`, `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

@@ -55,6 +55,7 @@ le device de calcul, puis `Volume écrit dans "…" en N s`.
 | `--s2s-exclude-fraction` | Écarte de la RECONSTRUCTION la fraction indiquée (0 à 1) des coupes recalées de plus faible concordance finale (masque de coupe vidé ; les poses ne changent pas). **Désactivé par défaut (0)** : la concordance finale prédit modérément l'échec de pose (AUC 0,72 à 0,86 sur le banc semi-synthétique), mais exclure 15 % des coupes dégrade la netteté de 2 à 4 % et le juge hors échantillon sur trois sujets. Voir [Validation](validation.md#régularisation-temporelle). | 0 |
 | `--s2s-sweeps` | Avec `s2s` : nombre de balayages de toutes les coupes. | 3 |
 | `--s2s-update` | Avec `s2s` : mise à jour des poses pendant un balayage. `gauss-seidel` : les coupes sont recalées l'une après l'autre, chacune voit les poses déjà mises à jour (séquentiel). `jacobi` : toutes les coupes d'un balayage sont recalées en parallèle contre les poses du balayage précédent. Voir [ci-dessous](#gauss-seidel-ou-jacobi). | `gauss-seidel` |
+| `--s2s-block-parallel-gradient` | **Expérimental.** Avec `s2s` : dans l'alignement par blocs, calcule le gradient du coût d'un bloc coupe par coupe en parallèle (un graphe d'autodiff par coupe, libéré aussitôt), puis le somme dans l'ordre des coupes. Le résultat ne dépend pas du nombre de threads, mais l'ordre des sommes flottantes change : les poses diffèrent légèrement de celles du graphe unique. Voir [ci-dessous](#gradient-parallèle-des-blocs). | désactivé |
 | `--s2v-cycles` | Avec `s2v` : nombre de cycles « recaler puis reconstruire ». | 6 |
 
 ## Dans une arborescence BIDS
@@ -132,6 +133,21 @@ La recherche exhaustive de l'alignement par blocs (686 évaluations indépendant
 | Simulé non lisse 8 mm | GS–GS / Jacobi–GS / Jacobi–Jacobi | 565 / 308 / 316 s | 0,266 / 0,236 / 0,198 | 9,12 / 9,64 / 10,33 mm | 0 / 0 / 0 % |
 
 À 8 mm de mouvement lisse, Jacobi par blocs fait mieux sur l'erreur de pose (3,32 mm), mais aucune variante ne corrige correctement ces jeux (voir ci-dessus).
+
+### Gradient parallèle des blocs
+
+Les 120 itérations d'Adam de chaque bloc construisaient un seul graphe d'autodiff pour toutes les coupes du bloc (une trentaine), séquentiellement. `--s2s-block-parallel-gradient` calcule la valeur et le gradient de chaque coupe en parallèle, puis les somme dans l'ordre des coupes et les donne à l'Adam de Burn par une perte de substitution. L'alignement par blocs passe de 142 à 85 s sur le sujet réel (−40 %), et le total de 248 à 199 s avec Jacobi (597 à 556 s en Gauss–Seidel).
+
+Les poses ne sont **pas** identiques à celles du graphe unique : sur un cas convergé l'écart est de 1,5e-6 sur les paramètres, mais l'optimisation par blocs n'est pas convexe, et sur les cas difficiles ce bruit d'arrondi suffit à changer l'issue (3 stacks, 3 balayages, un lancement par cas, `scripts/analyse_adam_blocs.py`) :
+
+| Jeu | Variante (coupes–blocs) | Total | Concordance finale | Erreur médiane | Coupes ≤ 1,5 mm |
+|---|---|---|---|---|---|
+| Réel | GS / GS+parallèle / Jacobi / Jacobi+parallèle | 597 / 556 / 248 / 199 s | 0,866 / 0,867 / 0,867 / 0,867 | (pas de vérité) | |
+| Simulé lisse 4 mm | idem | 621 / 571 / 242 / 198 s | 0,914 / 0,908 / 0,914 / 0,901 | 0,45 / 0,46 / 0,52 / 0,58 mm | 96 / 95 / 93 / 91 % |
+| Simulé lisse 8 mm | idem | 570 / 552 / 238 / 243 s | 0,619 / 0,722 / 0,564 / 0,639 | 4,12 / 2,84 / 4,72 / 3,06 mm | 0 / 1 / 0 / 0 % |
+| Simulé non lisse 8 mm | idem | 565 / 754 / 308 / 262 s | 0,266 / 0,228 / 0,236 / 0,208 | 9,12 / 14,99 / 9,64 / 14,97 mm | 0 / 0 / 0 / 0 % |
+
+Sur le sujet réel la qualité est la même ; sur les simulés faciles elle baisse très légèrement (concordance de 0,914 à 0,908 et 0,901) ; sur les jeux de 8 mm, que ni l'une ni l'autre ne corrige, l'issue change dans les deux sens (mieux sur le lisse, nettement pire sur le non lisse : 14,99 mm contre 7,95 mm sans correction). Faute de plus d'échantillons, on ne sait pas séparer l'effet du calcul de celui du hasard sur ces cas. L'option reste donc désactivée par défaut, et le comportement par défaut est inchangé au bit près. Les temps totaux de la dernière ligne varient aussi avec la durée de la reconstruction, qui dépend des poses.
 
 `MEDX_S2S_TRACE=1` affiche aussi une ligne par balayage (nombre de mises à jour, concordance, déplacement moyen, durée) et la concordance finale mesurée de la même façon pour les deux variantes ; `MEDX_S2S_TRACE_DIR=<dossier>` écrit les poses après chaque balayage.
 
