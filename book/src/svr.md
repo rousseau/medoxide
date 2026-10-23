@@ -122,6 +122,17 @@ Profil par phase (3 stacks réels trufi, réglages par défaut, un Mac à 12 cœ
 
 La recherche exhaustive de l'alignement par blocs (686 évaluations indépendantes par bloc) est évaluée en parallèle ; les poses de Gauss–Seidel sont identiques au bit près à celles d'avant (comparées sur ce calcul complet). Avec Jacobi, l'alignement par blocs pèse 55 % du temps, les balayages 33 % et la reconstruction 10 % ; le CPU moyen est de 5,4 cœurs sur 12. Le temps affiché par `/usr/bin/time` inclut une éventuelle mise en veille de la machine, pas celui du programme (un lancement a affiché 1326 s pour 603 s de calcul).
 
+**Jacobi pour l'alignement par blocs : essayé, non retenu.** Les blocs d'un même niveau ont aussi été recalés en parallèle contre les poses figées au début du balayage (branche `s2s-jacobi-blocs`, non fusionnée). Avec trois stacks, le niveau 0 n'a que deux blocs indépendants (le premier stack est l'ancre), donc le gain est borné : 142 à 108 s pour l'alignement par blocs et environ 10 % du total. La qualité baisse sur les cas faciles, parce que deux stacks qui se corrigent l'un l'autre contre des poses périmées se dépassent mutuellement (3 stacks, 3 balayages, un lancement par cas, jeux de `scripts/analyse_jacobi_blocs.py`) :
+
+| Jeu | Variante (coupes–blocs) | Total | Concordance finale | Erreur médiane | Coupes ≤ 1,5 mm |
+|---|---|---|---|---|---|
+| Réel | GS–GS / Jacobi–GS / Jacobi–Jacobi | 597 / 248 / 223 s | 0,866 / 0,867 / 0,863 | (pas de vérité) | |
+| Simulé lisse 4 mm | GS–GS / Jacobi–GS / Jacobi–Jacobi | 621 / 242 / 219 s | 0,914 / 0,914 / 0,878 | 0,45 / 0,52 / 0,63 mm | 96 / 93 / 85 % |
+| Simulé lisse 8 mm | GS–GS / Jacobi–GS / Jacobi–Jacobi | 570 / 238 / 219 s | 0,619 / 0,564 / 0,602 | 4,12 / 4,72 / 3,32 mm | 0 / 0 / 0 % |
+| Simulé non lisse 8 mm | GS–GS / Jacobi–GS / Jacobi–Jacobi | 565 / 308 / 316 s | 0,266 / 0,236 / 0,198 | 9,12 / 9,64 / 10,33 mm | 0 / 0 / 0 % |
+
+À 8 mm de mouvement lisse, Jacobi par blocs fait mieux sur l'erreur de pose (3,32 mm), mais aucune variante ne corrige correctement ces jeux (voir ci-dessus).
+
 `MEDX_S2S_TRACE=1` affiche aussi une ligne par balayage (nombre de mises à jour, concordance, déplacement moyen, durée) et la concordance finale mesurée de la même façon pour les deux variantes ; `MEDX_S2S_TRACE_DIR=<dossier>` écrit les poses après chaque balayage.
 
 ## CPU ou GPU

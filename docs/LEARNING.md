@@ -1593,6 +1593,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : trois hypothèses fausses écartées par la mesure : (1) « 1ff2672 a fait perdre du parallélisme » (la phase lente, s2s, n'a jamais utilisé rayon : poses et temps identiques à 5138f80) ; (2) « la réduction par blocs coûte 40 % de mémoire » (le même binaire donne de 3,1 à 4,9 Go d'un lancement à l'autre sur un calcul identique ; une seule mesure par version ne prouve rien) ; (3) « Jacobi est meilleur parce qu'il est plus rapide » (même qualité en mouvement modéré, moins bon à 8 mm). Un critère de convergence écrit avant de regarder les chiffres s'est révélé trop bruité (il se déclenche sur un palier) : on le dit et on montre les courbes.
 - **Où** : `crates/medoxide-svr/src/s2s.rs` (`recaler_coupe`, `Etat`, `register_slices_s2s_traced`), `scripts/analyse_jacobi.py`, `book/src/svr.md`.
 
+## 2026-10-23 — Un résultat négatif se consigne : Jacobi par blocs
+
+- **Quoi (méthode)** : après le gain de Jacobi sur les coupes, la même idée a été essayée sur les blocs, sur une branche, avec le même protocole (quatre jeux, vérité connue, concordance mesurée de la même façon pour toutes les variantes) et des critères de lecture écrits avant : gain de temps borné par le nombre de blocs indépendants (deux au niveau 0 avec trois stacks : on le savait avant de mesurer), qualité à ne pas dégrader. Mesuré : 10 % de temps en moins pour une qualité plus basse sur les cas faciles (concordance 0,878 contre 0,914). La branche est gardée, rien n'est fusionné, et le résultat est écrit dans le livre : un essai qui échoue est une information, à ne pas refaire. Cause plausible : deux stacks mobiles qui se recalent l'un contre l'autre avec des poses périmées se dépassent mutuellement.
+- **Quoi (concept)** : `par_iter().map().collect()` rend les résultats dans l'ordre des entrées ; appliquer ensuite les corrections dans cet ordre donne un résultat qui ne dépend pas du nombre de threads (test avec 1, 3 et 8 threads), mais qui reste un autre algorithme que Gauss–Seidel.
+- **Où** : branche `s2s-jacobi-blocs` (`crates/medoxide-svr/src/s2s.rs`, `recaler_bloc`, `CorrectionBloc`), `scripts/analyse_jacobi_blocs.py`, `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*
