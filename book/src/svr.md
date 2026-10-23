@@ -123,6 +123,23 @@ Profil par phase (3 stacks réels trufi, réglages par défaut, un Mac à 12 cœ
 
 La recherche exhaustive de l'alignement par blocs (686 évaluations indépendantes par bloc) est évaluée en parallèle ; les poses de Gauss–Seidel sont identiques au bit près à celles d'avant (comparées sur ce calcul complet). Avec Jacobi, l'alignement par blocs pèse 55 % du temps, les balayages 33 % et la reconstruction 10 % ; le CPU moyen est de 5,4 cœurs sur 12. Le temps affiché par `/usr/bin/time` inclut une éventuelle mise en veille de la machine, pas celui du programme (un lancement a affiché 1326 s pour 603 s de calcul).
 
+**Validation de Jacobi sur six sujets réels.** Critères fixés avant la mesure : (J1) aucune baisse de concordance finale supérieure à 0,01 par sujet et baisse moyenne d'au plus 0,005 ; (J2) accord des poses avec SVRTK, NeSVoR et NiftyMIC non dégradé (part de coupes à plus de 3 mm de la référence : au plus +2 points ; désaccord médian : au plus +0,3 mm) ; (J3) au moins 1,5 fois plus rapide ; Jacobi ne devient le défaut que si les trois sont tenus. Un lancement par sujet et par variante, réglages par défaut, piles TRUFI (3 piles pour cinq sujets, 4 pour le sixième) ; concordance mesurée de la même façon pour les deux (`scripts/analyse_accord_poses.py` pour l'accord).
+
+| Sujet | Piles | Concordance GS / Jacobi | Temps GS / Jacobi |
+|---|---|---|---|
+| 1 | 3 | 0,866 / 0,867 | 571 / 236 s |
+| 2 | 4 | 0,818 / 0,801 | 972 / 396 s |
+| 3 | 3 | 0,721 / 0,724 | 427 / 176 s |
+| 4 | 3 | 0,906 / 0,908 | 514 / 210 s |
+| 5 | 3 | 0,887 / 0,887 | 492 / 203 s |
+| 6 | 3 | 0,701 / 0,696 | 490 / 199 s |
+
+- **J1 : non tenu.** Le sujet 2 baisse de 0,017 (au-delà de 0,01), les cinq autres de moins de 0,006 ou montent ; la baisse moyenne est de 0,003. Les poses de ce sujet restent pourtant très proches de celles de Gauss–Seidel (désaccord médian 0,2 mm, aucune coupe à plus de 3 mm) : la baisse de concordance vient de petites différences de pose, pas d'un recalage différent.
+- **J2 : tenu.** Part de coupes à plus de 3 mm de la référence, moyenne sur les six sujets et les trois références : 20,6 % pour Gauss–Seidel, 20,2 % pour Jacobi ; désaccord médian moyen : 2,21 mm contre 2,16 mm. Ces moyennes sont dominées par deux sujets difficiles, où les références elles-mêmes divergent de plus de 3 mm entre elles pour 26 à 100 % des coupes.
+- **J3 : tenu.** Jacobi est de 2,4 à 2,5 fois plus rapide sur les six sujets.
+
+Jacobi reste donc une **option** : la règle fixée d'avance l'écarte du défaut à cause de J1, sur un seul sujet. Un lancement par cas ne permet pas de dire si l'écart du sujet 2 est du bruit ou un effet réel de la variante.
+
 **Jacobi pour l'alignement par blocs : essayé, non retenu.** Les blocs d'un même niveau ont aussi été recalés en parallèle contre les poses figées au début du balayage (branche `s2s-jacobi-blocs`, non fusionnée). Avec trois stacks, le niveau 0 n'a que deux blocs indépendants (le premier stack est l'ancre), donc le gain est borné : 142 à 108 s pour l'alignement par blocs et environ 10 % du total. La qualité baisse sur les cas faciles, parce que deux stacks qui se corrigent l'un l'autre contre des poses périmées se dépassent mutuellement (3 stacks, 3 balayages, un lancement par cas, jeux de `scripts/analyse_jacobi_blocs.py`) :
 
 | Jeu | Variante (coupes–blocs) | Total | Concordance finale | Erreur médiane | Coupes ≤ 1,5 mm |
