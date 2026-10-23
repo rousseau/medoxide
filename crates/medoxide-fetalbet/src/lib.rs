@@ -872,9 +872,12 @@ mod tests {
     #[test]
     fn write_mask_roundtrip_keeps_header() {
         let racine = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
-        if !medoxide_core::donnees_de_test(Path::new(&format!(
-            "{racine}/data/derivatives/fetal-bet/fetus_03_predicted_mask.nii.gz"
-        ))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!(
+                "{racine}/data/derivatives/fetal-bet/fetus_03_predicted_mask.nii.gz"
+            )),
+            Path::new(&format!("{racine}/data/sourcedata/fetus_03.nii.gz")),
+        ]) {
             return;
         }
         for nom in ["03", "06", "12"] {

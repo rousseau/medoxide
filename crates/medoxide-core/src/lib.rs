@@ -336,6 +336,17 @@ pub fn donnees_de_test(chemin: &Path) -> bool {
     donnees_de_test_selon(chemin, std::env::var(EXIGER_DONNEES).as_deref() == Ok("1"))
 }
 
+/// Comme [`donnees_de_test`] pour **plusieurs** fichiers : `true` seulement si tous existent. À utiliser par un test qui lit des fichiers de dossiers différents (références, volumes, stacks) : tester un seul d'entre eux laisse le test paniquer quand les données sont partielles.
+/// Les fichiers sont examinés dans l'ordre ; le premier absent est signalé (message ou panique, voir [`donnees_de_test`]).
+pub fn donnees_de_test_toutes(chemins: &[&Path]) -> bool {
+    donnees_de_test_toutes_selon(chemins, std::env::var(EXIGER_DONNEES).as_deref() == Ok("1"))
+}
+
+/// Cœur de [`donnees_de_test_toutes`], avec l'exigence en paramètre.
+fn donnees_de_test_toutes_selon(chemins: &[&Path], exiger: bool) -> bool {
+    chemins.iter().all(|c| donnees_de_test_selon(c, exiger))
+}
+
 /// Cœur de [`donnees_de_test`], avec l'exigence en paramètre (testable sans modifier l'environnement du processus).
 fn donnees_de_test_selon(chemin: &Path, exiger: bool) -> bool {
     if chemin.exists() {
@@ -796,6 +807,12 @@ mod tests {
         let absent = std::env::temp_dir().join("medoxide_donnees_absentes.nii.gz");
         assert!(!absent.exists());
         assert!(!donnees_de_test_selon(&absent, false));
+        // plusieurs fichiers : tous présents, ou un seul absent (même si les autres sont là), ou l'absence qui panique sous l'exigence
+        assert!(donnees_de_test_toutes_selon(&[&present, &present], true));
+        assert!(!donnees_de_test_toutes_selon(&[&present, &absent], false));
+        assert!(!donnees_de_test_toutes_selon(&[&absent, &present], false));
+        assert!(std::panic::catch_unwind(|| donnees_de_test_toutes_selon(&[&present, &absent], true)).is_err());
+        assert!(donnees_de_test_toutes(&[]), "aucun fichier demandé : rien ne manque");
         let erreur = std::panic::catch_unwind(|| donnees_de_test_selon(&absent, true)).unwrap_err();
         let message = erreur
             .downcast_ref::<String>()

@@ -1551,7 +1551,11 @@ mod tests {
     /// l'ordre du trois-millième de voxel avec l'affine stockée (qu'applique nibabel, et nous).
     #[test]
     fn world_coordinates_match_nibabel_and_simpleitk() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         let refs = references();
@@ -1583,7 +1587,11 @@ mod tests {
     /// Critère 3 : invariants géométriques de chaque stack, sans référence externe.
     #[test]
     fn slice_invariants_hold_on_all_stacks() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         let refs = references();
@@ -1668,7 +1676,11 @@ mod tests {
     /// dans la table de références (calcul indépendant), donnent la boîte attendue (< 1e-6 mm).
     #[test]
     fn bounding_boxes_match_nibabel_corners() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/slicecoords/index.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         let mut pire = 0.0_f64;
@@ -1897,7 +1909,11 @@ mod tests {
     /// Version rapide (un stack sur 8) de l'étape 1d.
     #[test]
     fn mask_cleaning_and_pivots_match_scipy_and_numpy_sampled() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/pivots.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/pivots/pivots.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         verifier_masques_et_pivots(8);
@@ -2049,7 +2065,11 @@ mod tests {
     /// Version rapide : les sujets à plusieurs groupes et les deux premiers autres.
     #[test]
     fn stack_groups_match_python_reference_sampled() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/pivots/masques.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/pivots/masques.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         let mut autres = 0;
@@ -2180,7 +2200,11 @@ mod tests {
     /// Le domaine « dans la grille » de Rust doit aussi être celui de la référence, point par point.
     #[test]
     fn trilinear_sampling_matches_scipy_and_simpleitk() {
-        if !medoxide_core::donnees_de_test(Path::new(&format!("{}/data/reference/sampling/index.tsv", racine()))) {
+        if !medoxide_core::donnees_de_test_toutes(&[
+            Path::new(&format!("{}/data/reference/sampling/index.tsv", racine())),
+            Path::new(&format!("{}/data/sourcedata/fetus_03.nii.gz", racine())),
+            Path::new(&format!("{}/data/svr/jeu_reel_tru_haste", racine())),
+        ]) {
             return;
         }
         let racine = racine();
