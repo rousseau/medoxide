@@ -8209,6 +8209,125 @@ mod tests {
         }
     }
 
+    /// Contrôle qualité des acquisitions (blobs, 3 stacks, poses vraies ±2°/±2 mm) : (a) une ligne par coupe, dans l'ordre, avec le nom de la pile ; (b) les coupes sans pixel de masque sont `hors_masque` et celles qui ont un masque suffisant et des partenaires ne le sont pas ; (c) AUCUN `signal_faible` sur les piles intactes ;
+    /// (d) une coupe assombrie (×0,3) et une coupe vidée (0 dans le masque) sont signalées `signal_faible` et seules elles ; (e) les coupes signalées pour le masque ou l'absence de partenaire sont exactement celles que le SVR ne recale pas (champ `registered`) ; (f) le TSV a les 12 colonnes, `n/a` pour les valeurs absentes, et se termine par un saut de ligne.
+    #[test]
+    fn the_acquisition_quality_control_flags_what_it_should() {
+        use crate::qc::{en_tsv, qualite_acquisition, MotifQc};
+        let t = Temp::new("qc_acquisition");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = crate::s2s::S2sConfig::default();
+        let propre = qualite_acquisition(&stacks, &config, &device).unwrap();
+        // (a)
+        assert_eq!(propre.len(), stacks.iter().map(|s| s.dim().2).sum::<usize>());
+        assert_eq!(propre[0].stack, medoxide_core::bids::nom_de_pile(stacks[0].path()));
+        assert_eq!((propre[0].slice, propre[1].slice), (0, 1));
+        // (b)
+        for l in &propre {
+            if l.mask_pixels == 0 {
+                assert_eq!(l.motif, Some(MotifQc::HorsMasque), "{l:?}");
+            }
+            if l.mask_pixels >= 500 && l.n_partners > 0 {
+                assert!(l.score_before.is_some() && l.mean_signal.is_some(), "{l:?}");
+            }
+        }
+        assert!(
+            propre.iter().any(|l| l.motif == Some(MotifQc::HorsMasque)),
+            "le jeu a des coupes hors masque"
+        );
+        assert!(propre.iter().any(|l| l.n_partners > 0));
+        // (c)
+        assert!(
+            propre.iter().all(|l| l.motif != Some(MotifQc::SignalFaible)),
+            "faux positifs : {:?}",
+            propre
+                .iter()
+                .filter(|l| l.motif == Some(MotifQc::SignalFaible))
+                .collect::<Vec<_>>()
+        );
+        // (d) une coupe exploitable du milieu du stack 1, assombrie ; une du stack 2, vidée
+        let choisir = |si: usize| {
+            propre
+                .iter()
+                .filter(|l| l.stack == medoxide_core::bids::nom_de_pile(stacks[si].path()))
+                .find(|l| (3..9).contains(&l.slice) && l.motif.is_none())
+                .map(|l| l.slice)
+                .expect("coupe exploitable")
+        };
+        let (k_sombre, k_vide) = (choisir(1), choisir(2));
+        let modifier = |si: usize, k: usize, facteur: f32, nom: &str| {
+            let mut data = stacks[si].data().clone();
+            data.index_axis_mut(Axis(2), k).mapv_inplace(|v| v * facteur);
+            let masque = stacks[si].brain_mask().unwrap().voxels().mapv(u8::from);
+            let sp = stacks[si].spacing();
+            stack_avec_masque(
+                &t,
+                nom,
+                &data,
+                &masque,
+                stacks[si].affine(),
+                [sp[0] as f32, sp[1] as f32, sp[2] as f32],
+            )
+        };
+        let mut abimees = stacks.clone();
+        abimees[1] = modifier(1, k_sombre, 0.3, "qc_sombre");
+        abimees[2] = modifier(2, k_vide, 0.0, "qc_vide");
+        let lignes = qualite_acquisition(&abimees, &config, &device).unwrap();
+        let signalees: Vec<(&str, usize)> = lignes
+            .iter()
+            .filter(|l| l.motif == Some(MotifQc::SignalFaible))
+            .map(|l| (l.stack.as_str(), l.slice))
+            .collect();
+        let nom = |si: usize| medoxide_core::bids::nom_de_pile(abimees[si].path());
+        let attendu = [(nom(1), k_sombre), (nom(2), k_vide)];
+        assert_eq!(signalees.len(), 2, "{signalees:?}");
+        for (n, k) in &attendu {
+            assert!(
+                signalees.iter().any(|(s, j)| s == n && j == k),
+                "{n} {k} absent de {signalees:?}"
+            );
+        }
+        // (e) coupes non recalées par le SVR (blobs, un balayage) = signalées pour le masque ou l'absence de partenaire
+        let rapport = crate::s2s::register_slices_s2s(
+            &stacks,
+            &SlicePoses::identity(&stacks),
+            &crate::s2s::S2sConfig {
+                sweeps: 1,
+                coarse_sigma_pixels: 0.0,
+                ..config
+            },
+            &device,
+        )
+        .unwrap();
+        let structurelles = |l: &crate::qc::LigneQc| {
+            matches!(
+                l.motif,
+                Some(MotifQc::HorsMasque | MotifQc::MasqueInsuffisant | MotifQc::SansPartenaire)
+            )
+        };
+        let desaccords = propre
+            .iter()
+            .zip(&rapport.slices)
+            .filter(|(l, r)| structurelles(l) == r.registered)
+            .count();
+        println!(
+            "{desaccords} désaccord(s) sur {} coupes entre le contrôle et le SVR",
+            propre.len()
+        );
+        assert_eq!(desaccords, 0);
+        // (f)
+        let tsv = en_tsv(&propre);
+        assert!(tsv.ends_with('\n') && !tsv.ends_with("\n\n"));
+        let lignes_tsv: Vec<&str> = tsv.lines().collect();
+        assert_eq!(
+            lignes_tsv[0],
+            "stack\tslice\tregistered\tscore_before\tscore_after\tn_registrations\tcorrection_rms_mm\texcluded\treason\tmask_pixels\tmean_signal\tn_partners"
+        );
+        assert!(lignes_tsv[1..].iter().all(|l| l.split('\t').count() == 12));
+        let _ = vraies;
+    }
+
     /// Gradient de bloc coupe par coupe en parallèle (branche s2s-adam-blocs) : critères fixés avant, blobs, stack coronal décalé de 8 mm, recherche puis 30 itérations d'Adam : (a) le résultat est IDENTIQUE au bit près avec 1, 3 et 8 fils ;
     /// (b) il est proche de celui du graphe unique (écart de chaque paramètre < 0,05 : seul l'ordre des sommes flottantes change, pas le calcul) ; (c) la concordance finale est la même à 1e-3 près.
     #[test]

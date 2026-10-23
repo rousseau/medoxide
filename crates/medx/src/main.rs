@@ -198,6 +198,31 @@ enum SvrAction {
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_cycles)]
         s2v_cycles: usize,
     },
+    /// Contrôle qualité des acquisitions avant reconstruction : pixels de masque, signal, partenaires, concordance aux poses d'en-tête, par coupe
+    Qc {
+        /// Deux stacks NIfTI au moins. Avec --bids : restreint la liste des stacks (par défaut, tous les `*_T2w.nii.gz` de la session)
+        #[arg(long, num_args = 2.., required_unless_present = "bids")]
+        input: Vec<PathBuf>,
+        /// Masques cérébraux, un par stack et dans le même ordre. Hors BIDS
+        #[arg(long, num_args = 2.., required_unless_present = "bids", conflicts_with = "bids")]
+        mask: Vec<PathBuf>,
+        /// Fichier TSV de sortie (son fichier voisin `.json` est écrit à côté). Hors BIDS
+        #[arg(long, required_unless_present = "bids", conflicts_with = "bids")]
+        output: Option<PathBuf>,
+        /// Racine d'un jeu de données BIDS : lit les stacks et leurs masques comme `medx svr recon --bids` et écrit
+        /// `<étude>/derivatives/medx-svr/sub-X/ses-Y/anat/sub-X_ses-Y_desc-acq_slicequality.tsv`
+        #[arg(long, requires = "participant")]
+        bids: Option<PathBuf>,
+        /// Identifiant du participant, sans préfixe `sub-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        participant: Option<String>,
+        /// Identifiant de la session, sans préfixe `ses-` (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        session: Option<String>,
+        /// Dossier racine de l'étude à la place de la racine BIDS ou de son parent (avec --bids)
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<PathBuf>,
+    },
     /// Affiche la géométrie de stacks NIfTI : dimensions, espacement, normale des coupes, boîte dans le monde
     Info {
         /// Un ou plusieurs stacks NIfTI (`.nii` ou `.nii.gz`)
@@ -407,6 +432,47 @@ fn svr_recon_bids(
     let fichiers = sortie::fichiers_bids(racine, sortie, participant, session)?;
     let (piles, masques) = paires.into_iter().unzip();
     Ok((piles, masques, DestinationSvr::Bids(fichiers)))
+}
+
+/// `medx svr qc` : lit les stacks et leurs masques, calcule le contrôle qualité par coupe et l'écrit (TSV, fichier voisin `.json`, et `dataset_description.json` en BIDS).
+fn svr_qc(
+    entrees: &[PathBuf],
+    masques: &[PathBuf],
+    tsv: &std::path::Path,
+    derive: Option<&std::path::Path>,
+) -> ExitCode {
+    if masques.len() != entrees.len() {
+        eprintln!(
+            "medx svr qc : {} masque(s) pour {} stack(s) : il en faut un par stack",
+            masques.len(),
+            entrees.len()
+        );
+        return ExitCode::FAILURE;
+    }
+    let debut = std::time::Instant::now();
+    let resultat = (|| -> Result<usize, medoxide_svr::SvrError> {
+        let mut stacks = medoxide_svr::read_stacks(entrees)?;
+        for (s, m) in stacks.iter_mut().zip(masques) {
+            s.set_brain_mask(m)?;
+        }
+        let device = medoxide_svr::pipeline::autodiff_device(DeviceKind::Cpu);
+        let lignes = medoxide_svr::qc::qualite_acquisition(&stacks, &medoxide_svr::s2s::S2sConfig::default(), &device)?;
+        medoxide_svr::qc::ecrire(&lignes, tsv, derive, &generateur("medx svr qc"))?;
+        Ok(lignes.iter().filter(|l| l.motif.is_some()).count())
+    })();
+    match resultat {
+        Ok(signalees) => {
+            println!(
+                "Contrôle écrit dans {tsv:?} en {:.0} s ({signalees} coupe(s) signalée(s))",
+                debut.elapsed().as_secs_f64()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("medx svr qc : {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Affiche la géométrie de chaque stack, puis la boîte de l'ensemble (repère monde RAS+, mm).
@@ -660,6 +726,41 @@ fn main() -> ExitCode {
             weights,
             device,
         } => multibounti(&input, &output, &weights, device.into()),
+        Command::Svr {
+            action:
+                SvrAction::Qc {
+                    input,
+                    mask,
+                    output,
+                    bids,
+                    participant,
+                    session,
+                    output_dir,
+                },
+        } => match (&bids, output) {
+            (Some(racine), _) => {
+                let participant = participant.as_deref().unwrap_or_default();
+                match svr_recon_bids(racine, output_dir.as_deref(), participant, session.as_deref(), &input) {
+                    Ok((entrees, masques, DestinationSvr::Bids(fichiers))) => svr_qc(
+                        &entrees,
+                        &masques,
+                        &fichiers.qualite_acquisition,
+                        Some(&fichiers.derive),
+                    ),
+                    Ok(_) => unreachable!("svr_recon_bids rend toujours une destination BIDS"),
+                    Err(e) => {
+                        eprintln!("medx svr qc : {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            (None, Some(tsv)) => svr_qc(&input, &mask, &tsv, None),
+            // clap l'interdit (`required_unless_present`) ; cas traité sans paniquer
+            (None, None) => {
+                eprintln!("medx svr qc : --output ou --bids requis");
+                ExitCode::FAILURE
+            }
+        },
         Command::Svr {
             action:
                 SvrAction::Info {
@@ -1042,6 +1143,50 @@ mod tests {
                 "n",
                 "--output",
                 "v",
+                "--participant",
+                "01"
+            ]),
+            "--participant sans --bids"
+        );
+    }
+
+    /// Arguments de `medx svr qc` : hors BIDS `--input`, `--mask` et `--output` sont requis ; en BIDS seul `--participant` l'est ; `--mask` et `--output` sont exclusifs de `--bids` ; `--participant` demande `--bids`.
+    #[test]
+    fn the_svr_qc_arguments_are_exclusive_or_required_as_documented() {
+        let essai =
+            |args: &[&str]| Cli::try_parse_from(["medx", "svr", "qc"].into_iter().chain(args.iter().copied())).is_ok();
+        assert!(essai(&["--input", "a", "b", "--mask", "m", "n", "--output", "q.tsv"]));
+        assert!(essai(&["--bids", "r", "--participant", "01"]));
+        assert!(essai(&[
+            "--bids",
+            "r",
+            "--participant",
+            "01",
+            "--session",
+            "1",
+            "--output-dir",
+            "o"
+        ]));
+        assert!(!essai(&[]), "ni --input ni --bids");
+        assert!(
+            !essai(&["--input", "a", "b", "--mask", "m", "n"]),
+            "hors BIDS sans --output"
+        );
+        assert!(!essai(&["--bids", "r"]), "--bids sans --participant");
+        assert!(
+            !essai(&["--bids", "r", "--participant", "01", "--output", "q.tsv"]),
+            "--output avec --bids"
+        );
+        assert!(
+            !essai(&[
+                "--input",
+                "a",
+                "b",
+                "--mask",
+                "m",
+                "n",
+                "--output",
+                "q.tsv",
                 "--participant",
                 "01"
             ]),

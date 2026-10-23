@@ -1605,6 +1605,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : on espérait des poses identiques au bit près ; ce n'est pas le cas, parce que l'ordre des additions flottantes n'est plus celui du graphe unique (le test mesure 1,5e-6 d'écart sur un cas convergé). Un calcul peut être **déterministe** (indépendant du nombre de threads : testé) sans être **identique** à l'ancien. Ce bruit d'arrondi suffit à faire passer un jeu non convexe de 9,1 à 15,0 mm d'erreur : sur les cas où le recalage est hors de sa portée, une différence de résultat ne prouve ni un bug ni un progrès. Donc : option désactivée par défaut, le défaut reste identique au bit près, et le tableau est écrit tel quel.
 - **Où** : `crates/medoxide-svr/src/s2s.rs` (`block_gradient`, `register_block_s2s`), `scripts/analyse_adam_blocs.py`, `book/src/svr.md`.
 
+## 2026-10-23 — Un contrôle qualité dont on a écrit les critères avant, et la règle qu'on a dû changer
+
+- **Quoi (méthode)** : quatre critères chiffrés écrits avant le premier code (accord avec le SVR, rappel sur défauts injectés, faux positifs, AUC du score d'en-tête). Le premier test a échoué sur l'un d'eux : la règle « signal inférieur à 0,6 fois la médiane des coupes à ±2 » signalait 7 coupes sur 36 sans défaut, parce que le signal baisse naturellement vers les bords du cerveau. La règle a été changée (un **creux** par rapport aux deux coupes adjacentes), la révision est écrite avec sa raison, et les critères eux-mêmes n'ont pas bougé. À l'arrivée trois critères sont atteints et le quatrième (AUC ≥ 0,8) ne l'est pas : 0,78, et sur deux jeux sur cinq la mesure n'a pas de sens (toutes les coupes sont mauvaises). On l'écrit tel quel au lieu de choisir un seuil ou des jeux qui l'atteignent.
+- **Quoi (concept)** : le contrôle réutilise `IntersectionProblem::build` et son `cost` (le coût du SVR) aux poses d'en-tête, en lecture seule, évalués en parallèle par `par_iter` : même code, aucun nouveau modèle. La validation « le contrôle prédit ce que le SVR fera » (champ `registered`) est possible parce que les deux partagent exactement cette construction.
+- **Où** : `crates/medoxide-svr/src/qc.rs`, `crates/medx/src/main.rs` (`svr_qc`), `scripts/valider_qc_acquisition.py`, `book/src/svr.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

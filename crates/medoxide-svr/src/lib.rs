@@ -30,6 +30,7 @@ pub mod bias;
 pub mod diff;
 pub mod optimizers;
 pub mod pipeline;
+pub mod qc;
 pub mod recon;
 pub mod s2s;
 pub mod sortie;

@@ -23,6 +23,8 @@ pub struct Fichiers {
     pub mouvement: PathBuf,
     /// Qualité de chaque coupe.
     pub qualite: PathBuf,
+    /// Contrôle qualité des acquisitions, avant reconstruction (voir [`crate::qc`]).
+    pub qualite_acquisition: PathBuf,
     /// Racine de l'arborescence dérivée (`<étude>/derivatives/medx-svr`) : elle reçoit `dataset_description.json`.
     pub derive: PathBuf,
 }
@@ -44,6 +46,7 @@ pub fn fichiers_bids(
         description: nom("T2w.json"),
         mouvement: nom("motion.tsv"),
         qualite: nom("slicequality.tsv"),
+        qualite_acquisition: d.anat.join(format!("{}_desc-acq_slicequality.tsv", d.prefixe)),
         derive: d.pipeline,
     })
 }

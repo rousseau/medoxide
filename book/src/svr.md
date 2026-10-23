@@ -205,6 +205,31 @@ Avec `--quality` (ou `_desc-svr_slicequality.tsv` en BIDS), un fichier TSV est �
 
 Une valeur absente s'écrit `n/a`. Ces indicateurs, étudiés seulement avec `s2s`, permettent de reconnaître le **régime** (peu ou presque toutes les coupes mal recalées), pas de compter les coupes mal recalées de façon fiable ([Validation](validation.md#combien-de-coupes-sont-mal-recalées)). Avant cette version, l'en-tête était `stack coupe recalee score_avant …`, `stack` était un indice et une coupe non recalée avait des scores nuls.
 
+## Contrôle qualité avant reconstruction
+
+`medx svr qc` contrôle les acquisitions **avant** de lancer une reconstruction d'une dizaine de minutes ou plus. Il lit les mêmes piles et masques que `svr recon` (`--bids …`, ou `--input … --mask … --output q.tsv`), n'estime aucun mouvement et ne modifie rien : il informe seulement. Il écrit `…_desc-acq_slicequality.tsv` à côté du fichier de qualité du SVR (et son fichier voisin `.json`, qui décrit les colonnes et les seuils). Les 9 colonnes sont celles de [`slicequality.tsv`](#fichier-de-qualité), plus `mask_pixels`, `mean_signal` et `n_partners`.
+
+| Colonne | Sens |
+|---|---|
+| `registered` | toujours 0 : rien n'est recalé à ce stade |
+| `score_before` | concordance aux intersections aux poses d'en-tête (−1 à 1, plus grand = mieux), `n/a` sans partenaire ou masque insuffisant ; indicateur du mouvement à corriger |
+| `score_after`, `n_registrations`, `correction_rms_mm` | `n/a`, 0, `n/a` |
+| `excluded`, `reason` | 1 si la coupe est **signalée** (à écarter ou à vérifier), avec son motif : `hors_masque` (aucun pixel de masque), `masque_insuffisant` (moins de 500 pixels), `sans_partenaire` (aucune coupe d'une autre pile ne la croise) ; ces trois-là sont exactement les coupes que le SVR ne recale pas ; `signal_faible` (creux de signal) |
+| `mask_pixels`, `mean_signal`, `n_partners` | pixels de masque, intensité moyenne dans le masque, coupes d'autres piles qui croisent la coupe |
+
+Un creux de signal est une coupe dont le signal moyen est inférieur à 0,6 fois celui du plus faible de ses deux coupes adjacentes (signal perdu par le mouvement, coupe sombre ou vide). Les coupes de bord d'une pile, et celles voisines d'une coupe inexploitable, ne peuvent donc pas être signalées pour le signal. Une première règle (rapport à la médiane des coupes à ±2) a été écartée après sa première exécution : elle signalait 7 coupes sur 36 d'un jeu sans défaut, parce que le signal baisse naturellement vers les bords du cerveau.
+
+**Validation** (critères fixés avant de coder ; `scripts/valider_qc_acquisition.py`, six jeux simulés avec vérité et un jeu réel de trois stacks) :
+
+| Critère | Résultat |
+|---|---|
+| C1 : « coupe non recalée » prédite = `registered = 0` du SVR, ≥ 99 % | **atteint** : 100 % sur les 6 jeux simulés (108 coupes chacun) et le jeu réel (98 coupes) |
+| C2 : rappel de `signal_faible` sur des coupes assombries (×0,3) ou vidées injectées, ≥ 90 % | **atteint** : 36 sur 36 (6 jeux, 2 défauts par pile), sans signalement en plus |
+| C3 : faux positifs de `signal_faible` ≤ 2 % sur les jeux sans défaut | **atteint** : 0 sur 108 coupes pour chaque jeu simulé, 0 sur 98 pour le jeu réel |
+| C4 : AUC de `score_before` pour détecter une coupe à plus de 1,5 mm de sa vraie pose d'en-tête, moyenne ≥ 0,8 | **NON atteint** : 0,78 en moyenne sur les trois jeux où elle se mesure (0,65 pour un mouvement lisse de 2 mm, 0,78 de 8 mm, 0,91 non lisse de 4 mm) ; sur les deux autres jeux toutes les coupes sont à plus de 1,5 mm, il n'y a pas de bonnes coupes à distinguer |
+
+`score_before` est donc un indicateur grossier du mouvement, pas un classificateur fiable de coupe à coupe ; les motifs du contrôle (masque, partenaires, creux de signal) sont, eux, validés. Les défauts injectés sont des défauts d'intensité simples : le contrôle ne détecte pas d'artefacts d'image (rayures, repliement, bruit), qui n'ont pas été traités.
+
 ## Décrire des stacks : `medx svr info`
 
 Avant de reconstruire, `medx svr info` affiche la géométrie de chacun des stacks (dimensions,
