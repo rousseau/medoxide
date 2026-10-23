@@ -14,7 +14,7 @@ use crate::align::{reconstruct_with_motion_correction, LoopConfig, SliceReport};
 use crate::bias::{estimate_bias_fields, BiasConfig, BiasFields};
 use crate::diff::RobustConfig;
 use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePoses};
-use crate::s2s::{register_slices_s2s, S2sConfig};
+use crate::s2s::{phase, register_slices_s2s, S2sConfig};
 use crate::{Stack, SvrError};
 
 /// Où se font les calculs de tenseurs (recalage et reconstruction).
@@ -375,26 +375,34 @@ pub fn reconstruct(
             let biais = BiasConfig::default();
             let (mut poses, mut slices) = (header_poses, Vec::new());
             for _ in 0..config.s2s_bias_rounds {
-                let corriges = correct_stacks(
+                let corriges = phase("champ de biais (avant recalage)", || -> Result<_, SvrError> {
+                    Ok(correct_stacks(
+                        stacks,
+                        &estimate_bias_fields(stacks, &poses, &biais)?,
+                        config.s2s_bias_min_reduction,
+                    ))
+                })?;
+                let rapport = phase("recalage coupe-coupe (total)", || {
+                    register_slices_s2s(&corriges, &poses, &s2s_config(config), device)
+                })?;
+                (poses, slices) = (rapport.poses, rapport.slices);
+            }
+            let corriges = phase("champ de biais (aux poses finales)", || -> Result<_, SvrError> {
+                Ok(correct_stacks(
                     stacks,
                     &estimate_bias_fields(stacks, &poses, &biais)?,
                     config.s2s_bias_min_reduction,
-                );
-                let rapport = register_slices_s2s(&corriges, &poses, &s2s_config(config), device)?;
-                (poses, slices) = (rapport.poses, rapport.slices);
-            }
-            let corriges = correct_stacks(
-                stacks,
-                &estimate_bias_fields(stacks, &poses, &biais)?,
-                config.s2s_bias_min_reduction,
-            );
+                ))
+            })?;
             let (poses, slices) = refine_with_slice_to_volume(&corriges, poses, slices, config, device)?;
-            let volume = reconstruct_with_poses(
-                &grid,
-                &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
-                &poses,
-                config,
-            )?;
+            let volume = phase("reconstruction du volume", || {
+                reconstruct_with_poses(
+                    &grid,
+                    &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
+                    &poses,
+                    config,
+                )
+            })?;
             let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
             Ok(ReconstructionOutput {
                 grid,

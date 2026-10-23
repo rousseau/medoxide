@@ -110,7 +110,19 @@ Mesures (3 stacks, 6 balayages nets, un lancement par cas, Mac à 12 cœurs part
 
 Pour un mouvement modéré, Jacobi donne la même qualité en deux fois moins de temps (le balayage est 4 à 5 fois plus rapide, mais l'alignement par blocs, séquentiel, reste). Il consomme environ 1,4 fois plus de CPU au total. Pour un mouvement de 8 mm, **aucune des deux variantes ne corrige correctement** (l'erreur dépasse même celle sans correction pour le mouvement non lisse), et Jacobi est un peu moins bon. Il converge aussi plus lentement (déplacement moyen sous 0,1 mm au balayage 2 contre 1 sur le sujet réel). Il n'a pas été validé sur les six sujets réels : c'est pourquoi Gauss–Seidel reste le défaut.
 
-Pour inspecter la convergence, `MEDX_S2S_TRACE=1` affiche une ligne par balayage (nombre de mises à jour, concordance, déplacement moyen, durée) et la concordance finale mesurée de la même façon pour les deux variantes ; `MEDX_S2S_TRACE_DIR=<dossier>` écrit les poses après chaque balayage.
+Profil par phase (3 stacks réels trufi, réglages par défaut, un Mac à 12 cœurs ; `MEDX_S2S_TRACE=1` affiche la durée de chaque phase) :
+
+| Phase | Avant la recherche parallèle (Gauss–Seidel ; phases estimées par des mesures isolées) | Gauss–Seidel | Jacobi |
+|---|---|---|---|
+| Alignement par blocs | ≈ 340 s | 140 s | 134 s |
+| 9 balayages (6 grossiers, 3 nets) | ≈ 420 s | 432 s (48 s chacun) | 80 s (9 s chacun) |
+| Champ de biais (2 fois) | 2 s | 2 s | 2 s |
+| Reconstruction du volume | 25 s | 25 s | 25 s |
+| **Total mesuré** (horloge du programme) | **775 s** | **603 s** | **242 s** |
+
+La recherche exhaustive de l'alignement par blocs (686 évaluations indépendantes par bloc) est évaluée en parallèle ; les poses de Gauss–Seidel sont identiques au bit près à celles d'avant (comparées sur ce calcul complet). Avec Jacobi, l'alignement par blocs pèse 55 % du temps, les balayages 33 % et la reconstruction 10 % ; le CPU moyen est de 5,4 cœurs sur 12. Le temps affiché par `/usr/bin/time` inclut une éventuelle mise en veille de la machine, pas celui du programme (un lancement a affiché 1326 s pour 603 s de calcul).
+
+`MEDX_S2S_TRACE=1` affiche aussi une ligne par balayage (nombre de mises à jour, concordance, déplacement moyen, durée) et la concordance finale mesurée de la même façon pour les deux variantes ; `MEDX_S2S_TRACE_DIR=<dossier>` écrit les poses après chaque balayage.
 
 ## CPU ou GPU
 

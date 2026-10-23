@@ -1359,6 +1359,17 @@ pub fn mean_concordance(
     Ok(valeurs.iter().sum::<f64>() / valeurs.len().max(1) as f64)
 }
 
+/// Exécute `travail` ; avec `MEDX_S2S_TRACE` défini, affiche sur la sortie d'erreur la durée de la phase `nom` (diagnostic de performance, sans effet sinon).
+pub(crate) fn phase<T>(nom: &str, travail: impl FnOnce() -> T) -> T {
+    if std::env::var_os("MEDX_S2S_TRACE").is_none() {
+        return travail();
+    }
+    let debut = std::time::Instant::now();
+    let resultat = travail();
+    eprintln!("phase {nom} : {:.1} s", debut.elapsed().as_secs_f64());
+    resultat
+}
+
 /// Statistiques d'un balayage de [`register_slices_s2s_traced`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatBalayage {
@@ -1543,7 +1554,9 @@ pub fn register_slices_s2s_traced(
         .collect();
     if config.block_levels > 0 {
         let atlas = SliceAtlas::new(stacks, device)?;
-        align_blocks(stacks, &mut courantes, &atlas, config, device);
+        phase("alignement par blocs", || {
+            align_blocks(stacks, &mut courantes, &atlas, config, device)
+        });
     }
     let niveaux = sweep_schedule(config);
     let total_balayages: usize = niveaux.iter().map(|n| n.1).sum();
