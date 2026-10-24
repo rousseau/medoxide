@@ -143,6 +143,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : mise à jour des poses pendant un balayage (expérimental)
         #[arg(long, value_enum, default_value_t = UpdateArg::GaussSeidel)]
         s2s_update: UpdateArg,
+        /// Avec `--motion s2s` : graine de l'ordre aléatoire des coupes (sans effet avec `--s2s-update jacobi`)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2s_seed)]
+        s2s_seed: u64,
         /// Avec `--motion s2s` : alignement par blocs, gradient calculé coupe par coupe en parallèle (expérimental)
         #[arg(long)]
         s2s_block_parallel_gradient: bool,
@@ -789,6 +792,7 @@ fn main() -> ExitCode {
                     edge_kappa,
                     s2s_sweeps,
                     s2s_update,
+                    s2s_seed,
                     s2s_block_parallel_gradient,
                     s2s_coarse_sigma,
                     s2s_coarse_sweeps,
@@ -817,6 +821,7 @@ fn main() -> ExitCode {
                 edge_kappa,
                 s2s_sweeps,
                 s2s_update: s2s_update.into(),
+                s2s_seed,
                 s2s_block_parallel_gradient,
                 s2s_coarse_sigma_pixels: s2s_coarse_sigma,
                 s2s_coarse_sweeps,
