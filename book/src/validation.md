@@ -103,7 +103,7 @@ les **deux autres** stacks ; les coupes du stack mis de côté sont ensuite reca
 mieux des coupes qu'il n'a jamais vues. Une valeur par sujet (moyenne des trois repliements) : le sujet est
 l'unité statistique.
 
-Résultats avec **α = 0,1** pour nos méthodes (voir [Choix de la régularisation α](#choix-de-la-régularisation-α) ; la première évaluation, faite avec α = 0,01, est périmée) :
+Résultats avec **α = 0,1** pour nos méthodes, valeur qui était le défaut avant la révision décrite dans [Choix de la régularisation α](#choix-de-la-régularisation-α) (le défaut est maintenant 0,05) ; la première évaluation, faite avec α = 0,01, est périmée :
 
 | Sujet | sans correction | `s2s` | `s2v` | SVRTK | NeSVoR |
 |---|---|---|---|---|---|
@@ -177,6 +177,23 @@ La meilleure moyenne des deux sujets de réglage est α = 0,1. Évaluation sur *
 | agité 3 | 0,627 | 0,691 | +0,064 |
 
 Gain moyen +0,036 (critère fixé avant : ≥ 0,01), positif pour 4 sujets sur 4 (critère : au moins 3), aucun sujet dégradé. Ces gains étaient plus grands que les écarts entre méthodes de la première évaluation, **faite avec α = 0,01** : elle a été refaite (tableau ci-dessus). **Réserves** : l'optimum varie avec le sujet (le sujet calme préfère ≈ 0,05, le très agité ≥ 0,3) ; une NCC sur des coupes jamais vues peut récompenser un volume trop lissé : à 0,1 l'image est visiblement plus floue qu'à 0,03. Une régularisation qui préserve les contours est la piste suivante.
+
+### Révision du défaut : netteté et reproductibilité de la segmentation
+
+Le choix α = 0,1 reposait sur le seul juge, qui favorise le lissage. Nous l'avons revu avec trois mesures qui ne le font pas : la netteté, le juge **à netteté égale** (frontière obtenue en variant α, comparée à celle de chaque autre méthode) et la **reproductibilité de la segmentation** (BOUNTI) entre les trois repliements (reconstructions avec des paires de stacks différentes, mises dans l'espace d'un atlas : Dice moyen entre repliements sur les structures principales). Mesures sur les six sujets de réglage, deux stacks pour reconstruire, trois repliements ; ce sont des sujets sur lesquels les réglages ont été choisis : elles justifient le défaut, elles ne constituent pas une évaluation indépendante.
+
+| Sujet | Dice entre repliements, α = 0,1 | α = 0,05 | α = 0,03 | SVRTK | NeSVoR |
+|---|---|---|---|---|---|
+| calme 1 | 0,925 | 0,931 | 0,933 | 0,920 | 0,935 |
+| calme 2 | 0,824 | 0,846 | 0,849 | 0,807 | 0,846 |
+| calme 3 | 0,850 | 0,882 | 0,887 | 0,886 | 0,899 |
+| agité 1 | 0,787 | 0,825 | 0,837 | 0,692 | 0,731 |
+| agité 2 | 0,554 | 0,585 | 0,615 | 0,630 | 0,053 |
+| agité 3 | 0,541 | 0,560 | 0,572 | 0,347 | 0,371 |
+
+La reproductibilité croît de façon monotone quand α diminue. À netteté égale, notre méthode a un meilleur juge que SVRTK sur cinq sujets sur six (écart +0,06 à +0,19, le sixième est hors de la frontière) et que NeSVoR sur six sur six (+0,03 à +0,35). À α = 0,05 la netteté est du même ordre que celle de SVRTK ; à 0,03 elle est un peu supérieure mais une texture bruitée apparaît sur les sujets très agités, d'où le défaut 0,05.
+
+**Limites de la mesure.** (1) Le Dice entre repliements dépend du recalage de chaque volume sur la référence : une première mesure à α = 0,05 donnait 0,680 pour l'agité 1 à cause d'un recalage resté dans un optimum local (corrélation 0,928 au lieu de 0,98) ; après un raffinement à pleine résolution, 0,825 (valeur du tableau). (2) La segmentation exige un volume orienté comme l'atlas : sans recalage, `medx bounti` donne une segmentation fausse sans le signaler, et la symétrie gauche-droite de la sortie ne prouve pas que l'orientation est bonne (contrôle utilisé : cervelet en arrière et en bas du cerveau, tronc cérébral en bas). (3) NeSVoR sur l'agité 2 produit des volumes troués, d'où son Dice très bas.
 
 ## Pourquoi certains sujets très agités ne sont pas corrigés
 

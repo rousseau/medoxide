@@ -182,6 +182,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : exposant de la pondération du poids temporel par l'information de la coupe (0 : poids constant)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_temporal_info_exponent)]
         s2s_temporal_info_exponent: f64,
+        /// Avec `--motion s2s` : stack d'ancrage (rang dans la liste `--input`, à partir de 0) : seules les paires de coupes qui l'impliquent servent à estimer le mouvement, les autres paires restent disponibles pour mesurer la cohérence des poses ; option d'évaluation (moins d'information), non recommandée en usage normal
+        #[arg(long)]
+        s2s_anchor_stack: Option<usize>,
         /// Avec `--motion s2s` : cycles coupe-volume de raffinement après le coupe-coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_cycles)]
         s2v_refine_cycles: usize,
@@ -807,6 +810,7 @@ fn main() -> ExitCode {
                     s2s_temporal_robust_mm,
                     s2s_temporal_robust_start_mm,
                     s2s_temporal_info_exponent,
+                    s2s_anchor_stack,
                     s2v_refine_cycles,
                     s2v_refine_resolution_mm,
                     s2s_exclude_fraction,
@@ -836,6 +840,7 @@ fn main() -> ExitCode {
                 s2s_temporal_robust_mm,
                 s2s_temporal_robust_start_mm,
                 s2s_temporal_info_exponent,
+                s2s_anchor_stack,
                 s2v_refine_cycles,
                 s2v_refine_resolution_mm,
                 s2s_exclude_fraction,

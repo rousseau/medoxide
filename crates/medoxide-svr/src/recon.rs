@@ -4653,7 +4653,7 @@ mod tests {
         for attendu in [
             "\"MotionMode\": \"s2s\"",
             "\"ResolutionMm\": 0.8",
-            "\"alpha\": 0.1",
+            "\"alpha\": 0.05",
             "\"CommandLine\": \"medx svr recon --bids etude/sourcedata\"",
             "\"MotionConvention\"",
             "coupe → monde = M · A · T(0, 0, k)",
@@ -6406,6 +6406,29 @@ mod tests {
         ecrire_image_grille(
             Path::new(&std::env::var("MEDOXIDE_SORTIE").expect("MEDOXIDE_SORTIE")),
             &(&compte * &total),
+            &grille,
+        );
+    }
+
+    /// DIAGNOSTIC (sans critère) : reconstruit un volume sur DONNÉES RÉELLES à partir de poses imposées (`MEDOXIDE_POSES`, format de `--poses`), avec la chaîne de production du coupe-coupe
+    /// (champ de biais estimé aux poses données, stacks corrigés, gradient conjugué aux réglages par défaut), et l'écrit dans `MEDOXIDE_SORTIE` (NIfTI). Sert à mesurer l'effet d'une erreur de pose
+    /// connue (poses perturbées) sur le volume. Variables : MEDOXIDE_DONNEES_REELLES, MEDOXIDE_SUJET, MEDOXIDE_POSES, MEDOXIDE_SORTIE.
+    #[test]
+    #[ignore = "données réelles locales ; échoue sans la variable d'environnement MEDOXIDE_DONNEES_REELLES (diagnostic sur données locales hors dépôt)"]
+    fn diagnose_reconstruction_with_given_poses_on_real_data() {
+        let tous = stacks_reels();
+        let poses = lire_poses_tsv(
+            Path::new(&std::env::var("MEDOXIDE_POSES").expect("MEDOXIDE_POSES")),
+            &tous,
+        );
+        let config = crate::pipeline::ReconstructionConfig::default();
+        let grille = reconstruction_grid(&tous, config.resolution_mm, config.margin_mm).unwrap();
+        let champs = crate::bias::estimate_bias_fields(&tous, &poses, &crate::bias::BiasConfig::default()).unwrap();
+        let corriges = crate::pipeline::correct_stacks(&tous, &champs, config.s2s_bias_min_reduction);
+        let volume = crate::pipeline::reconstruct_with_poses(&grille, &corriges, &poses, &config).unwrap();
+        ecrire_image_grille(
+            Path::new(&std::env::var("MEDOXIDE_SORTIE").expect("MEDOXIDE_SORTIE")),
+            &volume,
             &grille,
         );
     }
@@ -9096,6 +9119,7 @@ mod tests {
             s2s_temporal_robust_mm: 1.7,
             s2s_temporal_robust_start_mm: 6.5,
             s2s_temporal_info_exponent: 0.8,
+            s2s_anchor_stack: Some(1),
             ..Default::default()
         };
         let attendu = S2sConfig {
@@ -9112,6 +9136,7 @@ mod tests {
             temporal_info_exponent: 0.8,
             intersection: crate::s2s::IntersectionConfig {
                 highpass_sigma_mm: 12.0,
+                anchor_stack: Some(1),
                 ..Default::default()
             },
             ..Default::default()

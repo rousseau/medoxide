@@ -34,15 +34,15 @@ for s in args.substitut:
     subst[(sujet, int(h))] = f
 
 H = args.repli
-# nos trois méthodes à alpha = 0,1 (le défaut depuis la mise au point de la régularisation) ; SVRTK et NeSVoR à leurs défauts
+# nos trois méthodes à alpha = 0,05 (le défaut depuis la révision de la régularisation par netteté et reproductibilité de la segmentation ; avant : 0,1, fichiers `*_a1_*` et `ours_header_a01h*`) ; SVRTK et NeSVoR à leurs défauts
 METHODES = [
-    ("sans correction", "ours_header_a01h{h}"),
+    ("sans correction", "ours_header_a005h{h}"),
     ("SVRTK (défauts)", "svrtk_sans{h}"),
     ("NeSVoR (défauts)", "nesvor_sans{h}"),
-    ("notre coupe-volume", "ours_loop_loso_a1_sans{h}"),
-    ("notre coupe-coupe", "ours_s2s_a1_sans{h}"),
+    ("notre coupe-volume", "ours_loop_loso_a005_sans{h}"),
+    ("notre coupe-coupe", "ours_s2s_a005_sans{h}"),
 ]
-REFERENCE = "ours_s2s_a1_sans{h}"
+REFERENCE = "ours_s2s_a005_sans{h}"
 
 
 def lire(chemin):
@@ -114,7 +114,7 @@ for ligne, (sujet, etiquette) in enumerate(zip(args.sujets, args.etiquettes)):
                 ax.set_ylabel(etiquette, fontsize=10)
 for v, (nom_vue, _, _) in enumerate(VUES):
     fig.text((v * len(METHODES) + len(METHODES) / 2) / (2 * len(METHODES)) * 0.97 + 0.02, 0.985, nom_vue, ha="center", fontsize=11.5, fontweight="bold")
-fig.suptitle(f"Reconstructions à 2 stacks, repli {H} (un stack mis de côté), nos méthodes à α = 0,1, couverture 1 (volumes jugés ; les « languettes » visibles sont supprimées par défaut avec --min-stack-coverage 2) ; NCC = prédiction du stack mis de côté (le juge favorise le lissage)", fontsize=8.2, y=0.012, va="bottom")
+fig.suptitle(f"Reconstructions à 2 stacks, repli {H} (un stack mis de côté), nos méthodes à α = 0,05, couverture 1 (volumes jugés ; les « languettes » visibles sont supprimées par défaut avec --min-stack-coverage 2) ; NCC = prédiction du stack mis de côté (le juge favorise le lissage)", fontsize=8.2, y=0.012, va="bottom")
 fig.tight_layout(rect=(0, 0.03, 1, 0.97), h_pad=0.4, w_pad=0.25)
 fig.savefig(args.sortie, dpi=110)
 print("écrit :", args.sortie)

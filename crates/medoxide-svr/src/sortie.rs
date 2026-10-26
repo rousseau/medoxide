@@ -123,6 +123,7 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2s_temporal_robust_mm", reel(c.s2s_temporal_robust_mm)),
         ("s2s_temporal_robust_start_mm", reel(c.s2s_temporal_robust_start_mm)),
         ("s2s_temporal_info_exponent", reel(c.s2s_temporal_info_exponent)),
+        ("s2s_anchor_stack", c.s2s_anchor_stack.map_or(Json::Null, entier)),
         ("s2s_exclude_fraction", reel(c.s2s_exclude_fraction)),
         ("s2v_refine_cycles", entier(c.s2v_refine_cycles)),
         ("s2v_refine_resolution_mm", reel(c.s2v_refine_resolution_mm)),

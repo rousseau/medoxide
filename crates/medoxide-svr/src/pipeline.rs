@@ -70,8 +70,9 @@ pub struct ReconstructionConfig {
     /// Marge ajoutée autour de la boîte des masques cérébraux pour définir la grille, en mm.
     pub margin_mm: f64,
     /// Poids `α` de la régularisation de la reconstruction (voir [`crate::recon::ReconstructionProblem`]).
-    /// Défaut 0,1 : choisi par le juge hors échantillon sur deux sujets de réglage (meilleure moyenne), puis vérifié sur quatre autres sujets (gain moyen de NCC +0,036 sur 0,01, qui laissait un hachurage et des valeurs négatives).
-    /// L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité).
+    /// Défaut 0,05. Historique : 0,01 laissait un hachurage et des valeurs négatives ; 0,1 avait été choisi par le juge hors échantillon (qui favorise le lissage), mais donnait des volumes 30 à 40 % moins nets que SVRTK ;
+    /// 0,05 donne une netteté comparable à celle de SVRTK, améliore la reproductibilité de la segmentation entre repliements sur les six sujets de réglage, et garde un juge à netteté égale très supérieur (voir la validation du livre).
+    /// À 0,03 une texture bruitée apparaît sur les sujets très agités. L'optimum dépend du sujet (≈ 0,05 pour un sujet calme, ≥ 0,3 pour un sujet très agité au sens du juge seul).
     pub alpha: f64,
     /// Itérations maximales du gradient conjugué à chaque reconstruction.
     pub cg_max_iterations: usize,
@@ -105,6 +106,10 @@ pub struct ReconstructionConfig {
     pub s2s_temporal_robust_start_mm: f64,
     /// Coupe-coupe : exposant de la pondération du poids temporel par l'information de la coupe (nombre de points d'intersection valides) ; 0 : poids constant.
     pub s2s_temporal_info_exponent: f64,
+    /// Coupe-coupe : stack d'ancrage (indice dans la liste des stacks). Si `Some(a)`, seules les paires de coupes dont l'une est dans le stack `a` servent à estimer le mouvement ; les paires entre deux autres stacks restent
+    /// inutilisées et permettent de mesurer la cohérence des poses (concordance aux intersections) sans circularité. L'estimation dispose alors de moins d'information : option d'évaluation, `None` (toutes les paires) par défaut.
+    /// L'estimation du champ de biais d'intensité utilise, elle, toutes les paires (aux poses courantes) : la mesure reste donc très peu dépendante, mais pas strictement indépendante, de ces paires.
+    pub s2s_anchor_stack: Option<usize>,
     /// Coupe-coupe : nombre de cycles coupe-volume qui suivent le coupe-coupe (partant de ses poses, sur les stacks corrigés du biais), reconstruits à la résolution `s2v_refine_resolution_mm` ; 0 : aucun (défaut, option).
     pub s2v_refine_cycles: usize,
     /// Coupe-coupe : fraction (0 à 1, exclue) des coupes recalées ayant la plus faible concordance finale qui sont écartées de la RECONSTRUCTION (masque de coupe vidé ; les poses ne changent pas) ; 0 : aucune (défaut, option).
@@ -148,7 +153,7 @@ impl Default for ReconstructionConfig {
             motion: Motion::SliceToSlice,
             resolution_mm: 0.8,
             margin_mm: 10.0,
-            alpha: 0.1,
+            alpha: 0.05,
             min_stack_coverage: 2,
             edge_kappa: 0.0,
             edge_outer: 3,
@@ -169,6 +174,7 @@ impl Default for ReconstructionConfig {
             s2s_temporal_robust_mm: 0.0,
             s2s_temporal_robust_start_mm: 0.0,
             s2s_temporal_info_exponent: 0.0,
+            s2s_anchor_stack: None,
             s2v_refine_cycles: 0,
             s2s_exclude_fraction: 0.0,
             s2v_refine_resolution_mm: 2.0,
@@ -582,6 +588,7 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
         temporal_info_exponent: config.s2s_temporal_info_exponent,
         intersection: crate::s2s::IntersectionConfig {
             highpass_sigma_mm: config.s2s_highpass_mm,
+            anchor_stack: config.s2s_anchor_stack,
             ..Default::default()
         },
         ..Default::default()
