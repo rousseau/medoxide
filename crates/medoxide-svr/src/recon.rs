@@ -4345,6 +4345,195 @@ mod tests {
         }
     }
 
+    /// Rejet robuste (`pipeline::trim_outliers`, blobs à 3 stacks, poses vraies, volume reconstruit sur les stacks sains) : on corrompt une coupe entière du stack 0 (intensités × 0,2, une coupe « sombre ») et 30 pixels du stack 1 (intensités × 5, des « pics »), puis (a) la coupe sombre est écartée entière ; (b) au moins 90 % des pics sont écartés ;
+    /// (c) le stack 2, sans corruption, perd d'autant moins de pixels que le seuil est haut (3 σ̂ : plus de 5 % sur ces blobs sans bruit, à cause du résidu de modèle non gaussien ; 6 σ̂ : moins de 5 %, pics encore détectés) ; (d) le bilan compte exactement les pixels retirés des masques ; (e) un seuil énorme n'écarte rien et rend les masques tels quels ; (f) `robust_rounds = 0` rend le volume tel quel et 1 tour le modifie.
+    #[test]
+    fn the_robust_trimming_removes_dark_slices_and_spikes_but_not_clean_pixels() {
+        use crate::pipeline::{robust_refinement, trim_outliers, ReconstructionConfig};
+        let t = Temp::new("rejet_robuste");
+        let (propres, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let grille = reconstruction_grid(&propres, 2.0, 4.0).unwrap();
+        let config = ReconstructionConfig {
+            alpha: 0.01,
+            cg_max_iterations: 20,
+            cg_tolerance: 1e-4,
+            min_stack_coverage: 2,
+            robust_rounds: 1,
+            ..Default::default()
+        };
+        let x = crate::pipeline::reconstruct_with_poses(&grille, &propres, &vraies, &config).unwrap();
+        // corruption : coupe sombre (stack 0), pics (stack 1)
+        let masque_u8 = |s: &Stack| s.brain_mask().unwrap().voxels().mapv(u8::from);
+        let (kc, kp) = (propres[0].dim().2 / 2, propres[1].dim().2 / 2);
+        let mut d0 = propres[0].data().clone();
+        d0.index_axis_mut(ndarray::Axis(2), kc).mapv_inplace(|v| v * 0.2);
+        let mut d1 = propres[1].data().clone();
+        let pixels_pic: Vec<(usize, usize)> = propres[1]
+            .brain_mask()
+            .unwrap()
+            .voxels()
+            .index_axis(ndarray::Axis(2), kp)
+            .indexed_iter()
+            .filter(|(_, &m)| m)
+            .map(|(ij, _)| ij)
+            .step_by(7)
+            .take(30)
+            .collect();
+        assert_eq!(pixels_pic.len(), 30, "assez de pixels pour 30 pics");
+        for &(i, j) in &pixels_pic {
+            d1[[i, j, kp]] *= 5.0;
+        }
+        let corrompus = vec![
+            stack_avec_masque(
+                &t,
+                "cor0",
+                &d0,
+                &masque_u8(&propres[0]),
+                propres[0].affine(),
+                [1.0, 1.0, 3.0],
+            ),
+            stack_avec_masque(
+                &t,
+                "cor1",
+                &d1,
+                &masque_u8(&propres[1]),
+                propres[1].affine(),
+                [1.0, 1.0, 3.0],
+            ),
+            propres[2].clone(),
+        ];
+        let compte = |s: &Stack| s.brain_mask().unwrap().voxel_count();
+        let (reduits, bilan) = trim_outliers(&grille, &corrompus, &vraies, &x, 3.0);
+        // (a)
+        let k_vide = reduits[0]
+            .brain_mask()
+            .unwrap()
+            .voxels()
+            .index_axis(ndarray::Axis(2), kc)
+            .iter()
+            .filter(|&&v| v)
+            .count();
+        assert_eq!(k_vide, 0, "(a) la coupe sombre doit être écartée entière");
+        assert!(bilan.slices_removed >= 1, "(a) bilan : {bilan:?}");
+        // (b)
+        let restants = pixels_pic
+            .iter()
+            .filter(|&&(i, j)| reduits[1].brain_mask().unwrap().voxels()[[i, j, kp]])
+            .count();
+        assert!(restants <= 3, "(b) {restants} pics sur 30 non écartés");
+        // (c) le stack sain perd d'autant moins de pixels que le seuil est haut ; à 3 σ̂ il en perd plus de 5 % sur ces blobs sans bruit (résidu de modèle non gaussien, mesuré : 10,4 %), à 6 σ̂ moins de 5 % (mesuré : 3,3 %), et les pics (×5) restent détectés à 6 σ̂
+        let perte = |seuil: f64| {
+            let (r, _) = trim_outliers(&grille, &corrompus, &vraies, &x, seuil);
+            1.0 - compte(&r[2]) as f64 / compte(&corrompus[2]) as f64
+        };
+        let pertes: Vec<f64> = [3.0, 4.0, 5.0, 6.0].iter().map(|&c| perte(c)).collect();
+        println!("stack sain, pixels écartés à 3, 4, 5, 6 σ̂ : {pertes:?} ; bilan à 3 σ̂ : {bilan:?}");
+        assert!(pertes.windows(2).all(|w| w[1] <= w[0]), "(c) monotone : {pertes:?}");
+        assert!(pertes[0] > 0.05 && pertes[3] < 0.05, "(c) {pertes:?}");
+        let (r6, _) = trim_outliers(&grille, &corrompus, &vraies, &x, 6.0);
+        let restants6 = pixels_pic
+            .iter()
+            .filter(|&&(i, j)| r6[1].brain_mask().unwrap().voxels()[[i, j, kp]])
+            .count();
+        assert!(restants6 <= 6, "(c) {restants6} pics sur 30 non écartés à 6 σ̂");
+        // (d)
+        let avant: usize = corrompus.iter().map(compte).sum();
+        let apres: usize = reduits.iter().map(compte).sum();
+        assert_eq!(bilan.pixels, avant, "(d) pixels avant");
+        assert_eq!(bilan.removed, avant - apres, "(d) pixels retirés");
+        // (e)
+        let (intacts, rien) = trim_outliers(&grille, &corrompus, &vraies, &x, 1e9);
+        assert_eq!(rien.removed, 0, "(e)");
+        assert!(
+            intacts.iter().zip(&corrompus).all(|(a, b)| compte(a) == compte(b)),
+            "(e)"
+        );
+        // (f)
+        let zero = ReconstructionConfig {
+            robust_rounds: 0,
+            ..config.clone()
+        };
+        let rendu = robust_refinement(&grille, &corrompus, &vraies, x.clone(), &zero).unwrap();
+        assert_eq!(rendu, x, "(f) 0 tour : volume inchangé");
+        let un_tour = robust_refinement(&grille, &corrompus, &vraies, x.clone(), &config).unwrap();
+        let ecart = un_tour
+            .iter()
+            .zip(x.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(ecart > 1e-6, "(f) un tour doit modifier le volume");
+    }
+
+    /// Câblage du rejet robuste dans `pipeline::reconstruct` (blobs, coupe-coupe, un balayage) : avec `robust_rounds = 1`, le volume rendu égale EXACTEMENT `robust_refinement` appliqué au volume et aux poses du même appel à 0 tour (branche sans correction de biais), et diffère du volume à 0 tour ;
+    /// la branche avec correction de biais en fait autant (volume différent de celui à 0 tour).
+    #[test]
+    fn the_pipeline_applies_the_robust_refinement_after_the_final_reconstruction() {
+        use crate::pipeline::{reconstruct, robust_refinement, Motion, ReconstructionConfig};
+        let t = Temp::new("rejet_robuste_pipeline");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let base = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 1,
+            s2s_block_levels: 0,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 0,
+            s2s_temporal_weight: 0.0,
+            robust_threshold: 1.0,
+            ..Default::default()
+        };
+        let ecart = |a: &Array3<f64>, b: &Array3<f64>| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        let zero = reconstruct(&stacks, &base, &device).unwrap();
+        let un = ReconstructionConfig {
+            robust_rounds: 1,
+            ..base.clone()
+        };
+        let avec = reconstruct(&stacks, &un, &device).unwrap();
+        let attendu = robust_refinement(&zero.grid, &stacks, &zero.poses, zero.volume.clone(), &un).unwrap();
+        assert_eq!(
+            ecart(&avec.volume, &attendu),
+            0.0,
+            "branche sans biais : volume attendu"
+        );
+        assert!(
+            ecart(&avec.volume, &zero.volume) > 1e-6,
+            "le rejet doit modifier le volume"
+        );
+        // branche avec biais
+        let zero_b = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_rounds: 1,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        let avec_b = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_rounds: 1,
+                ..un.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&avec_b.volume, &zero_b.volume) > 1e-6,
+            "branche avec biais : le rejet doit modifier le volume"
+        );
+    }
+
     /// Cibles de l'a priori temporel du coupe-volume (`align::prior_temporel`, blobs à 3 stacks) : (a) une coupe du milieu dont la voisine précédente est translatée de (2, 0, 0) et la suivante de (0, 4, 0) a pour cible de chaque pixel sa position décalée de la MOYENNE (1, 2, 0), la pose de départ de la coupe étant l'identité ;
     /// (b) avec une pose de départ translatée de (1, 0, 0) (seconde passe d'un gros-vers-fin), les cibles sont décalées d'autant en moins pour la voisine précédente : mouvement relatif `M_voisine · départ⁻¹` ; (c) à un bord du stack, la seule voisine existante donne la cible ; (d) un poids nul ne donne aucun a priori.
     #[test]

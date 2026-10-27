@@ -161,6 +161,10 @@ pub struct ReconstructionConfig {
     pub s2v_init: S2vInit,
     /// Coupe-volume : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (pénalité sur l'écart entre son mouvement et celui de ses voisines directes du stack, voir [`crate::diff::TemporalPrior`]) ; 0 : aucun (défaut, historique). Sans effet avec `s2v_batched` ou sans `s2v_leave_slice_out`.
     pub s2v_temporal_weight: f64,
+    /// Rejet robuste après la reconstruction finale (voir [`trim_outliers`]) : nombre de tours « écarter les pixels et les coupes incohérents avec le volume, reconstruire de nouveau » ; 0 : aucun (défaut, option).
+    pub robust_rounds: usize,
+    /// Rejet robuste : un pixel est écarté si son résidu dépasse ce nombre d'écarts types robustes (1,4826 × médiane des écarts absolus du stack).
+    pub robust_threshold: f64,
 }
 
 impl Default for ReconstructionConfig {
@@ -205,6 +209,8 @@ impl Default for ReconstructionConfig {
             s2v_skip_unused_reconstructions: true,
             s2v_init: S2vInit::Header,
             s2v_temporal_weight: 0.0,
+            robust_rounds: 0,
+            robust_threshold: 3.0,
         }
     }
 }
@@ -392,6 +398,13 @@ pub fn reconstruct(
                     &poses,
                     config,
                 )?;
+                let volume = robust_refinement(
+                    &grid,
+                    &without_excluded_slices(stacks, &slices, config.s2s_exclude_fraction),
+                    &poses,
+                    volume,
+                    config,
+                )?;
                 let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
                 return Ok(ReconstructionOutput {
                     grid,
@@ -433,6 +446,13 @@ pub fn reconstruct(
                     config,
                 )
             })?;
+            let volume = robust_refinement(
+                &grid,
+                &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
+                &poses,
+                volume,
+                config,
+            )?;
             let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
             Ok(ReconstructionOutput {
                 grid,
@@ -454,6 +474,7 @@ pub fn reconstruct(
             } else {
                 result.volume
             };
+            let volume = robust_refinement(&grid, stacks, &result.poses, volume, config)?;
             let slices = result.cycles.last().map(|r| r.slices.clone()).unwrap_or_default();
             Ok(ReconstructionOutput {
                 grid,
@@ -506,6 +527,125 @@ pub(crate) fn s2v_start(
         config.s2s_bias_min_reduction,
     );
     Ok((corriges, poses))
+}
+
+/// Part minimale de pixels cohérents avec le volume pour qu'une coupe soit gardée par [`trim_outliers`].
+const ROBUST_MIN_SLICE_FRACTION: f64 = 0.5;
+/// Nombre minimal de pixels évalués pour qu'une coupe puisse être écartée entière par [`trim_outliers`].
+const ROBUST_MIN_SLICE_PIXELS: usize = 50;
+
+/// Ce que [`trim_outliers`] a écarté.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrimStats {
+    /// Pixels de masque avant le rejet.
+    pub(crate) pixels: usize,
+    /// Pixels écartés (coupes écartées entières comprises).
+    pub(crate) removed: usize,
+    /// Coupes écartées entières.
+    pub(crate) slices_removed: usize,
+}
+
+/// Médiane d'une liste non vide (tri sur place).
+fn mediane_de(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
+}
+
+/// **Rejet robuste « dur »** (version simplifiée des statistiques robustes EM de SVRTK) : pour chaque stack, le résidu `y − A x` de chaque pixel de masque est calculé avec le volume `x` aux poses `poses` ; l'écart type robuste du stack est `σ̂ = 1,4826 × médiane |r|` et un pixel est écarté si `|r| > threshold · σ̂`.
+/// Une coupe dont moins de la moitié des pixels évalués restent est écartée entière. Ne sont évalués que les pixels dont la PSF est entièrement dans la grille (couverture ≥ 0,99) et dans le domaine reconstruit (les voxels de `x` nuls sont hors domaine) : sur les bords du domaine le volume vaut 0 et le résidu n'a pas de sens.
+/// Rend des copies des `stacks` aux masques réduits (les autres propriétés sont conservées) et les comptes. Un stack dont `σ̂` est nul est rendu tel quel.
+pub(crate) fn trim_outliers(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    x: &Array3<f64>,
+    threshold: f64,
+) -> (Vec<Stack>, TrimStats) {
+    let volume = crate::Volume::new(x.mapv(|v| v as f32), grid.affine).expect("l'affine d'une grille est inversible");
+    let domaine = crate::Volume::new(x.mapv(|v| if v != 0.0 { 1.0_f32 } else { 0.0 }), grid.affine)
+        .expect("l'affine d'une grille est inversible");
+    let mut bilan = TrimStats {
+        pixels: 0,
+        removed: 0,
+        slices_removed: 0,
+    };
+    let reduits = stacks
+        .iter()
+        .enumerate()
+        .map(|(si, stack)| {
+            let masque = stack.brain_mask().expect("le masque a été vérifié").voxels();
+            let (mut residus, mut par_coupe) = (Vec::new(), Vec::new());
+            for coupe in stack.slices() {
+                let k = coupe.index();
+                let posee = coupe.with_motion(*poses.get(si, k));
+                let m = masque.index_axis(ndarray::Axis(2), k);
+                let simulee = volume.simulate_slice_masked(&posee, &posee.psf(), m);
+                let dedans = domaine.simulate_slice_masked(&posee, &posee.psf(), m);
+                let donnees = posee.data();
+                let mut evalues = Vec::new();
+                for ((i, j), &dans_masque) in m.indexed_iter() {
+                    if dans_masque && simulee.coverage[[i, j]] >= 0.99 && dedans.values[[i, j]] >= 0.95 {
+                        let r = (f64::from(donnees[[i, j]]) - f64::from(simulee.values[[i, j]])).abs();
+                        residus.push(r);
+                        evalues.push((i, j, r));
+                    }
+                }
+                par_coupe.push((k, evalues));
+            }
+            bilan.pixels += masque.iter().filter(|&&v| v).count();
+            if residus.is_empty() {
+                return stack.clone();
+            }
+            let sigma = 1.4826 * mediane_de(&mut residus);
+            if !(sigma > 0.0) {
+                return stack.clone();
+            }
+            let mut ecartes = Array3::<bool>::from_elem(masque.dim(), false);
+            for (k, evalues) in par_coupe {
+                let hors: Vec<&(usize, usize, f64)> = evalues.iter().filter(|e| e.2 > threshold * sigma).collect();
+                let coupe_entiere = evalues.len() >= ROBUST_MIN_SLICE_PIXELS
+                    && ((evalues.len() - hors.len()) as f64) < ROBUST_MIN_SLICE_FRACTION * evalues.len() as f64;
+                if coupe_entiere {
+                    ecartes.index_axis_mut(ndarray::Axis(2), k).fill(true);
+                    bilan.slices_removed += 1;
+                } else {
+                    for &&(i, j, _) in &hors {
+                        ecartes[[i, j, k]] = true;
+                    }
+                }
+            }
+            let retires = ecartes.iter().zip(masque.iter()).filter(|(&e, &m)| e && m).count();
+            bilan.removed += retires;
+            stack.with_pixels_removed(&ecartes)
+        })
+        .collect();
+    (reduits, bilan)
+}
+
+/// Rejet robuste après la reconstruction finale : `config.robust_rounds` tours de « [`trim_outliers`] depuis les masques d'origine avec le volume courant, puis reconstruction sur les masques réduits » (les masques sont réévalués à chaque tour, pas cumulés). `volume` est rendu tel quel si `robust_rounds = 0`. Avec `MEDX_S2S_TRACE`, affiche sur la sortie d'erreur la part écartée de chaque tour.
+pub(crate) fn robust_refinement(
+    grid: &GridSpec,
+    stacks: &[Stack],
+    poses: &SlicePoses,
+    volume: Array3<f64>,
+    config: &ReconstructionConfig,
+) -> Result<Array3<f64>, SvrError> {
+    let mut courant = volume;
+    for tour in 0..config.robust_rounds {
+        let (reduits, bilan) = trim_outliers(grid, stacks, poses, &courant, config.robust_threshold);
+        if std::env::var_os("MEDX_S2S_TRACE").is_some() {
+            eprintln!(
+                "rejet robuste, tour {} : {} pixels sur {} écartés ({:.2} %), {} coupes entières",
+                tour + 1,
+                bilan.removed,
+                bilan.pixels,
+                100.0 * bilan.removed as f64 / bilan.pixels.max(1) as f64,
+                bilan.slices_removed
+            );
+        }
+        courant = reconstruct_with_poses(grid, &reduits, poses, config)?;
+    }
+    Ok(courant)
 }
 
 /// Coupes à écarter de la reconstruction : parmi les coupes recalées (`registered`), la fraction `fraction` (partie entière du produit par leur nombre) ayant la plus faible concordance finale, `(stack, coupe)` triés ; égalités départagées par `(stack, coupe)`. Vide si `fraction <= 0`.

@@ -240,6 +240,23 @@ impl BrainMask {
         copie
     }
 
+    /// Copie du masque dont les voxels marqués dans `ecartes` (même forme que le masque) sont retirés : ils ne contribuent plus à la reconstruction ni au recalage. Le barycentre et le compte des voxels écartés sont conservés.
+    ///
+    /// # Panics
+    /// Si `ecartes` n'a pas la forme du masque.
+    pub fn without_pixels(&self, ecartes: &Array3<bool>) -> BrainMask {
+        assert_eq!(
+            ecartes.dim(),
+            self.voxels.dim(),
+            "ecartes doit avoir la forme du masque"
+        );
+        let mut copie = self.clone();
+        for (v, &e) in copie.voxels.iter_mut().zip(ecartes.iter()) {
+            *v = *v && !e;
+        }
+        copie
+    }
+
     /// Voxels du masque nettoyé, axes `[x, y, z]`, même grille que le stack.
     pub fn voxels(&self) -> &Array3<bool> {
         &self.voxels
@@ -1047,6 +1064,13 @@ impl Stack {
     pub fn without_slices(&self, exclues: &[usize]) -> Stack {
         let mut copie = self.clone();
         copie.mask = self.mask.as_ref().map(|m| m.without_slices(exclues));
+        copie
+    }
+
+    /// Copie du stack dont les voxels marqués dans `ecartes` sont retirés du masque cérébral (voir [`BrainMask::without_pixels`]) ; sans masque attaché, copie telle quelle.
+    pub fn with_pixels_removed(&self, ecartes: &Array3<bool>) -> Stack {
+        let mut copie = self.clone();
+        copie.mask = self.mask.as_ref().map(|m| m.without_pixels(ecartes));
         copie
     }
 
