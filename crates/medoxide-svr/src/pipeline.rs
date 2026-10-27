@@ -165,6 +165,8 @@ pub struct ReconstructionConfig {
     pub robust_rounds: usize,
     /// Rejet robuste : un pixel est écarté si son résidu dépasse ce nombre d'écarts types robustes (1,4826 × médiane des écarts absolus du stack).
     pub robust_threshold: f64,
+    /// Échelle d'intensité par coupe après la reconstruction finale (voir [`scale_refinement`]) : nombre de tours « estimer le facteur de chaque coupe contre le volume, diviser, reconstruire de nouveau » ; 0 : aucun (défaut, option).
+    pub slice_scale_rounds: usize,
 }
 
 impl Default for ReconstructionConfig {
@@ -211,6 +213,7 @@ impl Default for ReconstructionConfig {
             s2v_temporal_weight: 0.0,
             robust_rounds: 0,
             robust_threshold: 3.0,
+            slice_scale_rounds: 0,
         }
     }
 }
@@ -398,13 +401,14 @@ pub fn reconstruct(
                     &poses,
                     config,
                 )?;
-                let volume = robust_refinement(
+                let (utilises, volume) = scale_refinement(
                     &grid,
-                    &without_excluded_slices(stacks, &slices, config.s2s_exclude_fraction),
+                    without_excluded_slices(stacks, &slices, config.s2s_exclude_fraction),
                     &poses,
                     volume,
                     config,
                 )?;
+                let volume = robust_refinement(&grid, &utilises, &poses, volume, config)?;
                 let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
                 return Ok(ReconstructionOutput {
                     grid,
@@ -446,13 +450,14 @@ pub fn reconstruct(
                     config,
                 )
             })?;
-            let volume = robust_refinement(
+            let (utilises, volume) = scale_refinement(
                 &grid,
-                &without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
+                without_excluded_slices(&corriges, &slices, config.s2s_exclude_fraction),
                 &poses,
                 volume,
                 config,
             )?;
+            let volume = robust_refinement(&grid, &utilises, &poses, volume, config)?;
             let excluded = slices_to_exclude(&slices, config.s2s_exclude_fraction);
             Ok(ReconstructionOutput {
                 grid,
@@ -474,7 +479,8 @@ pub fn reconstruct(
             } else {
                 result.volume
             };
-            let volume = robust_refinement(&grid, stacks, &result.poses, volume, config)?;
+            let (utilises, volume) = scale_refinement(&grid, stacks.to_vec(), &result.poses, volume, config)?;
+            let volume = robust_refinement(&grid, &utilises, &result.poses, volume, config)?;
             let slices = result.cycles.last().map(|r| r.slices.clone()).unwrap_or_default();
             Ok(ReconstructionOutput {
                 grid,
@@ -620,6 +626,39 @@ pub(crate) fn trim_outliers(
         })
         .collect();
     (reduits, bilan)
+}
+
+/// Échelle d'intensité par coupe après la reconstruction finale : `config.slice_scale_rounds` tours de « [`estimate_slice_scales`] contre le volume courant aux poses `poses`, division de chaque coupe par son facteur, reconstruction sur les stacks ainsi corrigés ». Les facteurs s'accumulent d'un tour à l'autre (chaque tour corrige le résidu du précédent). Rend les stacks corrigés (à utiliser pour la suite) et le volume ; `stacks` et `volume` sont rendus tels quels si `slice_scale_rounds = 0`. Avec `MEDX_S2S_TRACE`, affiche l'écart type de ln s de chaque tour.
+pub(crate) fn scale_refinement(
+    grid: &GridSpec,
+    stacks: Vec<Stack>,
+    poses: &SlicePoses,
+    volume: Array3<f64>,
+    config: &ReconstructionConfig,
+) -> Result<(Vec<Stack>, Array3<f64>), SvrError> {
+    let (mut courants, mut courant) = (stacks, volume);
+    for tour in 0..config.slice_scale_rounds {
+        let ref_volume =
+            crate::Volume::new(courant.mapv(|v| v as f32), grid.affine).expect("l'affine d'une grille est inversible");
+        let echelles = crate::recon::estimate_slice_scales(&courants, poses, &ref_volume)?;
+        if std::env::var_os("MEDX_S2S_TRACE").is_some() {
+            let ln: Vec<f64> = echelles.iter().flatten().map(|s| s.ln()).collect();
+            let moyenne = ln.iter().sum::<f64>() / ln.len().max(1) as f64;
+            let ecart = (ln.iter().map(|v| (v - moyenne).powi(2)).sum::<f64>() / ln.len().max(1) as f64).sqrt();
+            eprintln!(
+                "échelle par coupe, tour {} : écart type de ln s = {ecart:.4} sur {} coupes",
+                tour + 1,
+                ln.len()
+            );
+        }
+        courants = courants
+            .iter()
+            .zip(&echelles)
+            .map(|(s, f)| s.divided_by_slice_scales(f))
+            .collect::<Result<_, _>>()?;
+        courant = reconstruct_with_poses(grid, &courants, poses, config)?;
+    }
+    Ok((courants, courant))
 }
 
 /// Rejet robuste après la reconstruction finale : `config.robust_rounds` tours de « [`trim_outliers`] depuis les masques d'origine avec le volume courant, puis reconstruction sur les masques réduits » (les masques sont réévalués à chaque tour, pas cumulés). `volume` est rendu tel quel si `robust_rounds = 0`. Avec `MEDX_S2S_TRACE`, affiche sur la sortie d'erreur la part écartée de chaque tour.

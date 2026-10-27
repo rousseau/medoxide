@@ -218,6 +218,9 @@ enum SvrAction {
         /// Avec `--robust-rounds` : un pixel est écarté au-delà de ce nombre d'écarts types robustes du résidu
         #[arg(long, default_value_t = ReconstructionConfig::default().robust_threshold)]
         robust_threshold: f64,
+        /// Échelle d'intensité par coupe après la reconstruction : tours « estimer le facteur de chaque coupe contre le volume, diviser, reconstruire » (0 : aucun)
+        #[arg(long, default_value_t = ReconstructionConfig::default().slice_scale_rounds)]
+        slice_scale_rounds: usize,
         /// Avec `--motion s2s` : cycles coupe-volume de raffinement après le coupe-coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_cycles)]
         s2v_refine_cycles: usize,
@@ -848,6 +851,7 @@ fn main() -> ExitCode {
                     s2v_temporal_weight,
                     robust_rounds,
                     robust_threshold,
+                    slice_scale_rounds,
                     s2v_refine_cycles,
                     s2v_refine_resolution_mm,
                     s2s_exclude_fraction,
@@ -882,6 +886,7 @@ fn main() -> ExitCode {
                 s2v_temporal_weight,
                 robust_rounds,
                 robust_threshold,
+                slice_scale_rounds,
                 s2v_refine_cycles,
                 s2v_refine_resolution_mm,
                 s2s_exclude_fraction,

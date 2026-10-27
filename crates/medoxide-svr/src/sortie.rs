@@ -136,6 +136,7 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2v_temporal_weight", reel(c.s2v_temporal_weight)),
         ("robust_rounds", entier(c.robust_rounds)),
         ("robust_threshold", reel(c.robust_threshold)),
+        ("slice_scale_rounds", entier(c.slice_scale_rounds)),
         (
             "s2v_init",
             Json::texte(match c.s2v_init {

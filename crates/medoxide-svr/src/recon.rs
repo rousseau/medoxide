@@ -4534,6 +4534,163 @@ mod tests {
         );
     }
 
+    /// Câblage de l'échelle par coupe dans `pipeline::reconstruct` (blobs, coupe-coupe, un balayage) : avec `slice_scale_rounds = 1`, le volume rendu égale EXACTEMENT `scale_refinement` appliqué au volume et aux poses du même appel à 0 tour (branches sans et avec correction de biais), et diffère du volume à 0 tour.
+    #[test]
+    fn the_pipeline_applies_the_slice_scale_refinement_after_the_final_reconstruction() {
+        use crate::pipeline::{reconstruct, scale_refinement, Motion, ReconstructionConfig};
+        let t = Temp::new("echelle_pipeline");
+        let (propres, _) = jeu_de_blobs_pour_s2s(&t);
+        let facteurs = facteurs_injectes(&propres, 0.15, 4242);
+        let stacks: Vec<Stack> = propres
+            .iter()
+            .zip(&facteurs)
+            .map(|(s, f)| {
+                s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>())
+                    .unwrap()
+            })
+            .collect();
+        let device = burn::tensor::Device::flex().autodiff();
+        let base = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            margin_mm: 4.0,
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            s2s_sweeps: 1,
+            s2s_block_levels: 0,
+            s2s_coarse_sigma_pixels: 0.0,
+            s2s_bias_rounds: 0,
+            s2s_temporal_weight: 0.0,
+            ..Default::default()
+        };
+        let ecart = |a: &Array3<f64>, b: &Array3<f64>| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        let zero = reconstruct(&stacks, &base, &device).unwrap();
+        let un = ReconstructionConfig {
+            slice_scale_rounds: 1,
+            ..base.clone()
+        };
+        let avec = reconstruct(&stacks, &un, &device).unwrap();
+        let (_, attendu) = scale_refinement(&zero.grid, stacks.clone(), &zero.poses, zero.volume.clone(), &un).unwrap();
+        assert_eq!(
+            ecart(&avec.volume, &attendu),
+            0.0,
+            "branche sans biais : volume attendu"
+        );
+        assert!(
+            ecart(&avec.volume, &zero.volume) > 1e-6,
+            "l'échelle doit modifier le volume"
+        );
+        let zero_b = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_rounds: 1,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        let avec_b = reconstruct(
+            &stacks,
+            &ReconstructionConfig {
+                s2s_bias_rounds: 1,
+                ..un.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            ecart(&avec_b.volume, &zero_b.volume) > 1e-6,
+            "branche avec biais : l'échelle doit modifier le volume"
+        );
+    }
+
+    /// Correction des facteurs injectés par `scale_refinement` (critère fixé avant : écart type de ln s résiduel réduit d'au moins la moitié) : blobs aux VRAIES poses, facteurs log-normaux σ = 0,15 injectés ;
+    /// facteur cumulé estimé de chaque coupe = somme des pixels avant / après correction ; résidu = ln(facteur injecté) − ln(facteur cumulé), centré (la normalisation à la médiane laisse un facteur global libre).
+    /// Un tour, puis deux (le deuxième rattrape ce que le volume, qui contient la coupe, a absorbé au premier).
+    #[test]
+    fn the_slice_scale_refinement_removes_injected_factors() {
+        use crate::pipeline::{reconstruct_with_poses, scale_refinement, ReconstructionConfig};
+        let t = Temp::new("echelle_correction");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let propres = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let facteurs = facteurs_injectes(&propres, 0.15, 4242);
+        let injectes: Vec<Stack> = propres
+            .iter()
+            .zip(&facteurs)
+            .map(|(s, f)| {
+                s.divided_by_slice_scales(&f.iter().map(|v| 1.0 / v).collect::<Vec<_>>())
+                    .unwrap()
+            })
+            .collect();
+        let grid = reconstruction_grid(&injectes, 2.0, 4.0).unwrap();
+        let config = ReconstructionConfig {
+            alpha: 0.02,
+            cg_max_iterations: 7,
+            cg_tolerance: 1e-3,
+            ..Default::default()
+        };
+        let depart = reconstruct_with_poses(&grid, &injectes, &vraies, &config).unwrap();
+        let ecart_residuel = |corriges: &[Stack]| {
+            let mut r: Vec<f64> = Vec::new();
+            for (si, (avant, apres)) in injectes.iter().zip(corriges).enumerate() {
+                for k in 0..avant.dim().2 {
+                    let (a, b) = (
+                        avant
+                            .data()
+                            .index_axis(Axis(2), k)
+                            .iter()
+                            .map(|&v| f64::from(v))
+                            .sum::<f64>(),
+                        apres
+                            .data()
+                            .index_axis(Axis(2), k)
+                            .iter()
+                            .map(|&v| f64::from(v))
+                            .sum::<f64>(),
+                    );
+                    if a > 0.0 && b > 0.0 {
+                        r.push(facteurs[si][k].ln() - (a / b).ln());
+                    }
+                }
+            }
+            let m = r.iter().sum::<f64>() / r.len() as f64;
+            (
+                (r.iter().map(|v| (v - m).powi(2)).sum::<f64>() / r.len() as f64).sqrt(),
+                r.len(),
+            )
+        };
+        let (avant, n) = ecart_residuel(&injectes);
+        assert!(n >= 30 && avant > 0.1, "{n} coupes, écart initial {avant}");
+        let mut apres = Vec::new();
+        for tours in [1usize, 2] {
+            let cfg = ReconstructionConfig {
+                slice_scale_rounds: tours,
+                ..config.clone()
+            };
+            let (corriges, _) = scale_refinement(&grid, injectes.clone(), &vraies, depart.clone(), &cfg).unwrap();
+            apres.push(ecart_residuel(&corriges).0);
+        }
+        println!(
+            "écart type résiduel de ln s : {avant:.4} → {:.4} (1 tour) → {:.4} (2 tours)",
+            apres[0], apres[1]
+        );
+        assert!(apres[0] < 0.5 * avant, "1 tour : {} contre {avant}", apres[0]);
+        assert!(
+            apres[1] <= apres[0] + 1e-9,
+            "le 2e tour ne doit pas dégrader : {} contre {}",
+            apres[1],
+            apres[0]
+        );
+    }
+
     /// Cibles de l'a priori temporel du coupe-volume (`align::prior_temporel`, blobs à 3 stacks) : (a) une coupe du milieu dont la voisine précédente est translatée de (2, 0, 0) et la suivante de (0, 4, 0) a pour cible de chaque pixel sa position décalée de la MOYENNE (1, 2, 0), la pose de départ de la coupe étant l'identité ;
     /// (b) avec une pose de départ translatée de (1, 0, 0) (seconde passe d'un gros-vers-fin), les cibles sont décalées d'autant en moins pour la voisine précédente : mouvement relatif `M_voisine · départ⁻¹` ; (c) à un bord du stack, la seule voisine existante donne la cible ; (d) un poids nul ne donne aucun a priori.
     #[test]
