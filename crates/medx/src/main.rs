@@ -54,6 +54,27 @@ impl From<UpdateArg> for medoxide_svr::s2s::S2sUpdate {
     }
 }
 
+/// Départ de la boucle coupe-volume, tel qu'écrit sur la ligne de commande (`--s2v-init`).
+#[derive(Clone, Copy, ValueEnum)]
+enum S2vInitArg {
+    /// Poses de l'en-tête (défaut)
+    Header,
+    /// Alignement par stack entier, sans recalage par coupe
+    Stacks,
+    /// Alignement par stack entier sur des stacks corrigés du champ de biais
+    StacksBias,
+}
+
+impl From<S2vInitArg> for medoxide_svr::pipeline::S2vInit {
+    fn from(i: S2vInitArg) -> Self {
+        match i {
+            S2vInitArg::Header => Self::Header,
+            S2vInitArg::Stacks => Self::Stacks,
+            S2vInitArg::StacksBias => Self::StacksBias,
+        }
+    }
+}
+
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
@@ -185,6 +206,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : stack d'ancrage (rang dans la liste `--input`, à partir de 0) : seules les paires de coupes qui l'impliquent servent à estimer le mouvement, les autres paires restent disponibles pour mesurer la cohérence des poses ; option d'évaluation (moins d'information), non recommandée en usage normal
         #[arg(long)]
         s2s_anchor_stack: Option<usize>,
+        /// Avec `--motion s2v` : départ de la boucle (poses de l'en-tête, ou alignement par stack entier, avec ou sans correction de biais des stacks)
+        #[arg(long, value_enum, default_value_t = S2vInitArg::Header)]
+        s2v_init: S2vInitArg,
         /// Avec `--motion s2s` : cycles coupe-volume de raffinement après le coupe-coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_cycles)]
         s2v_refine_cycles: usize,
@@ -811,6 +835,7 @@ fn main() -> ExitCode {
                     s2s_temporal_robust_start_mm,
                     s2s_temporal_info_exponent,
                     s2s_anchor_stack,
+                    s2v_init,
                     s2v_refine_cycles,
                     s2v_refine_resolution_mm,
                     s2s_exclude_fraction,
@@ -841,6 +866,7 @@ fn main() -> ExitCode {
                 s2s_temporal_robust_start_mm,
                 s2s_temporal_info_exponent,
                 s2s_anchor_stack,
+                s2v_init: s2v_init.into(),
                 s2v_refine_cycles,
                 s2v_refine_resolution_mm,
                 s2s_exclude_fraction,

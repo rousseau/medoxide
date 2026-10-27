@@ -6,7 +6,7 @@ Pour chaque stack mis de côté `h` et chaque variante : reconstruction avec les
   - le TEMPS CPU de la reconstruction (utilisateur + système des processus enfants : le temps mural n'a pas de sens sur une machine partagée). L'ORDRE des variantes alterne d'un repli à l'autre (comparaison alternée).
 Le juge favorisant le lissage, on compare par frontière juge x netteté ; les fichiers déjà présents sont réutilisés (reprise, sans temps).
 
-Une variante s'écrit `nom=options` (options de `medx svr recon`, entre guillemets) ; `base=` est la variante par défaut.
+Une variante s'écrit `nom=options` (options de `medx svr recon`, entre guillemets) ; `base=` est la variante par défaut (coupe-coupe ; `--motion s2v` dans les options pour le coupe-volume).
 
 Aucun identifiant n'est écrit dans le code : sujet et racine sont des arguments. Les résultats restent dans `--sortie` (ignoré par Git).
 
@@ -77,8 +77,10 @@ def reconstruire(nom, options, h, gardes):
     if os.path.exists(volume):
         return volume, ""
     avant = resource.getrusage(resource.RUSAGE_CHILDREN)
-    subprocess.run([args.medx, "svr", "recon", "--motion", "s2s", "--device", "cpu", "--min-stack-coverage", "1", "--input", *[chemin_stack(i) for i in gardes], "--mask", *[chemin_masque(i) for i in gardes],
-                    "--output", volume, *shlex.split(options)], check=True, capture_output=True)
+    opts = shlex.split(options)
+    mouvement = [] if "--motion" in opts else ["--motion", "s2s"]  # coupe-coupe par défaut ; `--motion s2v` dans les options pour le coupe-volume
+    subprocess.run([args.medx, "svr", "recon", *mouvement, "--device", "cpu", "--min-stack-coverage", "1", "--input", *[chemin_stack(i) for i in gardes], "--mask", *[chemin_masque(i) for i in gardes],
+                    "--output", volume, *opts], check=True, capture_output=True)
     apres = resource.getrusage(resource.RUSAGE_CHILDREN)
     return volume, f"{apres.ru_utime + apres.ru_stime - avant.ru_utime - avant.ru_stime:.0f}"
 

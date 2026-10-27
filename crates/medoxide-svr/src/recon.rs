@@ -7485,6 +7485,101 @@ mod tests {
         assert!(ecart(&sans, &actif) > 1e-6, "γ = 1 : aucun effet");
     }
 
+    /// Départ de la boucle coupe-volume (`s2v_start`, option `s2v_init`), sur les blobs : (a) `Header` rend les stacks et les poses de l'en-tête tels quels ; (b) `Stacks` rend les stacks inchangés et EXACTEMENT les poses de l'alignement par stack seul (`block_levels` ≥ 1, aucun balayage, grossier compris) appelé directement, différentes de l'en-tête ;
+    /// (c) `StacksBias` sur des blobs sans biais : la garde `s2s_bias_min_reduction` laisse les stacks inchangés, donc mêmes poses que `Stacks` ; (d) avec la garde à 0 (toujours corriger), `StacksBias` rend des stacks modifiés (la correction est appliquée).
+    #[test]
+    fn the_slice_to_volume_start_follows_the_init_option() {
+        use crate::pipeline::{s2v_start, ReconstructionConfig, S2vInit};
+        use crate::s2s::{register_slices_s2s, S2sConfig};
+        let t = Temp::new("depart_s2v");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let ecart = |p: &SlicePoses, q: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        let memes_stacks = |a: &[crate::Stack], b: &[crate::Stack]| a.iter().zip(b).all(|(x, y)| x.data() == y.data());
+        let base = ReconstructionConfig {
+            s2s_block_levels: 1,
+            s2s_coarse_sigma_pixels: 1.0,
+            s2s_coarse_sweeps: 2,
+            s2s_sweeps: 2,
+            s2s_temporal_weight: 0.0,
+            ..Default::default()
+        };
+        let en_tete = SlicePoses::identity(&stacks);
+        // (a)
+        let (s, p) = s2v_start(&stacks, en_tete.clone(), &base, &device).unwrap();
+        assert!(memes_stacks(&s, &stacks) && ecart(&p, &en_tete) == 0.0, "(a)");
+        // (b)
+        let (s, p) = s2v_start(
+            &stacks,
+            en_tete.clone(),
+            &ReconstructionConfig {
+                s2v_init: S2vInit::Stacks,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        let direct = register_slices_s2s(
+            &stacks,
+            &en_tete,
+            &S2sConfig {
+                sweeps: 0,
+                coarse_sweeps: 0,
+                block_levels: 1,
+                ..crate::pipeline::s2s_config(&base)
+            },
+            &device,
+        )
+        .unwrap()
+        .poses;
+        assert!(memes_stacks(&s, &stacks), "(b) stacks modifiés");
+        assert_eq!(
+            ecart(&p, &direct),
+            0.0,
+            "(b) poses différentes de l'alignement par stack seul"
+        );
+        assert!(
+            ecart(&p, &en_tete) > 1e-6,
+            "(b) poses identiques à l'en-tête : aucun alignement"
+        );
+        // (c)
+        let (s_biais, p_biais) = s2v_start(
+            &stacks,
+            en_tete.clone(),
+            &ReconstructionConfig {
+                s2v_init: S2vInit::StacksBias,
+                ..base.clone()
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(memes_stacks(&s_biais, &stacks), "(c) stacks modifiés sans biais");
+        assert_eq!(ecart(&p_biais, &p), 0.0, "(c)");
+        // (d) la même garde à 0 : toujours corriger, les stacks changent
+        let (s_force, _) = s2v_start(
+            &stacks,
+            en_tete,
+            &ReconstructionConfig {
+                s2v_init: S2vInit::StacksBias,
+                s2s_bias_min_reduction: 0.0,
+                ..base
+            },
+            &device,
+        )
+        .unwrap();
+        assert!(
+            !memes_stacks(&s_force, &stacks),
+            "(d) la correction de biais n'est pas appliquée"
+        );
+    }
+
     /// Raffinement coupe-volume après le coupe-coupe (blobs, poses de départ à ± 2 mm de la vérité) : (a) 0 cycle : poses rendues telles quelles (identiques) ; (b) 2 cycles à 2 mm : les poses sont finies et diffèrent d'au moins 1e-6 du départ ; (c) câblage du pipeline : `reconstruct` en mode coupe-coupe avec `s2v_refine_cycles = 2` rend EXACTEMENT les poses que donne
     /// `refine_with_slice_to_volume` appliqué aux poses de `reconstruct` sans raffinement (déterministe) ; (d) le raffinement agit aussi dans la branche avec correction de biais. Aucune affirmation d'amélioration n'est faite ici : sur ces blobs analytiques (peu de structure), le raffinement à 2 mm dégrade les poses (mesuré : médiane 2,07 → 2,59 mm depuis ± 2 mm, 0,52 → 1,5 depuis ± 0,5 mm), alors que sur du contenu réel simulé il les améliore ;
     /// l'effet est mesuré par `diagnose_the_semi_synthetic_benchmark` (variante `v=N`) et sur les sujets réels.

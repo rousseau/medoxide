@@ -60,6 +60,17 @@ pub enum Motion {
     SliceToVolume,
 }
 
+/// D'où part la boucle coupe-volume (`Motion::SliceToVolume`) : les poses de départ et les stacks sur lesquels elle travaille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S2vInit {
+    /// Poses de l'en-tête, stacks tels quels (comportement historique ; portée de capture réelle ≈ ±2 mm).
+    Header,
+    /// Poses d'un alignement par stack entier (profils d'intersection, sans recalage par coupe) ; stacks tels quels.
+    Stacks,
+    /// Comme `Stacks`, sur des stacks corrigés du champ de biais d'intensité (estimé aux poses de l'en-tête avant l'alignement, puis aux poses alignées).
+    StacksBias,
+}
+
 /// Réglages de la chaîne de reconstruction. [`Default`] donne la configuration retenue après les mesures sur données réelles.
 #[derive(Debug, Clone)]
 pub struct ReconstructionConfig {
@@ -145,6 +156,9 @@ pub struct ReconstructionConfig {
     pub s2v_batched: bool,
     /// Coupe-volume : ne pas reconstruire aux cycles intermédiaires (avec `s2v_leave_slice_out`, ces volumes ne servent pas au recalage) ; seule la reconstruction finale est faite. Sans effet sur les poses.
     pub s2v_skip_unused_reconstructions: bool,
+    /// Coupe-volume (`Motion::SliceToVolume`) : poses de départ et stacks de la boucle, voir [`S2vInit`]. Défaut `Header` (historique). Sur six sujets réels le départ depuis l'en-tête est
+    /// moins bon que l'alignement coupe-coupe grossier seul sur les six, et sous les poses de l'en-tête elles-mêmes sur les deux sujets les plus agités (voir `docs/ROADMAP.md`, F2.1).
+    pub s2v_init: S2vInit,
 }
 
 impl Default for ReconstructionConfig {
@@ -187,6 +201,7 @@ impl Default for ReconstructionConfig {
             s2v_leave_slice_out: true,
             s2v_batched: false,
             s2v_skip_unused_reconstructions: true,
+            s2v_init: S2vInit::Header,
         }
     }
 }
@@ -426,8 +441,10 @@ pub fn reconstruct(
         }
         Motion::SliceToVolume => {
             let loop_config = loop_config(config);
+            let (stacks, departs) = s2v_start(stacks, header_poses, config, device)?;
+            let stacks = stacks.as_slice();
             let result =
-                reconstruct_with_motion_correction(&grid, stacks, &header_poses, loop_config, device, |_, _, _| {})?;
+                reconstruct_with_motion_correction(&grid, stacks, &departs, loop_config, device, |_, _, _| {})?;
             // la boucle rend une reconstruction de Tikhonov ; avec `edge_kappa > 0`, la reconstruction finale est refaite préservant les contours, aux poses finales
             let volume = if config.edge_kappa > 0.0 {
                 reconstruct_with_poses(&grid, stacks, &result.poses, config)?
@@ -444,6 +461,48 @@ pub fn reconstruct(
             })
         }
     }
+}
+
+/// Stacks et poses de départ de la boucle coupe-volume selon `config.s2v_init` : `Header` rend les `stacks` et les poses de l'en-tête tels quels ; `Stacks` et `StacksBias` font d'abord l'alignement par stack entier du coupe-coupe (`block_levels = 1`, aucun balayage par coupe, grossier compris), `StacksBias` sur des stacks corrigés du biais, estimé aux poses de l'en-tête puis réestimé aux poses alignées (les stacks rendus sont alors corrigés).
+pub(crate) fn s2v_start(
+    stacks: &[Stack],
+    header_poses: SlicePoses,
+    config: &ReconstructionConfig,
+    device: &Device,
+) -> Result<(Vec<Stack>, SlicePoses), SvrError> {
+    if config.s2v_init == S2vInit::Header {
+        return Ok((stacks.to_vec(), header_poses));
+    }
+    let biais = BiasConfig::default();
+    let avec_biais = config.s2v_init == S2vInit::StacksBias;
+    let a_aligner = if avec_biais {
+        correct_stacks(
+            stacks,
+            &estimate_bias_fields(stacks, &header_poses, &biais)?,
+            config.s2s_bias_min_reduction,
+        )
+    } else {
+        stacks.to_vec()
+    };
+    let alignement = S2sConfig {
+        sweeps: 0,
+        coarse_sweeps: 0,
+        block_levels: config.s2s_block_levels.max(1),
+        ..s2s_config(config)
+    };
+    let poses = phase("alignement par stack (départ coupe-volume)", || {
+        register_slices_s2s(&a_aligner, &header_poses, &alignement, device)
+    })?
+    .poses;
+    if !avec_biais {
+        return Ok((a_aligner, poses));
+    }
+    let corriges = correct_stacks(
+        stacks,
+        &estimate_bias_fields(stacks, &poses, &biais)?,
+        config.s2s_bias_min_reduction,
+    );
+    Ok((corriges, poses))
 }
 
 /// Coupes à écarter de la reconstruction : parmi les coupes recalées (`registered`), la fraction `fraction` (partie entière du produit par leur nombre) ayant la plus faible concordance finale, `(stack, coupe)` triés ; égalités départagées par `(stack, coupe)`. Vide si `fraction <= 0`.

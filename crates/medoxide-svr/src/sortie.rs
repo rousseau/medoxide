@@ -134,6 +134,14 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2v_leave_slice_out", Json::Bool(c.s2v_leave_slice_out)),
         ("s2v_batched", Json::Bool(c.s2v_batched)),
         (
+            "s2v_init",
+            Json::texte(match c.s2v_init {
+                crate::pipeline::S2vInit::Header => "header",
+                crate::pipeline::S2vInit::Stacks => "stacks",
+                crate::pipeline::S2vInit::StacksBias => "stacks-bias",
+            }),
+        ),
+        (
             "s2v_skip_unused_reconstructions",
             Json::Bool(c.s2v_skip_unused_reconstructions),
         ),
