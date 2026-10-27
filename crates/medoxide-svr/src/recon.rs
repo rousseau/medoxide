@@ -4306,6 +4306,7 @@ mod tests {
             s2v_start_amplitude_mm: 3.5,
             s2v_suspect_ncc: 0.7,
             s2v_skip_unused_reconstructions: true,
+            s2v_temporal_weight: 0.04,
             min_stack_coverage: 3,
             ..Default::default()
         };
@@ -4326,6 +4327,7 @@ mod tests {
                     extra_starts: 2,
                     start_amplitude_mm: 3.5,
                     batched: par_lots,
+                    temporal_weight: 0.04,
                     ..RobustConfig::new(0.7)
                 },
                 leave_one_stack_out_cycles: if sans_la_coupe { 0 } else { 4 },
@@ -4341,6 +4343,69 @@ mod tests {
                 format!("{attendu:?}")
             );
         }
+    }
+
+    /// Cibles de l'a priori temporel du coupe-volume (`align::prior_temporel`, blobs à 3 stacks) : (a) une coupe du milieu dont la voisine précédente est translatée de (2, 0, 0) et la suivante de (0, 4, 0) a pour cible de chaque pixel sa position décalée de la MOYENNE (1, 2, 0), la pose de départ de la coupe étant l'identité ;
+    /// (b) avec une pose de départ translatée de (1, 0, 0) (seconde passe d'un gros-vers-fin), les cibles sont décalées d'autant en moins pour la voisine précédente : mouvement relatif `M_voisine · départ⁻¹` ; (c) à un bord du stack, la seule voisine existante donne la cible ; (d) un poids nul ne donne aucun a priori.
+    #[test]
+    fn the_s2v_temporal_prior_targets_follow_the_neighbouring_slices() {
+        use crate::align::{preparer_coupe, prior_temporel};
+        let t = Temp::new("prior_s2v");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let stack = &stacks[0];
+        let nz = stack.dim().2;
+        let id = Matrix4::<f64>::identity();
+        let k = (1..nz - 1)
+            .find(|&k| (k - 1..=k + 1).all(|j| preparer_coupe(stack, j, id).is_some()))
+            .expect("une coupe du milieu avec ses deux voisines");
+        let translation = |x: f64, y: f64, z: f64| Matrix4::new_translation(&nalgebra::Vector3::new(x, y, z));
+        let mut poses = SlicePoses::identity(&stacks);
+        poses.set(0, k - 1, translation(2.0, 0.0, 0.0));
+        poses.set(0, k + 1, translation(0.0, 4.0, 0.0));
+        let points = preparer_coupe(stack, k, id).unwrap().points;
+        let cibles =
+            |p: &crate::diff::TemporalPrior| -> Vec<f32> { p.targets.clone().into_data().try_to_vec().unwrap() };
+        let decale = |d: [f64; 3]| -> Vec<f32> {
+            points
+                .iter()
+                .flat_map(|p| [(p.x + d[0]) as f32, (p.y + d[1]) as f32, (p.z + d[2]) as f32])
+                .collect()
+        };
+        let proche = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+        // (a)
+        let a = prior_temporel(stack, &poses, 0, k, id, &points, 0.05, &device).expect("(a)");
+        assert_eq!(a.weight, 0.05);
+        assert!(proche(&cibles(&a), &decale([1.0, 2.0, 0.0])), "(a) cibles");
+        // (b) départ translaté de (1, 0, 0) : la voisine k − 1 est alors à (1, 0, 0) du départ, la suivante à (−1, 4, 0)
+        let depart = translation(1.0, 0.0, 0.0);
+        let points_depart: Vec<_> = points
+            .iter()
+            .map(|p| p + nalgebra::Vector3::new(1.0, 0.0, 0.0))
+            .collect();
+        let b = prior_temporel(stack, &poses, 0, k, depart, &points_depart, 0.05, &device).expect("(b)");
+        let attendu_b: Vec<f32> = points_depart
+            .iter()
+            .flat_map(|p| [(p.x + 0.0) as f32, (p.y + 2.0) as f32, p.z as f32])
+            .collect();
+        assert!(proche(&cibles(&b), &attendu_b), "(b) cibles");
+        // (c) bord : coupe 0, seule voisine k=1 si elle est utilisable
+        if preparer_coupe(stack, 0, id).is_some() && preparer_coupe(stack, 1, id).is_some() {
+            let mut p2 = SlicePoses::identity(&stacks);
+            p2.set(0, 1, translation(0.0, 0.0, 3.0));
+            let pts0 = preparer_coupe(stack, 0, id).unwrap().points;
+            let c = prior_temporel(stack, &p2, 0, 0, id, &pts0, 0.05, &device).expect("(c)");
+            let attendu_c: Vec<f32> = pts0
+                .iter()
+                .flat_map(|p| [p.x as f32, p.y as f32, (p.z + 3.0) as f32])
+                .collect();
+            assert!(proche(&cibles(&c), &attendu_c), "(c) cibles");
+        }
+        // (d)
+        assert!(
+            prior_temporel(stack, &poses, 0, k, id, &points, 0.0, &device).is_none(),
+            "(d)"
+        );
     }
 
     /// Réglages du gradient conjugué dans `pipeline::reconstruct_with_poses` (critère fixé avant, blobs à 3 stacks, poses d'en-tête, sans estimation de mouvement donc rapide) : le volume égale (1e-9 relatif)

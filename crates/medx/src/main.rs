@@ -209,6 +209,9 @@ enum SvrAction {
         /// Avec `--motion s2v` : départ de la boucle (poses de l'en-tête, ou alignement par stack entier, avec ou sans correction de biais des stacks)
         #[arg(long, value_enum, default_value_t = S2vInitArg::Header)]
         s2v_init: S2vInitArg,
+        /// Avec `--motion s2v` : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (0 : aucun)
+        #[arg(long, default_value_t = ReconstructionConfig::default().s2v_temporal_weight)]
+        s2v_temporal_weight: f64,
         /// Avec `--motion s2s` : cycles coupe-volume de raffinement après le coupe-coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_refine_cycles)]
         s2v_refine_cycles: usize,
@@ -836,6 +839,7 @@ fn main() -> ExitCode {
                     s2s_temporal_info_exponent,
                     s2s_anchor_stack,
                     s2v_init,
+                    s2v_temporal_weight,
                     s2v_refine_cycles,
                     s2v_refine_resolution_mm,
                     s2s_exclude_fraction,
@@ -867,6 +871,7 @@ fn main() -> ExitCode {
                 s2s_temporal_info_exponent,
                 s2s_anchor_stack,
                 s2v_init: s2v_init.into(),
+                s2v_temporal_weight,
                 s2v_refine_cycles,
                 s2v_refine_resolution_mm,
                 s2s_exclude_fraction,

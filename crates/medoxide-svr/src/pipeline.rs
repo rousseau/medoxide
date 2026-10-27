@@ -159,6 +159,8 @@ pub struct ReconstructionConfig {
     /// Coupe-volume (`Motion::SliceToVolume`) : poses de départ et stacks de la boucle, voir [`S2vInit`]. Défaut `Header` (historique). Sur six sujets réels le départ depuis l'en-tête est
     /// moins bon que l'alignement coupe-coupe grossier seul sur les six, et sous les poses de l'en-tête elles-mêmes sur les deux sujets les plus agités (voir `docs/ROADMAP.md`, F2.1).
     pub s2v_init: S2vInit,
+    /// Coupe-volume : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (pénalité sur l'écart entre son mouvement et celui de ses voisines directes du stack, voir [`crate::diff::TemporalPrior`]) ; 0 : aucun (défaut, historique). Sans effet avec `s2v_batched` ou sans `s2v_leave_slice_out`.
+    pub s2v_temporal_weight: f64,
 }
 
 impl Default for ReconstructionConfig {
@@ -202,6 +204,7 @@ impl Default for ReconstructionConfig {
             s2v_batched: false,
             s2v_skip_unused_reconstructions: true,
             s2v_init: S2vInit::Header,
+            s2v_temporal_weight: 0.0,
         }
     }
 }
@@ -589,6 +592,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
             extra_starts: config.s2v_extra_starts,
             start_amplitude_mm: config.s2v_start_amplitude_mm,
             batched: config.s2v_batched,
+            temporal_weight: config.s2v_temporal_weight,
             ..RobustConfig::new(config.s2v_suspect_ncc)
         },
         leave_one_stack_out_cycles: if config.s2v_leave_slice_out { 0 } else { cycles },

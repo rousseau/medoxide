@@ -420,6 +420,53 @@ pub fn register_slice(
     mask: Tensor<1>,
     config: RegistrationConfig,
 ) -> RegistrationResult {
+    register_slice_with_prior(
+        volume,
+        points,
+        pivot,
+        rotation_scale_mm,
+        intensities,
+        mask,
+        config,
+        None,
+    )
+}
+
+/// A priori temporel d'un recalage de coupe : `targets` (`[P, 3]`, mm) sont les positions que donnerait à chacun des `P` points de la coupe le mouvement de ses voisines du stack, et `weight` (λ, en 1/mm²) le poids de la pénalité `λ · moyenne ‖D·p − Q‖²` ajoutée à la perte
+/// (voir [`register_slice_with_prior`]). Même a priori que celui du coupe-coupe ([`crate::s2s::IntersectionProblem::with_temporal_prior`]).
+#[derive(Debug, Clone)]
+pub struct TemporalPrior {
+    /// Positions cibles, forme `[P, 3]`, dans le même ordre que les points de la coupe.
+    pub targets: Tensor<2>,
+    /// Poids λ de la pénalité (1/mm²) ; 0 : sans effet.
+    pub weight: f64,
+}
+
+/// Pénalité `λ · moyenne ‖D·p − Q‖²` (forme `[1]`, sans unité de NCC : λ en 1/mm²) de la pose `params` pour les `points` de la coupe, `D` étant la correction de [`apply_pose`].
+fn temporal_penalty(
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    params: Tensor<1>,
+    rotation_scale_mm: f64,
+    prior: &TemporalPrior,
+) -> Tensor<1> {
+    let p = points.dims()[0];
+    let ecart = apply_pose(points, pivot, params, rotation_scale_mm) - prior.targets.clone();
+    (ecart.clone() * ecart).sum().reshape([1]) * (prior.weight / p as f64)
+}
+
+/// Comme [`register_slice`], avec en plus un **a priori temporel** optionnel : la perte devient `−NCC + λ · moyenne ‖D·p − Q‖²` (voir [`TemporalPrior`]), de sorte qu'une coupe est tirée vers le mouvement de ses voisines du stack. `ncc_history` reste la NCC seule.
+/// Sans a priori (`None`) ou avec `weight = 0`, rend exactement le résultat de [`register_slice`].
+pub fn register_slice_with_prior(
+    volume: &VolumeTensors,
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    intensities: Tensor<1>,
+    mask: Tensor<1>,
+    config: RegistrationConfig,
+    prior: Option<&TemporalPrior>,
+) -> RegistrationResult {
     let device = points.device();
     let depart: Vec<f32> = config.initial.iter().map(|&v| v as f32).collect();
     let mut module = PoseModule {
@@ -442,8 +489,14 @@ pub fn register_slice(
     for _ in 0..config.iterations {
         let ncc = evaluer(module.params.val());
         historique.push(f64::from(ncc.clone().into_data().try_to_vec::<f32>().unwrap()[0]));
-        let gradients = ncc.neg().sum().backward(); // perte = −NCC
-                                                    // `from_grads` emprunte `module` ; `step` le consomme et rend le module mis à jour : deux instructions, dans cet ordre.
+        let perte = match prior {
+            Some(a) if a.weight > 0.0 => {
+                ncc.neg() + temporal_penalty(points.clone(), pivot.clone(), module.params.val(), rotation_scale_mm, a)
+            }
+            _ => ncc.neg(),
+        };
+        let gradients = perte.sum().backward(); // perte = −NCC (+ pénalité temporelle)
+                                                // `from_grads` emprunte `module` ; `step` le consomme et rend le module mis à jour : deux instructions, dans cet ordre.
         let gradients = GradientsParams::from_grads(gradients, &module);
         module = optimiseur.step(pas, module, gradients);
         pas *= config.lr_decay;
@@ -726,6 +779,8 @@ pub struct RobustConfig {
     /// Recaler toutes les coupes d'un stack **par lots** ([`register_slices_robust_batch`]) au lieu d'une à la fois : même calcul, bien plus rapide sur GPU, sans gain sur CPU. Pris en compte par
     /// [`crate::align::register_slices_leave_window_out`] (sans gros-vers-fin) ; ignoré ailleurs.
     pub batched: bool,
+    /// Poids λ (1/mm²) de l'a priori temporel du recalage coupe-volume ([`TemporalPrior`]) : pris en compte par [`crate::align::register_slices_leave_window_out`] (coupe par coupe, donc sans `batched`) ; 0 : sans a priori. Ignoré par [`register_slice_robust`] elle-même, qui reçoit l'a priori en argument.
+    pub temporal_weight: f64,
 }
 
 /// Résultat de [`register_slice_robust`].
@@ -770,8 +825,47 @@ pub fn register_slice_robust(
     mask: Tensor<1>,
     config: RobustConfig,
 ) -> RobustResult {
+    register_slice_robust_with_prior(
+        volume,
+        points,
+        pivot,
+        rotation_scale_mm,
+        intensities,
+        mask,
+        config,
+        None,
+    )
+}
+
+/// Comme [`register_slice_robust`], avec un a priori temporel optionnel ([`TemporalPrior`]) dans chaque recalage. Le meilleur essai est celui dont la **perte finale** (`NCC − pénalité`) est la plus haute : sans a priori c'est la NCC, comme avant. `ncc` et `first_ncc` restent des NCC.
+pub fn register_slice_robust_with_prior(
+    volume: &VolumeTensors,
+    points: Tensor<2>,
+    pivot: Tensor<1>,
+    rotation_scale_mm: f64,
+    intensities: Tensor<1>,
+    mask: Tensor<1>,
+    config: RobustConfig,
+    prior: Option<&TemporalPrior>,
+) -> RobustResult {
     let finale = |r: &RegistrationResult| *r.ncc_history.last().unwrap();
-    let premier = register_slice(
+    // objectif d'un essai : NCC finale moins la pénalité de sa pose (0 sans a priori)
+    let objectif = |r: &RegistrationResult| {
+        let penalite = match prior {
+            Some(a) if a.weight > 0.0 => {
+                let params = Tensor::<1>::from_floats(r.params.map(|v| v as f32).as_slice(), &points.device());
+                f64::from(
+                    temporal_penalty(points.clone(), pivot.clone(), params, rotation_scale_mm, a)
+                        .into_data()
+                        .try_to_vec::<f32>()
+                        .unwrap()[0],
+                )
+            }
+            _ => 0.0,
+        };
+        finale(r) - penalite
+    };
+    let premier = register_slice_with_prior(
         volume,
         points.clone(),
         pivot.clone(),
@@ -779,6 +873,7 @@ pub fn register_slice_robust(
         intensities.clone(),
         mask.clone(),
         config.base,
+        prior,
     );
     let first_ncc = finale(&premier);
     let mut meilleur = RobustResult {
@@ -790,8 +885,9 @@ pub fn register_slice_robust(
     if first_ncc >= config.suspect_ncc {
         return meilleur;
     }
+    let mut meilleur_objectif = objectif(&premier);
     for depart in departs_deterministes(config.extra_starts, config.start_amplitude_mm, config.seed) {
-        let essai = register_slice(
+        let essai = register_slice_with_prior(
             volume,
             points.clone(),
             pivot.clone(),
@@ -802,9 +898,11 @@ pub fn register_slice_robust(
                 initial: depart,
                 ..config.base
             },
+            prior,
         );
         meilleur.runs += 1;
-        if finale(&essai) > meilleur.ncc {
+        if objectif(&essai) > meilleur_objectif {
+            meilleur_objectif = objectif(&essai);
             meilleur.ncc = finale(&essai);
             meilleur.params = essai.params;
         }
@@ -846,6 +944,7 @@ impl RobustConfig {
             start_amplitude_mm: 5.0,
             seed: 8675309,
             batched: false,
+            temporal_weight: 0.0,
         }
     }
 }
@@ -1946,6 +2045,98 @@ mod tests {
         );
     }
 
+    /// A priori temporel du recalage d'une coupe (volume lisse synthétique, coupe lue dans le volume : le vrai optimum est la pose nulle) : (a) sans a priori, ou avec un poids nul, le résultat est EXACTEMENT celui de `register_slice` ;
+    /// (b) des cibles décalées de 1,5 mm en x avec un poids fort tirent la translation estimée vers elles (> 1 mm, contre ≈ 0 sans a priori) ; (c) un poids minuscule ne la déplace presque pas ; (d) la version robuste sans a priori rend exactement `register_slice_robust`, avec a priori et des départs forcés elle fait toutes ses relances.
+    #[test]
+    fn the_temporal_prior_pulls_the_pose_toward_the_targets() {
+        let dims = (20, 20, 20);
+        let data = Array3::from_shape_fn(dims, |(i, j, k)| {
+            let (x, y, z) = (i as f32, j as f32, k as f32);
+            (0.5 * x).sin() + (0.4 * y).cos() + 0.5 * (0.3 * z + 0.2 * x).sin()
+        });
+        let volume = Volume::new(data, Matrix4::identity()).unwrap();
+        let device = device().autodiff();
+        let monde: Vec<Vector3<f64>> = (4..16)
+            .flat_map(|j| (4..16).map(move |i| Vector3::new(f64::from(i), f64::from(j), 10.0)))
+            .collect();
+        let intensites: Vec<f64> = monde.iter().map(|x| f64::from(volume.sample(x).unwrap())).collect();
+        let pivot = monde.iter().sum::<Vector3<f64>>() / monde.len() as f64;
+        let echelle = rotation_scale_mm(&monde, &pivot).unwrap();
+        let reference = VolumeTensors::new(&volume, &device);
+        let lancer = |prior: Option<&TemporalPrior>| {
+            register_slice_with_prior(
+                &reference,
+                tenseur_points(&monde, &device),
+                tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+                echelle,
+                tenseur_1d(&intensites, &device),
+                tenseur_1d(&vec![1.0; monde.len()], &device),
+                CONFIG_RECALAGE,
+                prior,
+            )
+        };
+        let cibles: Vec<Vector3<f64>> = monde.iter().map(|x| x + Vector3::new(1.5, 0.0, 0.0)).collect();
+        let a_priori = |poids: f64| TemporalPrior {
+            targets: tenseur_points(&cibles, &device),
+            weight: poids,
+        };
+        let seul = register_slice(
+            &reference,
+            tenseur_points(&monde, &device),
+            tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+            echelle,
+            tenseur_1d(&intensites, &device),
+            tenseur_1d(&vec![1.0; monde.len()], &device),
+            CONFIG_RECALAGE,
+        );
+        assert!(seul.params[3].abs() < 0.3, "sans a priori, tx = {}", seul.params[3]);
+        // (a)
+        assert_eq!(lancer(None).params, seul.params, "(a) None");
+        assert_eq!(lancer(Some(&a_priori(0.0))).params, seul.params, "(a) poids nul");
+        // (b)
+        let fort = lancer(Some(&a_priori(100.0)));
+        assert!(fort.params[3] > 1.0, "(b) tx = {} avec un poids fort", fort.params[3]);
+        // (c)
+        let faible = lancer(Some(&a_priori(1e-6)));
+        assert!(
+            (faible.params[3] - seul.params[3]).abs() < 0.1,
+            "(c) tx = {} contre {}",
+            faible.params[3],
+            seul.params[3]
+        );
+        // (d)
+        let robuste = RobustConfig {
+            base: CONFIG_RECALAGE,
+            suspect_ncc: 2.0, // jamais atteint : toutes les relances sont faites
+            extra_starts: 2,
+            start_amplitude_mm: 1.0,
+            seed: 7,
+            batched: false,
+            temporal_weight: 0.0,
+        };
+        let args = || {
+            (
+                tenseur_points(&monde, &device),
+                tenseur_1d(&[pivot.x, pivot.y, pivot.z], &device),
+                tenseur_1d(&intensites, &device),
+                tenseur_1d(&vec![1.0; monde.len()], &device),
+            )
+        };
+        let (p, c, i, m) = args();
+        let sans = register_slice_robust(&reference, p, c, echelle, i, m, robuste);
+        let (p, c, i, m) = args();
+        let sans_prior = register_slice_robust_with_prior(&reference, p, c, echelle, i, m, robuste, None);
+        assert_eq!(sans.params, sans_prior.params, "(d) None");
+        let (p, c, i, m) = args();
+        let avec = register_slice_robust_with_prior(&reference, p, c, echelle, i, m, robuste, Some(&a_priori(100.0)));
+        assert_eq!(avec.runs, 3, "(d) relances");
+        assert!(
+            avec.params[3] > 1.0,
+            "(d) tx = {} avec a priori et relances",
+            avec.params[3]
+        );
+    }
+
     /// Version courte du critère, dans la suite par défaut : les deux premières poses de la série d'évaluation.
     #[test]
     fn registration_smoke_test_recovers_two_poses() {
@@ -2392,6 +2583,7 @@ mod tests {
         start_amplitude_mm: 5.0,
         seed: 8675309,
         batched: false,
+        temporal_weight: 0.0,
     };
 
     /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est

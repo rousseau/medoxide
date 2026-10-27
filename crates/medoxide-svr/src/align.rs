@@ -7,8 +7,8 @@ use ndarray::{Array3, ArrayView2, Axis};
 use rayon::prelude::*;
 
 use crate::diff::{
-    pose_to_matrix, register_slice_robust, register_slices_robust_batch, rotation_scale_mm, BatchSlice, BatchSlices,
-    BatchVolumes, RobustConfig, RobustResult, VolumeTensors,
+    pose_to_matrix, register_slice_robust, register_slice_robust_with_prior, register_slices_robust_batch,
+    rotation_scale_mm, BatchSlice, BatchSlices, BatchVolumes, RobustConfig, RobustResult, TemporalPrior, VolumeTensors,
 };
 use crate::recon::{
     adjoint_sums, normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses, SUPPORT_MIN,
@@ -81,7 +81,7 @@ pub fn register_slices(
                     correction_rms_mm: 0.0,
                 }),
                 Some(preparee) => {
-                    let (delta, rapport) = recaler_preparee(&preparee, si, k, reference, config, device);
+                    let (delta, rapport) = recaler_preparee(&preparee, si, k, reference, config, None, device);
                     nouvelles.set(si, k, delta * courante);
                     rapports.push(rapport);
                 }
@@ -141,6 +141,40 @@ pub(crate) fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) ->
     })
 }
 
+/// A priori temporel de la coupe `k` du stack `si` pour un recalage qui part de la pose `depart` (celle de la coupe préparée) : la cible de chaque pixel de `points` (à la pose `depart`) est la moyenne, sur les voisines directes `k − 1` et `k + 1` du stack qui ont assez de pixels de masque, de la position que lui donnerait leur mouvement RELATIF `M_voisine · depart⁻¹`
+/// (poses `poses` du début du cycle, donc indépendantes de l'ordre des coupes). `None` si `weight <= 0` ou si la coupe n'a aucune voisine utilisable.
+pub(crate) fn prior_temporel(
+    stack: &Stack,
+    poses: &SlicePoses,
+    si: usize,
+    k: usize,
+    depart: Matrix4<f64>,
+    points: &[Vector3<f64>],
+    weight: f64,
+    device: &Device,
+) -> Option<TemporalPrior> {
+    if weight <= 0.0 {
+        return None;
+    }
+    let inverse = depart.try_inverse()?;
+    let relatives: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
+        .into_iter()
+        .filter(|&kv| kv < stack.dim().2 && preparer_coupe(stack, kv, *poses.get(si, kv)).is_some())
+        .map(|kv| poses.get(si, kv) * inverse)
+        .collect();
+    if relatives.is_empty() {
+        return None;
+    }
+    let cibles: Vec<Vector3<f64>> = points
+        .iter()
+        .map(|p| relatives.iter().map(|m| (m * p.push(1.0)).xyz()).sum::<Vector3<f64>>() / relatives.len() as f64)
+        .collect();
+    Some(TemporalPrior {
+        targets: vecteurs_vers_tenseur(&cibles, device),
+        weight,
+    })
+}
+
 /// Recale une coupe préparée contre `reference` ; rend le delta (à composer à gauche de la pose courante) et le rapport.
 fn recaler_preparee(
     p: &CoupePreparee,
@@ -148,9 +182,10 @@ fn recaler_preparee(
     k: usize,
     reference: &VolumeTensors,
     config: RobustConfig,
+    prior: Option<&TemporalPrior>,
     device: &Device,
 ) -> (Matrix4<f64>, SliceReport) {
-    let resultat = register_slice_robust(
+    let resultat = register_slice_robust_with_prior(
         reference,
         vecteurs_vers_tenseur(&p.points, device),
         tenseur_1d(&[p.pivot.x, p.pivot.y, p.pivot.z], device),
@@ -158,6 +193,7 @@ fn recaler_preparee(
         tenseur_1d(&p.intensites, device),
         tenseur_1d(&vec![1.0; p.points.len()], device),
         config,
+        prior,
     );
     delta_et_rapport(p, si, k, &resultat)
 }
@@ -253,7 +289,7 @@ pub fn register_slices_leave_window_out(
     }
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let geometrie = grid.zeros();
-    if config.batched && coarse_sigma_voxels == 0.0 {
+    if config.batched && coarse_sigma_voxels == 0.0 && config.temporal_weight <= 0.0 {
         return register_leave_window_out_by_batches(
             grid,
             stacks,
@@ -306,16 +342,44 @@ pub fn register_slices_leave_window_out(
             let (delta, rapport) = if coarse_sigma_voxels > 0.0 {
                 // gros vers fin : une passe contre la référence floutée de cette coupe, puis une passe contre la référence nette depuis la pose de la première
                 let floue = reference.blurred(coarse_sigma_voxels).expect("σ validé");
-                let (d1, rapport1) =
-                    recaler_preparee(&preparee, si, k, &VolumeTensors::new(&floue, device), config, device);
+                let prior1 = prior_temporel(
+                    stack,
+                    poses,
+                    si,
+                    k,
+                    courante,
+                    &preparee.points,
+                    config.temporal_weight,
+                    device,
+                );
+                let (d1, rapport1) = recaler_preparee(
+                    &preparee,
+                    si,
+                    k,
+                    &VolumeTensors::new(&floue, device),
+                    config,
+                    prior1.as_ref(),
+                    device,
+                );
                 match preparer_coupe(stack, k, d1 * courante) {
                     Some(deuxieme) => {
+                        let prior2 = prior_temporel(
+                            stack,
+                            poses,
+                            si,
+                            k,
+                            d1 * courante,
+                            &deuxieme.points,
+                            config.temporal_weight,
+                            device,
+                        );
                         let (d2, rapport2) = recaler_preparee(
                             &deuxieme,
                             si,
                             k,
                             &VolumeTensors::new(&reference, device),
                             config,
+                            prior2.as_ref(),
                             device,
                         );
                         (d2 * d1, rapport2)
@@ -323,12 +387,23 @@ pub fn register_slices_leave_window_out(
                     None => (d1, rapport1),
                 }
             } else {
+                let prior = prior_temporel(
+                    stack,
+                    poses,
+                    si,
+                    k,
+                    courante,
+                    &preparee.points,
+                    config.temporal_weight,
+                    device,
+                );
                 recaler_preparee(
                     &preparee,
                     si,
                     k,
                     &VolumeTensors::new(&reference, device),
                     config,
+                    prior.as_ref(),
                     device,
                 )
             };
@@ -463,8 +538,15 @@ pub(crate) fn register_slices_leave_window_out_en_serie(
                     let (delta, rapport) = if coarse_sigma_voxels > 0.0 {
                         // gros vers fin : une passe contre la référence floutée de cette coupe, puis une passe contre la référence nette depuis la pose de la première
                         let floue = reference.blurred(coarse_sigma_voxels).expect("σ validé");
-                        let (d1, rapport1) =
-                            recaler_preparee(preparee, si, k, &VolumeTensors::new(&floue, device), config, device);
+                        let (d1, rapport1) = recaler_preparee(
+                            preparee,
+                            si,
+                            k,
+                            &VolumeTensors::new(&floue, device),
+                            config,
+                            None,
+                            device,
+                        );
                         match preparer_coupe(stack, k, d1 * courante) {
                             Some(deuxieme) => {
                                 let (d2, rapport2) = recaler_preparee(
@@ -473,6 +555,7 @@ pub(crate) fn register_slices_leave_window_out_en_serie(
                                     k,
                                     &VolumeTensors::new(&reference, device),
                                     config,
+                                    None,
                                     device,
                                 );
                                 (d2 * d1, rapport2)
@@ -480,7 +563,15 @@ pub(crate) fn register_slices_leave_window_out_en_serie(
                             None => (d1, rapport1),
                         }
                     } else {
-                        recaler_preparee(preparee, si, k, &VolumeTensors::new(&reference, device), config, device)
+                        recaler_preparee(
+                            preparee,
+                            si,
+                            k,
+                            &VolumeTensors::new(&reference, device),
+                            config,
+                            None,
+                            device,
+                        )
                     };
                     nouvelles.set(si, k, delta * courante);
                     rapports.push(rapport);

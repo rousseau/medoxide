@@ -133,6 +133,7 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2v_suspect_ncc", reel(c.s2v_suspect_ncc)),
         ("s2v_leave_slice_out", Json::Bool(c.s2v_leave_slice_out)),
         ("s2v_batched", Json::Bool(c.s2v_batched)),
+        ("s2v_temporal_weight", reel(c.s2v_temporal_weight)),
         (
             "s2v_init",
             Json::texte(match c.s2v_init {
