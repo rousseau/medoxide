@@ -3,7 +3,8 @@
 Protocole figé dans docs/ROADMAP.md (§ F1-éval). Tout est rangé dans `<sortie>/<sujet>/<méthode>/` (`full*` : tous les stacks ; `folds/` ou `h<k>/` : le stack d'indice k est mis de côté) ; les fichiers déjà présents sont réutilisés (reprise).
 
 Méthodes :
-  ours      notre coupe-coupe aux défauts (α = 0,05), puis variantes α = 0,03 et 0,1 et « sans correction » aux repliements (frontière juge × netteté), volume complet, volume complet ancré sur le stack 0 (Q2 non circulaire), volume complet sans correction.
+  ours      notre coupe-coupe (s2s) aux défauts (α = 0,05, F2.4 : échelle par coupe), puis variantes α = 0,03 et 0,1 (frontière juge × netteté) et deux bases aux repliements : « en-tête » (poses de l'en-tête, aucune correction) et « grossier » (coupe-coupe grossier seul, ancien « sans correction ») ; volume complet, volume complet ancré sur le stack 0 (Q2 non circulaire), volumes complets en-tête et grossier.
+  ours_s2v  notre coupe-volume (s2v) aux défauts (départ par stack avec biais, a priori temporel 0,01, échelle par coupe) : volume complet (poses : Q2 est non circulaire, le coupe-volume n'utilise pas les intersections) et repliements α = 0,03 / 0,05 / 0,1, rangés dans `ours_s2v/`.
   nesvor    NeSVoR, défauts, sans SVoRT, CPU (scripts/run_nesvor.py) : complet et repliements.
   svrtk     SVRTK (`mirtk reconstruct`, défauts, Docker) : complet (avec --debug : poses par coupe) et repliements. Masque du premier stack conservé comme template.
   niftymic  NiftyMIC (`niftymic_reconstruct_volume`, Docker amd64), défauts SAUF `--use-masks-srr 1` : même masque cérébral pour toutes les méthodes. Volume complet seulement (coûteux ; échoue parfois).
@@ -12,7 +13,7 @@ Les stacks sont ceux de `stacks_reels()` : run 1 axial, coronal, sagittal, puis 
 
 Variables d'environnement : MEDOXIDE_TEST_BIN (binaire de test figé, pour le juge) ; `--bin` : dossier du `medx` figé.
 
-Usage : python scripts/evaluation_finale.py --racine data/svr/jeu_reel_tru_haste --sujet sub-XXXX --methode ours|nesvor|svrtk|niftymic [--sortie data/svr/eval] [--bin data/svr/eval/bin]
+Usage : python scripts/evaluation_finale.py --racine data/svr/jeu_reel_tru_haste --sujet sub-XXXX --methode ours|ours_s2v|nesvor|svrtk|niftymic [--sortie data/svr/eval] [--bin data/svr/eval/bin]
 """
 
 import argparse
@@ -27,7 +28,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--racine", required=True)
 parser.add_argument("--sujet", required=True)
-parser.add_argument("--methode", required=True, choices=["ours", "nesvor", "svrtk", "niftymic"])
+parser.add_argument("--methode", required=True, choices=["ours", "ours_s2v", "nesvor", "svrtk", "niftymic"])
 parser.add_argument("--sortie", default="data/svr/eval")
 parser.add_argument("--bin", default="data/svr/eval/bin")
 parser.add_argument("--delai-niftymic-h", type=float, default=4.0, help="durée maximale (heures) d'un volume NiftyMIC")
@@ -85,22 +86,41 @@ def etape(nom, fonction):
         print(f"{args.sujet} {args.methode} {nom} : ÉCHEC {e}", flush=True)
 
 
+# bases sans modèle de mouvement : « grossier » = coupe-coupe grossier seul (aucun balayage fin, ni biais, ni alignement par stack, ni échelle) ; « en-tête » = poses de l'en-tête (en plus, aucun balayage grossier)
+GROSSIER = ["--s2s-sweeps", "0", "--s2s-bias-rounds", "0", "--s2s-block-levels", "0", "--slice-scale-rounds", "0"]
+ENTETE = [*GROSSIER, "--s2s-coarse-sweeps", "0"]
+
+
 def ours():
     d = f"{sortie}/ours"
     os.makedirs(d, exist_ok=True)
     entrees = ["--input", *[stack(i) for i in tous], "--mask", *[masque(i) for i in tous]]
-    sans_corr = ["--s2s-sweeps", "0", "--s2s-bias-rounds", "0", "--s2s-block-levels", "0"]
-    for nom, options in (("full_s2s", []), ("full_s2s_ancre0", ["--s2s-anchor-stack", "0"]), ("full_sanscorr", sans_corr)):
+    for nom, options in (("full_s2s", []), ("full_s2s_ancre0", ["--s2s-anchor-stack", "0"]), ("full_entete", ENTETE), ("full_grossier", GROSSIER)):
         if not os.path.exists(f"{d}/{nom}.nii.gz"):
             etape(nom, lambda: lancer([medx, "svr", "recon", "--motion", "s2s", "--device", "cpu", *entrees, "--output", f"{d}/{nom}.nii.gz", "--poses", f"{d}/poses_{nom}.tsv", *options], f"{d}/log_{nom}.txt"))
     # repliements : la variante par défaut (d005) et celles de la frontière juge × netteté ; juge et netteté par le script de variantes
     e = {**env, "MEDOXIDE_TEST_BIN": binaire_test}
     commande = [sys.executable, "-I", f"{scripts}/benchmark_variantes_s2s.py", "--racine", racine, "--sujet", args.sujet, "--sortie", f"{d}/folds", "--medx", medx, "--variantes",
-                "d005=", "d003=--alpha 0.03", "d01=--alpha 0.1", "sc=--alpha 0.05 --s2s-sweeps 0 --s2s-bias-rounds 0 --s2s-block-levels 0"]
+                "d005=", "d003=--alpha 0.03", "d01=--alpha 0.1", f"en=--alpha 0.05 {' '.join(ENTETE)}", f"gr=--alpha 0.05 {' '.join(GROSSIER)}"]
     os.makedirs(f"{d}/folds", exist_ok=True)
     with open(f"{d}/log_folds.txt", "w") as j:
         r = subprocess.run(commande, stdout=j, stderr=subprocess.STDOUT, env=e)
     print(f"{args.sujet} ours repliements : code {r.returncode}", flush=True)
+
+
+def ours_s2v():
+    d = f"{sortie}/ours_s2v"
+    os.makedirs(d, exist_ok=True)
+    entrees = ["--input", *[stack(i) for i in tous], "--mask", *[masque(i) for i in tous]]
+    if not os.path.exists(f"{d}/full_s2v.nii.gz"):
+        etape("full_s2v", lambda: lancer([medx, "svr", "recon", "--motion", "s2v", "--device", "cpu", *entrees, "--output", f"{d}/full_s2v.nii.gz", "--poses", f"{d}/poses_full_s2v.tsv"], f"{d}/log_full_s2v.txt"))
+    e = {**env, "MEDOXIDE_TEST_BIN": binaire_test}
+    commande = [sys.executable, "-I", f"{scripts}/benchmark_variantes_s2s.py", "--racine", racine, "--sujet", args.sujet, "--sortie", f"{d}/folds", "--medx", medx, "--variantes",
+                "v005=--motion s2v", "v003=--motion s2v --alpha 0.03", "v01=--motion s2v --alpha 0.1"]
+    os.makedirs(f"{d}/folds", exist_ok=True)
+    with open(f"{d}/log_folds.txt", "w") as j:
+        r = subprocess.run(commande, stdout=j, stderr=subprocess.STDOUT, env=e)
+    print(f"{args.sujet} ours_s2v repliements : code {r.returncode}", flush=True)
 
 
 def nesvor():
@@ -141,5 +161,5 @@ def niftymic():
     etape("full", lambda: lancer(commande, f"{d}/niftymic.log", delai=args.delai_niftymic_h * 3600))
 
 
-{"ours": ours, "nesvor": nesvor, "svrtk": svrtk, "niftymic": niftymic}[args.methode]()
+{"ours": ours, "ours_s2v": ours_s2v, "nesvor": nesvor, "svrtk": svrtk, "niftymic": niftymic}[args.methode]()
 print(f"{args.sujet} {args.methode} : terminé", flush=True)

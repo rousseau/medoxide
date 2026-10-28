@@ -5,7 +5,7 @@ Deux protocoles, toujours rapportés ensemble :
   INDÉPENDANT  chaque volume complet de chaque méthode est orienté seul sur l'atlas (recherche dense, masque BET de BOUNTI sur son propre volume) ; les trois meilleurs candidats sont segmentés.
 Contrôle anatomique (la symétrie gauche-droite ne prouve pas l'orientation) : cervelet ≥ 2 mL, centre du cervelet en arrière et en bas du centre du cerveau (y < 0 et z < 0 dans le RAS de l'atlas), tronc cérébral en bas (z < 0).
 
-Sorties : <sortie>/<sujet>/atlas/ (partagé : s2s.nii.gz = référence, ref_vers_atlas.tfm, <étiquette>.nii.gz, seg_<étiquette>.nii.gz, alignement.tsv avec la corrélation de chaque recalage) et atlas_indep/<méthode>/ (cand_k.nii.gz, seg_cand_k.nii.gz, dense.log). Reprise : les fichiers présents ne sont pas recalculés.
+Sorties : <sortie>/<sujet>/atlas/ (partagé : s2s.nii.gz = référence (notre coupe-coupe, volume complet), s2v, entete, grossier, svrtk, nesvor, niftymic et s2s_h<k>, s2v_h<k>, svrtk_h<k>, nesvor_h<k> = repliements, ref_vers_atlas.tfm, <étiquette>.nii.gz, seg_<étiquette>.nii.gz, alignement.tsv avec la corrélation de chaque recalage) et atlas_indep/<méthode>/ (cand_k.nii.gz, seg_cand_k.nii.gz, dense.log). Reprise : les fichiers présents ne sont pas recalculés.
 
 Usage : python scripts/evaluation_alignement.py --sujet sub-XXXX [--sortie data/svr/eval] [--bin data/svr/eval/bin] [--etapes ref,partage,indep]
 """
@@ -67,7 +67,7 @@ def dense(volume, dossier):
 
 
 # volumes à placer : étiquette -> chemin (complets puis repliements)
-complets = {"sanscorr": f"{E}/ours/full_sanscorr.nii.gz", "svrtk": f"{E}/svrtk/full/svrtk.nii.gz", "nesvor": f"{E}/nesvor/full/nesvor.nii.gz", "niftymic": f"{E}/niftymic/srr.nii.gz",
+complets = {"entete": f"{E}/ours/full_entete.nii.gz", "grossier": f"{E}/ours/full_grossier.nii.gz", "s2v": f"{E}/ours_s2v/full_s2v.nii.gz", "svrtk": f"{E}/svrtk/full/svrtk.nii.gz", "nesvor": f"{E}/nesvor/full/nesvor.nii.gz", "niftymic": f"{E}/niftymic/srr.nii.gz",
             "ancre0": f"{E}/ours/full_s2s_ancre0.nii.gz"}
 replis = {}
 for f in sorted(glob.glob(f"{E}/ours/folds/d005_h*.nii.gz")):
@@ -75,6 +75,7 @@ for f in sorted(glob.glob(f"{E}/ours/folds/d005_h*.nii.gz")):
         continue
     h = int(re.search(r"_h(\d+)\.nii\.gz$", f).group(1))
     replis[f"s2s_h{h}"] = f
+    replis[f"s2v_h{h}"] = f"{E}/ours_s2v/folds/v005_h{h}.nii.gz"
     replis[f"svrtk_h{h}"] = f"{E}/svrtk/h{h}/svrtk.nii.gz"
     replis[f"nesvor_h{h}"] = f"{E}/nesvor/h{h}/nesvor.nii.gz"
 
@@ -117,7 +118,7 @@ if "partage" in etapes:
     open(f"{A}/alignement.tsv", "w").write("\n".join(lignes) + "\n")
 
 if "indep" in etapes:
-    for nom, chemin in {"sanscorr": complets["sanscorr"], "svrtk": complets["svrtk"], "nesvor": complets["nesvor"], "niftymic": complets["niftymic"]}.items():
+    for nom, chemin in {"entete": complets["entete"], "s2v": complets["s2v"], "svrtk": complets["svrtk"], "nesvor": complets["nesvor"], "niftymic": complets["niftymic"]}.items():
         if not os.path.exists(chemin):
             continue
         d = f"{E}/atlas_indep/{nom}"

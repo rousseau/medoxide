@@ -1,9 +1,9 @@
-"""Évaluation finale, analyse : calcule les cinq familles de critères (Q1 à Q5) de docs/ROADMAP.md (§ F1 et F1-éval) pour notre coupe-coupe contre SVRTK, NeSVoR et NiftyMIC, puis applique la règle de décision.
+"""Évaluation finale, analyse : calcule les cinq familles de critères (Q1 à Q5) de docs/ROADMAP.md (§ F1 et F1-éval) pour chacune de nos deux méthodes (coupe-coupe « s2s », coupe-volume « s2v ») contre SVRTK, NeSVoR et NiftyMIC, puis applique la règle de décision (une décision par méthode et par concurrent ; aucune des deux n'est désignée « principale » avant les résultats).
 
 Entrées : les sorties de evaluation_finale.py et evaluation_alignement.py dans <sortie>/<sujet>/. Les sujets agités sont ceux dont la concordance d'en-tête est < 0,45 (--calmes : liste des sujets calmes ; les autres sont agités).
 
   Q1  juge hors échantillon (3 repliements ou plus, moyenne par sujet) À NETTETÉ ÉGALE : frontière juge = f(netteté) de notre méthode (α = 0,03 / 0,05 / 0,1), interpolée à la netteté de chaque concurrent. Tolérance −0,005.
-  Q2  concordance aux intersections sur les paires SANS le stack 0, que notre coupe-coupe ancré sur le stack 0 n'a pas utilisées (mêmes coupes pour tous ; NiftyMIC sur les coupes qu'il garde). Tolérance −0,01.
+  Q2  concordance aux intersections sur les paires SANS le stack 0, que notre coupe-coupe ancré sur le stack 0 n'a pas utilisées (mêmes coupes pour tous ; NiftyMIC sur les coupes qu'il garde). Pour s2v, les poses du volume complet servent telles quelles : le coupe-volume n'utilise pas les intersections, aucune paire n'est circulaire. Tolérance −0,01.
   Q3  reproductibilité de la segmentation : Dice moyen entre repliements (étiquettes cortex, matière blanche, ventricules, cervelet, noyaux gris, thalamus). Tolérance −0,01. Les recalages de corrélation < 0,9 sont comptés.
   Q4  trous : fraction de voxels nuls dans le cerveau segmenté (volumes complets, repère de l'atlas). Tolérance +0,1 point.
   Q5  complétude anatomique sous les DEUX protocoles d'alignement (partagé et indépendant, candidat 0) : réussi/échec par sujet.
@@ -38,6 +38,9 @@ parser.add_argument("--racine", default="data/svr/jeu_reel_tru_haste")
 args = parser.parse_args()
 scripts = os.path.dirname(os.path.abspath(__file__))
 CONCURRENTS = ["SVRTK", "NeSVoR", "NiftyMIC"]
+NOS = ["s2s", "s2v"]
+DOSSIER_NOTRE = {"s2s": "ours", "s2v": "ours_s2v"}
+VARIANTES_ALPHA = {"s2s": ("d003", "d005", "d01"), "s2v": ("v003", "v005", "v01")}
 LABELS = [3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17]
 E = lambda s: os.path.abspath(f"{args.sortie}/{s}")
 
@@ -73,11 +76,11 @@ def juge_moyen(volume):
 
 
 # ------------------------------------------------------------------ Q1
-def q1(s):
-    """{concurrent: Δ} (Δ = juge de notre méthode à la netteté du concurrent − juge du concurrent) ; None si non défini."""
-    lignes = list(csv.DictReader(open(f"{E(s)}/ours/folds/resultats.tsv"), delimiter="\t"))
+def q1(s, m):
+    """{concurrent: Δ} (Δ = juge de notre méthode `m` à la netteté du concurrent − juge du concurrent) ; None si non défini."""
+    lignes = list(csv.DictReader(open(f"{E(s)}/{DOSSIER_NOTRE[m]}/folds/resultats.tsv"), delimiter="\t"))
     pts = []
-    for v in ("d003", "d005", "d01"):
+    for v in VARIANTES_ALPHA[m]:
         l = [r for r in lignes if r["variante"] == v]
         if l:
             pts.append((np.mean([float(r["nettete"]) for r in l]), np.mean([float(r["ncc_moyenne"]) for r in l])))
@@ -113,7 +116,7 @@ def poses_concurrents(s):
         n = len(st)
         subprocess.run([sys.executable, "-I", f"{scripts}/read_niftymic_poses.py", "--dossier", f"{E(s)}/niftymic", "--stacks", *[f"{E(s)}/niftymic/entree/stack{i}.nii.gz" for i in range(n)],
                         "--masques", *[f"{E(s)}/niftymic/entree/stack{i}_mask.nii.gz" for i in range(n)], "--sortie", f"{d}/niftymic.tsv"], capture_output=True, text=True)
-    return {"SVRTK": f"{d}/svrtk.tsv", "NeSVoR": f"{E(s)}/nesvor/full/poses_nesvor.tsv", "NiftyMIC": f"{d}/niftymic.tsv", "ancré": f"{E(s)}/ours/poses_full_s2s_ancre0.tsv", "s2s": f"{E(s)}/ours/poses_full_s2s.tsv"}
+    return {"SVRTK": f"{d}/svrtk.tsv", "NeSVoR": f"{E(s)}/nesvor/full/poses_nesvor.tsv", "NiftyMIC": f"{d}/niftymic.tsv", "ancré": f"{E(s)}/ours/poses_full_s2s_ancre0.tsv", "s2s": f"{E(s)}/ours/poses_full_s2s.tsv", "s2v": f"{E(s)}/ours_s2v/poses_full_s2v.tsv"}
 
 
 def q2(s):
@@ -154,7 +157,7 @@ def q3(s):
             except ValueError:
                 pass
     out = {}
-    for nom, pref in (("ours", "s2s"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor")):
+    for nom, pref in (("s2s", "s2s"), ("s2v", "s2v"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor")):
         fs = sorted(glob.glob(f"{A}/seg_{pref}_h*.nii.gz"), key=lambda f: int(re.search(r"_h(\d+)\.nii\.gz", f).group(1)))
         segs = [np.asarray(nib.load(f).dataobj).astype(np.int16) for f in fs if not f.endswith(".log")]
         if len(segs) < 2:
@@ -171,7 +174,7 @@ def q4(s):
     """{méthode: fraction de trous (%)} dans le cerveau segmenté, volumes complets dans le repère de l'atlas (même alignement que la référence)."""
     A = f"{E(s)}/atlas"
     out = {}
-    for nom, etiquette in (("ours", "s2s"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor"), ("NiftyMIC", "niftymic")):
+    for nom, etiquette in (("s2s", "s2s"), ("s2v", "s2v"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor"), ("NiftyMIC", "niftymic")):
         fi, fs = f"{A}/{etiquette}.nii.gz", f"{A}/seg_{etiquette}.nii.gz"
         if not (os.path.exists(fi) and os.path.exists(fs)):
             out[nom] = None
@@ -184,7 +187,7 @@ def q4(s):
 
 # ------------------------------------------------------------------ Q5
 def q5(s):
-    """{méthode: (réussi sous le protocole partagé, réussi sous l'indépendant)} ; notre méthode : la référence (les deux protocoles coïncident)."""
+    """{méthode: (réussi sous le protocole partagé, réussi sous l'indépendant)} ; s2s : la référence (les deux protocoles coïncident) ; s2v comme les concurrents."""
     A = f"{E(s)}/atlas"
     partage = {}
     if os.path.exists(f"{A}/alignement.tsv"):
@@ -192,9 +195,10 @@ def q5(s):
             partage[r["etiquette"]] = r["controle"] == "OK"
     out = {}
     ref_ok = os.path.exists(f"{A}/seg_s2s.nii.gz") and open(f"{A}/reference.txt").read() != ""
-    out["ours"] = (ref_ok, ref_ok)
-    for nom, etiquette in (("SVRTK", "svrtk"), ("NeSVoR", "nesvor"), ("NiftyMIC", "niftymic")):
-        existe = os.path.exists(f"{E(s)}/{'niftymic/srr' if etiquette == 'niftymic' else etiquette + '/full/' + etiquette}.nii.gz")
+    out["s2s"] = (ref_ok, ref_ok)
+    for nom, etiquette in (("s2v", "s2v"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor"), ("NiftyMIC", "niftymic")):
+        chemin = {"niftymic": "niftymic/srr", "s2v": "ours_s2v/full_s2v"}.get(etiquette, f"{etiquette}/full/{etiquette}")
+        existe = os.path.exists(f"{E(s)}/{chemin}.nii.gz")
         if not existe:
             out[nom] = (False, False)  # échec de la méthode : perdu pour ce sujet
             continue
@@ -212,7 +216,7 @@ def main():
     classe = {s: ("calme" if s in args.calmes else "agité") for s in args.sujets}
     res = {s: {} for s in args.sujets}
     for s in args.sujets:
-        res[s]["q1"] = q1(s) if os.path.exists(f"{E(s)}/ours/folds/resultats.tsv") else {}
+        res[s]["q1"] = {m: q1(s, m) if os.path.exists(f"{E(s)}/{DOSSIER_NOTRE[m]}/folds/resultats.tsv") else {} for m in NOS}
         res[s]["q2"] = q2(s) if os.path.exists(f"{E(s)}/ours/poses_full_s2s_ancre0.tsv") else ({}, {})
         res[s]["q3"] = q3(s)
         res[s]["q4"] = q4(s)
@@ -220,7 +224,8 @@ def main():
     # affichage par famille
     print("Q1 : Δ juge à netteté égale (notre méthode − concurrent)")
     for s in args.sujets:
-        print(f"  {s} ({classe[s]}) :", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res[s]["q1"].items()})
+        for m in NOS:
+            print(f"  {s} ({classe[s]}) {m} :", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in res[s]["q1"][m].items()})
     print("Q2 : concordance sans stack 0 :")
     for s in args.sujets:
         print(f"  {s} ({classe[s]}) :", {k: (round(v, 3) if v is not None else None) for k, v in res[s]["q2"][0].items()}, "coupes", res[s]["q2"][1])
@@ -235,37 +240,45 @@ def main():
         print(f"  {s} ({classe[s]}) :", res[s]["q5"])
     # décision
     print("\nDÉCISION")
-    for c in CONCURRENTS:
-        familles = {}
-        # Q1
-        d = [res[s]["q1"].get(c) for s in args.sujets]
-        d = [x for x in d if isinstance(x, float)]
-        familles["Q1"] = ("n/a", "") if not d else (bilan(d, -0.005), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
-        # Q2
-        d = []
-        for s in args.sujets:
-            q, _ = res[s]["q2"]
-            if q.get("ancré") is not None and q.get(c) is not None:
-                d.append(q["ancré"] - q[c])
-        familles["Q2"] = ("n/a", "") if not d else (bilan(d, -0.01), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
-        # Q3
-        d = [res[s]["q3"]["ours"][0] - res[s]["q3"][c][0] for s in args.sujets if res[s]["q3"].get("ours") and res[s]["q3"].get(c)] if c != "NiftyMIC" else []
-        familles["Q3"] = ("n/a", "") if not d else (bilan(d, -0.01), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
-        # Q4 : trous, Δ = concurrent − notre méthode (positif : nous avons moins de trous), tolérance −0,1 point
-        d = [res[s]["q4"][c] - res[s]["q4"]["ours"] for s in args.sujets if res[s]["q4"].get(c) is not None and res[s]["q4"].get("ours") is not None]
-        familles["Q4"] = ("n/a", "") if not d else (bilan(d, -0.1), f"{len(d)} sujets, moyenne {np.mean(d):+.3f} point")
-        # Q5 : 1 si réussi sous les deux protocoles
-        d = [float(all(res[s]["q5"]["ours"])) - float(all(res[s]["q5"][c])) for s in args.sujets]
-        familles["Q5"] = (bilan(d, 0.0), f"réussis sous les deux protocoles : nous {sum(all(res[s]['q5']['ours']) for s in args.sujets)}/{len(args.sujets)}, {c} {sum(all(res[s]['q5'][c]) for s in args.sujets)}/{len(args.sujets)}")
-        gagnees = [q for q, (v, _) in familles.items() if v == "GAGNÉE"]
-        perdues = [q for q, (v, _) in familles.items() if v == "NETTEMENT PERDUE"]
-        evaluables = [q for q, (v, _) in familles.items() if v != "n/a"]
-        strict = len(gagnees) >= 3 and "Q5" in gagnees and not perdues
-        limite = len(gagnees) >= 2 and "Q5" in gagnees and not perdues
-        print(f"\n contre {c} :")
-        for q, (v, detail) in familles.items():
-            print(f"   {q} : {v} {detail}")
-        print(f"   → gagnées {gagnees}, nettement perdues {perdues} ; évaluables {evaluables} ; règle stricte : {'ATTEINTE' if strict else 'non atteinte'} ; règle limitée aux familles évaluables : {'ATTEINTE' if limite else 'non atteinte'}")
+    for m in NOS:
+        for c in CONCURRENTS:
+            decision(res, m, c)
+
+
+def decision(res, m, c):
+    """Famille par famille, la règle de décision de la méthode `m` (s2s ou s2v) contre le concurrent `c`."""
+    # pour s2s, la concordance « non circulaire » est celle de la variante ancrée sur le stack 0 ; s2v n'utilise pas les intersections, ses poses complètes le sont
+    cle_q2 = {"s2s": "ancré", "s2v": "s2v"}[m]
+    familles = {}
+    # Q1
+    d = [res[s]["q1"][m].get(c) for s in args.sujets]
+    d = [x for x in d if isinstance(x, float)]
+    familles["Q1"] = ("n/a", "") if not d else (bilan(d, -0.005), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
+    # Q2
+    d = []
+    for s in args.sujets:
+        q, _ = res[s]["q2"]
+        if q.get(cle_q2) is not None and q.get(c) is not None:
+            d.append(q[cle_q2] - q[c])
+    familles["Q2"] = ("n/a", "") if not d else (bilan(d, -0.01), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
+    # Q3
+    d = [res[s]["q3"][m][0] - res[s]["q3"][c][0] for s in args.sujets if res[s]["q3"].get(m) and res[s]["q3"].get(c)] if c != "NiftyMIC" else []
+    familles["Q3"] = ("n/a", "") if not d else (bilan(d, -0.01), f"{len(d)} sujets, moyenne {np.mean(d):+.3f}")
+    # Q4 : trous, Δ = concurrent − notre méthode (positif : nous avons moins de trous), tolérance −0,1 point
+    d = [res[s]["q4"][c] - res[s]["q4"][m] for s in args.sujets if res[s]["q4"].get(c) is not None and res[s]["q4"].get(m) is not None]
+    familles["Q4"] = ("n/a", "") if not d else (bilan(d, -0.1), f"{len(d)} sujets, moyenne {np.mean(d):+.3f} point")
+    # Q5 : 1 si réussi sous les deux protocoles
+    d = [float(all(res[s]["q5"][m])) - float(all(res[s]["q5"][c])) for s in args.sujets]
+    familles["Q5"] = (bilan(d, 0.0), f"réussis sous les deux protocoles : {m} {sum(all(res[s]['q5'][m]) for s in args.sujets)}/{len(args.sujets)}, {c} {sum(all(res[s]['q5'][c]) for s in args.sujets)}/{len(args.sujets)}")
+    gagnees = [q for q, (v, _) in familles.items() if v == "GAGNÉE"]
+    perdues = [q for q, (v, _) in familles.items() if v == "NETTEMENT PERDUE"]
+    evaluables = [q for q, (v, _) in familles.items() if v != "n/a"]
+    strict = len(gagnees) >= 3 and "Q5" in gagnees and not perdues
+    limite = len(gagnees) >= 2 and "Q5" in gagnees and not perdues
+    print(f"\n {m} contre {c} :")
+    for q, (v, detail) in familles.items():
+        print(f"   {q} : {v} {detail}")
+    print(f"   → gagnées {gagnees}, nettement perdues {perdues} ; évaluables {evaluables} ; règle stricte : {'ATTEINTE' if strict else 'non atteinte'} ; règle limitée aux familles évaluables : {'ATTEINTE' if limite else 'non atteinte'}")
 
 
 def bilan(d, tolerance):
