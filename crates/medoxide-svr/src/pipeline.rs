@@ -156,16 +156,16 @@ pub struct ReconstructionConfig {
     pub s2v_batched: bool,
     /// Coupe-volume : ne pas reconstruire aux cycles intermédiaires (avec `s2v_leave_slice_out`, ces volumes ne servent pas au recalage) ; seule la reconstruction finale est faite. Sans effet sur les poses.
     pub s2v_skip_unused_reconstructions: bool,
-    /// Coupe-volume (`Motion::SliceToVolume`) : poses de départ et stacks de la boucle, voir [`S2vInit`]. Défaut `Header` (historique). Sur six sujets réels le départ depuis l'en-tête est
+    /// Coupe-volume (`Motion::SliceToVolume`) : poses de départ et stacks de la boucle, voir [`S2vInit`]. Défaut `StacksBias` (F2.2 ; `Header` était le défaut historique). Sur six sujets réels le départ depuis l'en-tête est
     /// moins bon que l'alignement coupe-coupe grossier seul sur les six, et sous les poses de l'en-tête elles-mêmes sur les deux sujets les plus agités (voir `docs/ROADMAP.md`, F2.1).
     pub s2v_init: S2vInit,
-    /// Coupe-volume : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (pénalité sur l'écart entre son mouvement et celui de ses voisines directes du stack, voir [`crate::diff::TemporalPrior`]) ; 0 : aucun (défaut, historique). Sans effet avec `s2v_batched` ou sans `s2v_leave_slice_out`.
+    /// Coupe-volume : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (pénalité sur l'écart entre son mouvement et celui de ses voisines directes du stack, voir [`crate::diff::TemporalPrior`]) ; 0 : aucun (historique). Défaut 0,01 (F2.3 : résiduel de mouvement par coupe ramené à celui du coupe-coupe sur les agités). Sans effet avec `s2v_batched` ou sans `s2v_leave_slice_out`.
     pub s2v_temporal_weight: f64,
     /// Rejet robuste après la reconstruction finale (voir [`trim_outliers`]) : nombre de tours « écarter les pixels et les coupes incohérents avec le volume, reconstruire de nouveau » ; 0 : aucun (défaut, option).
     pub robust_rounds: usize,
     /// Rejet robuste : un pixel est écarté si son résidu dépasse ce nombre d'écarts types robustes (1,4826 × médiane des écarts absolus du stack).
     pub robust_threshold: f64,
-    /// Échelle d'intensité par coupe après la reconstruction finale (voir [`scale_refinement`]) : nombre de tours « estimer le facteur de chaque coupe contre le volume, diviser, reconstruire de nouveau » ; 0 : aucun (défaut, option).
+    /// Échelle d'intensité par coupe après la reconstruction finale (voir [`scale_refinement`]) : nombre de tours « estimer le facteur de chaque coupe contre le volume, diviser, reconstruire de nouveau » ; 0 : aucun. Défaut 1 (F2.4.2 : aucun des six sujets de développement n'y perd, gain de 0,008 à 0,010 de juge sur deux agités, en coupe-coupe comme en coupe-volume).
     pub slice_scale_rounds: usize,
 }
 
@@ -209,11 +209,11 @@ impl Default for ReconstructionConfig {
             s2v_leave_slice_out: true,
             s2v_batched: false,
             s2v_skip_unused_reconstructions: true,
-            s2v_init: S2vInit::Header,
-            s2v_temporal_weight: 0.0,
+            s2v_init: S2vInit::StacksBias,
+            s2v_temporal_weight: 0.01,
             robust_rounds: 0,
             robust_threshold: 3.0,
-            slice_scale_rounds: 0,
+            slice_scale_rounds: 1,
         }
     }
 }

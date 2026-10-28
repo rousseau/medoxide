@@ -4485,6 +4485,7 @@ mod tests {
             s2s_bias_rounds: 0,
             s2s_temporal_weight: 0.0,
             robust_threshold: 1.0,
+            slice_scale_rounds: 0,
             ..Default::default()
         };
         let ecart = |a: &Array3<f64>, b: &Array3<f64>| {
@@ -4562,6 +4563,7 @@ mod tests {
             s2s_coarse_sigma_pixels: 0.0,
             s2s_bias_rounds: 0,
             s2s_temporal_weight: 0.0,
+            slice_scale_rounds: 0,
             ..Default::default()
         };
         let ecart = |a: &Array3<f64>, b: &Array3<f64>| {
@@ -4689,6 +4691,18 @@ mod tests {
             apres[1],
             apres[0]
         );
+    }
+
+    /// Défauts décidés sur les six sujets de développement (F2.2, F2.3, F2.4.2 ; voir `docs/ROADMAP.md`) : départ coupe-volume depuis l'alignement par stack avec biais, a priori temporel 0,01, un tour d'échelle par coupe ; les briques négatives (rejet robuste, exclusion par concordance) restent désactivées.
+    #[test]
+    fn the_defaults_follow_the_development_set_decisions() {
+        use crate::pipeline::{ReconstructionConfig, S2vInit};
+        let c = ReconstructionConfig::default();
+        assert_eq!(c.s2v_init, S2vInit::StacksBias);
+        assert_eq!(c.s2v_temporal_weight, 0.01);
+        assert_eq!(c.slice_scale_rounds, 1);
+        assert_eq!(c.robust_rounds, 0);
+        assert_eq!(c.s2s_exclude_fraction, 0.0);
     }
 
     /// Cibles de l'a priori temporel du coupe-volume (`align::prior_temporel`, blobs à 3 stacks) : (a) une coupe du milieu dont la voisine précédente est translatée de (2, 0, 0) et la suivante de (0, 4, 0) a pour cible de chaque pixel sa position décalée de la MOYENNE (1, 2, 0), la pose de départ de la coupe étant l'identité ;
@@ -5188,6 +5202,9 @@ mod tests {
             s2v_extra_starts: 0,
             s2v_start_amplitude_mm: 3.0,
             s2v_suspect_ncc: 0.8,
+            slice_scale_rounds: 0,
+            s2v_init: crate::pipeline::S2vInit::Header,
+            s2v_temporal_weight: 0.0,
             ..Default::default()
         };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
@@ -7920,6 +7937,9 @@ mod tests {
             s2s_coarse_sweeps: 2,
             s2s_sweeps: 2,
             s2s_temporal_weight: 0.0,
+            slice_scale_rounds: 0,
+            s2v_init: crate::pipeline::S2vInit::Header,
+            s2v_temporal_weight: 0.0,
             ..Default::default()
         };
         let en_tete = SlicePoses::identity(&stacks);
@@ -8351,6 +8371,7 @@ mod tests {
             s2s_coarse_sigma_pixels: 0.0,
             s2s_bias_rounds: 0,
             s2s_temporal_weight: 0.0,
+            slice_scale_rounds: 0,
             ..Default::default()
         };
         let sans = reconstruct(&stacks, &base, &device).unwrap();
@@ -9398,6 +9419,7 @@ mod tests {
             s2s_bias_rounds: 2,
             s2s_bias_min_reduction: 0.0,
             s2s_temporal_weight: 0.0,
+            slice_scale_rounds: 0,
             ..Default::default()
         };
         let sortie = reconstruct(&stacks, &config, &device).unwrap();
