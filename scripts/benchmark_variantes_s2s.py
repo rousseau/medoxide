@@ -30,6 +30,7 @@ parser.add_argument("--sujet", required=True)
 parser.add_argument("--sortie", required=True)
 parser.add_argument("--variantes", nargs="+", required=True)
 parser.add_argument("--medx", default="target/release/medx")
+parser.add_argument("--replis", nargs="+", type=int, default=None, help="indices des stacks mis de côté à traiter (défaut : tous)")
 args = parser.parse_args()
 
 racine = os.path.abspath(args.racine)
@@ -86,7 +87,7 @@ def reconstruire(nom, options, h, gardes):
 
 
 lignes = ["variante\tstack_teste\tncc_moyenne\tnettete\ttemps_cpu_s"]
-for h in range(N):
+for h in (range(N) if args.replis is None else args.replis):
     gardes = [i for i in range(N) if i != h]
     ordre = VARIANTES if h % 2 == 0 else VARIANTES[::-1]  # comparaison alternée
     print(f"=== stack {h} mis de côté ; reconstruction avec {gardes}", flush=True)
