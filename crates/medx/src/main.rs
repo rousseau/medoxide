@@ -57,12 +57,22 @@ impl From<UpdateArg> for medoxide_svr::s2s::S2sUpdate {
 /// Départ de la boucle coupe-volume, tel qu'écrit sur la ligne de commande (`--s2v-init`).
 #[derive(Clone, Copy, ValueEnum)]
 enum S2vInitArg {
-    /// Poses de l'en-tête (défaut)
+    /// Poses de l'en-tête
     Header,
     /// Alignement par stack entier, sans recalage par coupe
     Stacks,
     /// Alignement par stack entier sur des stacks corrigés du champ de biais
     StacksBias,
+}
+
+impl From<medoxide_svr::pipeline::S2vInit> for S2vInitArg {
+    fn from(i: medoxide_svr::pipeline::S2vInit) -> Self {
+        match i {
+            medoxide_svr::pipeline::S2vInit::Header => Self::Header,
+            medoxide_svr::pipeline::S2vInit::Stacks => Self::Stacks,
+            medoxide_svr::pipeline::S2vInit::StacksBias => Self::StacksBias,
+        }
+    }
 }
 
 impl From<S2vInitArg> for medoxide_svr::pipeline::S2vInit {
@@ -207,7 +217,7 @@ enum SvrAction {
         #[arg(long)]
         s2s_anchor_stack: Option<usize>,
         /// Avec `--motion s2v` : départ de la boucle (poses de l'en-tête, ou alignement par stack entier, avec ou sans correction de biais des stacks)
-        #[arg(long, value_enum, default_value_t = S2vInitArg::Header)]
+        #[arg(long, value_enum, default_value_t = ReconstructionConfig::default().s2v_init.into())]
         s2v_init: S2vInitArg,
         /// Avec `--motion s2v` : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_temporal_weight)]
@@ -1134,6 +1144,37 @@ mod tests {
             !essai(&["fetalbet", "--input", "a", "--output", "b", "--output-dir", "o"]),
             "--output-dir sans --bids"
         );
+    }
+
+    /// Chaque réglage de `medx svr recon` que la bibliothèque décide (`ReconstructionConfig::default`) a le même défaut sur la ligne de commande : l'évaluation finale a tourné avec un `--s2v-init header` resté codé en dur, contre le défaut `stacks-bias` décidé sur le jeu de développement.
+    #[test]
+    fn the_svr_recon_defaults_follow_the_library_defaults() {
+        use medoxide_svr::pipeline::{ReconstructionConfig, S2vInit};
+
+        let correspondances = Cli::command()
+            .try_get_matches_from([
+                "medx", "svr", "recon", "--input", "a", "b", "--mask", "m", "n", "--output", "v",
+            ])
+            .unwrap();
+        let recon = correspondances
+            .subcommand_matches("svr")
+            .unwrap()
+            .subcommand_matches("recon")
+            .unwrap();
+        let config = ReconstructionConfig::default();
+        assert_eq!(
+            S2vInit::from(*recon.get_one::<super::S2vInitArg>("s2v_init").unwrap()),
+            config.s2v_init
+        );
+        assert_eq!(
+            *recon.get_one::<f64>("s2v_temporal_weight").unwrap(),
+            config.s2v_temporal_weight
+        );
+        assert_eq!(
+            *recon.get_one::<usize>("slice_scale_rounds").unwrap(),
+            config.slice_scale_rounds
+        );
+        assert_eq!(*recon.get_one::<f64>("alpha").unwrap(), config.alpha);
     }
 
     /// Arguments de `medx svr recon` : hors BIDS `--input`, `--mask` et `--output` sont requis ; en BIDS seul `--participant` l'est, `--input` restreint la liste des piles (au moins deux) ; `--mask`, `--output`, `--poses` et `--quality` sont exclusifs de `--bids` ; `--participant`, `--session` et `--output-dir` demandent `--bids`.
