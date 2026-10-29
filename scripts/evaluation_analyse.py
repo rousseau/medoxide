@@ -194,7 +194,8 @@ def q5(s):
         for r in csv.DictReader(open(f"{A}/alignement.tsv"), delimiter="\t"):
             partage[r["etiquette"]] = r["controle"] == "OK"
     out = {}
-    ref_ok = os.path.exists(f"{A}/seg_s2s.nii.gz") and open(f"{A}/reference.txt").read() != ""
+    # s2s est la référence des deux protocoles : réussi si la segmentation du candidat retenu passe le contrôle anatomique (« aucun candidat ne passe » = échec)
+    ref_ok = os.path.exists(f"{A}/seg_s2s.nii.gz") and controle(f"{A}/seg_s2s.nii.gz")[0]
     out["s2s"] = (ref_ok, ref_ok)
     for nom, etiquette in (("s2v", "s2v"), ("SVRTK", "svrtk"), ("NeSVoR", "nesvor"), ("NiftyMIC", "niftymic")):
         chemin = {"niftymic": "niftymic/srr", "s2v": "ours_s2v/full_s2v"}.get(etiquette, f"{etiquette}/full/{etiquette}")
