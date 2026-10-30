@@ -889,6 +889,21 @@ pub fn read_stacks(chemins: &[PathBuf]) -> Result<Vec<Stack>, SvrError> {
     chemins.iter().map(|c| Stack::read(c)).collect()
 }
 
+/// `SliceTiming` du fichier JSON voisin d'un stack NIfTI (`pile.nii.gz` ou `pile.nii` → `pile.json`) : instants d'acquisition des coupes, indexés par coupe.
+/// `None` si le JSON est absent, illisible, sans clé `SliceTiming`, ou si cette clé n'est pas une liste de nombres : l'ordre d'acquisition est alors inconnu (pas une erreur : beaucoup de stacks n'ont pas ce champ).
+pub fn read_slice_timing(chemin: &Path) -> Option<Vec<f64>> {
+    let nom = chemin.file_name()?.to_str()?;
+    let base = nom.strip_suffix(".nii.gz").or_else(|| nom.strip_suffix(".nii"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(chemin.with_file_name(format!("{base}.json"))).ok()?).ok()?;
+    // `collect` rassemble des `Option<f64>` en un `Option<Vec<f64>>` : `None` dès qu'une valeur n'est pas un nombre.
+    json.get("SliceTiming")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_f64())
+        .collect()
+}
+
 /// Un stack : un volume 3D de coupes 2D, avec sa géométrie voxel → monde.
 ///
 /// Les champs sont privés : un `Stack` ne se construit que par [`Stack::read`], qui vérifie la
@@ -901,6 +916,7 @@ pub struct Stack {
     affine: Matrix4<f64>,
     spacing: [f64; 3],
     mask: Option<BrainMask>,
+    slice_times: Option<Vec<f64>>,
 }
 
 impl Stack {
@@ -967,6 +983,7 @@ impl Stack {
             affine,
             spacing: normes,
             mask: None,
+            slice_times: None,
         })
     }
 
@@ -1072,6 +1089,16 @@ impl Stack {
         let mut copie = self.clone();
         copie.mask = self.mask.as_ref().map(|m| m.without_pixels(ecartes));
         copie
+    }
+
+    /// Attache l'instant d'acquisition de chaque coupe (le `SliceTiming` BIDS, indexé par coupe ; l'unité est sans importance, seul l'ordre compte). La longueur n'est pas vérifiée ici : un `SliceTiming` de mauvaise longueur est ignoré par [`crate::align::temporal_neighbours`] (les voisines redeviennent `k ± 1`).
+    pub fn set_slice_times(&mut self, instants: Vec<f64>) {
+        self.slice_times = Some(instants);
+    }
+
+    /// Instants d'acquisition des coupes, s'ils ont été attachés ([`Stack::set_slice_times`]).
+    pub fn slice_times(&self) -> Option<&[f64]> {
+        self.slice_times.as_deref()
     }
 
     /// Masque cérébral attaché, s'il y en a un.
@@ -3271,5 +3298,44 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dossier).ok();
+    }
+    /// `read_slice_timing` lit le `SliceTiming` du JSON voisin (`.nii.gz` ou `.nii`) ; l'absence du fichier, de la clé, un JSON invalide ou une liste non numérique donnent `None` ; un stack garde les instants qu'on lui attache.
+    #[test]
+    fn the_slice_timing_is_read_from_the_neighbouring_json() {
+        let t = Temp::new("slice_timing");
+        let ecrire = |nom: &str, contenu: &str| std::fs::write(t.fichier(nom), contenu).unwrap();
+        ecrire(
+            "a.json",
+            r#"{"SliceThickness": 3.5, "SliceTiming": [0, 0.89062, 1.78125]}"#,
+        );
+        ecrire("b.json", r#"{"SliceThickness": 3.5}"#);
+        ecrire("c.json", "pas du json");
+        ecrire("d.json", r#"{"SliceTiming": [0, "x", 2]}"#);
+        ecrire("e.json", r#"{"SliceTiming": 3}"#);
+        assert_eq!(
+            read_slice_timing(&t.fichier("a.nii.gz")),
+            Some(vec![0.0, 0.89062, 1.78125])
+        );
+        assert_eq!(
+            read_slice_timing(&t.fichier("a.nii")),
+            Some(vec![0.0, 0.89062, 1.78125]),
+            "extension .nii"
+        );
+        for nom in ["b", "c", "d", "e", "absent"] {
+            assert_eq!(read_slice_timing(&t.fichier(&format!("{nom}.nii.gz"))), None, "{nom}");
+        }
+        assert_eq!(read_slice_timing(&t.fichier("a.txt")), None, "pas un NIfTI");
+        let mut h = en_tete(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+            [1.0, 1.0, 1.0],
+            1,
+        );
+        h.dim = [3, 4, 3, 2, 1, 1, 1, 1];
+        let pile = t.fichier("pile.nii.gz");
+        ecrire_3d(&pile, &h);
+        let mut s = Stack::read(&pile).unwrap();
+        assert_eq!(s.slice_times(), None, "rien d'attaché à la lecture");
+        s.set_slice_times(vec![2.0, 0.0]);
+        assert_eq!(s.slice_times(), Some(&[2.0, 0.0][..]));
     }
 }

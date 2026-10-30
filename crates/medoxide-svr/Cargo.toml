@@ -8,6 +8,8 @@ medoxide-core = { path = "../medoxide-core" }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
 rayon = { workspace = true }
+# Lecture du `SliceTiming` du fichier JSON voisin d'un stack (ordre d'acquisition des coupes, F3.2) ; déjà dans le graphe de dépendances.
+serde_json = "1"
 # Écriture du volume reconstruit au format NIfTI.
 nifti = { workspace = true }
 # Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).

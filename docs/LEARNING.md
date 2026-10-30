@@ -1617,6 +1617,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : la fonction pure `temporal_neighbours` (voisines d'une coupe dans le TEMPS, d'après `SliceTiming`) est écrite et testée avant d'être branchée : sur un stack séquentiel elle rend exactement `k − 1` et `k + 1`, donc brancher plus tard ne peut rien changer aux sujets séquentiels. Une mutation (retirer la détection des instants égaux) a d'abord SURVÉCU : le test ne contenait que des cas où l'ordre stable des instants égaux coïncidait par hasard avec l'ordre des indices ; un cas où il ne coïncide pas l'a tuée. Un test qui passe ne prouve rien tant qu'on n'a pas vu une mutation le faire échouer.
 - **Où** : `crates/medoxide-svr/src/align.rs` (`temporal_neighbours`), `crates/medoxide-svr/src/recon.rs` (`the_temporal_neighbours_follow_the_acquisition_order`).
 
+## 2026-10-30 — Lire un champ JSON avec `?` sur des `Option`
+
+- **Quoi (concept)** : `serde_json::Value` représente un JSON quelconque ; `json.get("clé")` rend un `Option<&Value>`, `.as_array()` un `Option<&Vec<Value>>`, `.as_f64()` un `Option<f64>`. Dans une fonction qui rend un `Option`, l'opérateur `?` sur chaque maillon abandonne avec `None` au premier maillon absent : une chaîne `get(..)?.as_array()?.iter()...` remplace cinq `match` imbriqués. `collect()` sait rassembler des `Option<f64>` en un `Option<Vec<f64>>` (tout ou rien : un seul élément non numérique donne `None`), comme il rassemble des `Result` (voir `read_stacks`) ; avec `filter_map` à la place, le compilateur refuse, parce que le type du résultat ne correspond plus : la règle « tout ou rien » est imposée par le type.
+- **Quoi (méthode)** : l'absence de `SliceTiming` n'est pas une erreur (15 stacks TRUFI sur 41 n'en ont pas) : `None`, et l'appelant retombe sur l'indice.
+- **Où** : `crates/medoxide-svr/src/lib.rs` (`read_slice_timing`, `Stack::set_slice_times`), `crates/medoxide-svr/Cargo.toml` (`serde_json`, déjà dans le graphe).
+
 ---
 
 *(à compléter à la prochaine étape)*
