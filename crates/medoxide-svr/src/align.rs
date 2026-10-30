@@ -145,7 +145,6 @@ pub(crate) fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) ->
 ///
 /// `times` est le `SliceTiming` du stack (instant d'acquisition de chaque coupe, indexé par coupe). Les voisines sont alors la coupe acquise juste avant et celle acquise juste après `k` : pour un stack séquentiel, croissant ou décroissant, ce sont `k − 1` et `k + 1` ; pour un stack entrelacé (paires puis impaires), `k − 2` et `k + 2`.
 /// Les indices `k − 1` et `k + 1` (ceux de l'a priori temporel d'origine) sont rendus quand l'ordre est inconnu : `times` absent, de longueur différente de `n`, non fini, ou aux instants non tous distincts (des instants tous nuls, par exemple, ne disent rien de l'ordre).
-#[allow(dead_code)] // branchée aux deux a priori temporels à l'étape suivante (F3.2)
 pub(crate) fn temporal_neighbours(times: Option<&[f64]>, n: usize, k: usize) -> Vec<usize> {
     let par_indice = || -> Vec<usize> { [k.wrapping_sub(1), k + 1].into_iter().filter(|&j| j < n).collect() };
     let Some(times) = times.filter(|t| t.len() == n && t.iter().all(|x| x.is_finite())) else {
@@ -170,7 +169,7 @@ pub(crate) fn temporal_neighbours(times: Option<&[f64]>, n: usize, k: usize) -> 
     voisines
 }
 
-/// A priori temporel de la coupe `k` du stack `si` pour un recalage qui part de la pose `depart` (celle de la coupe préparée) : la cible de chaque pixel de `points` (à la pose `depart`) est la moyenne, sur les voisines directes `k − 1` et `k + 1` du stack qui ont assez de pixels de masque, de la position que lui donnerait leur mouvement RELATIF `M_voisine · depart⁻¹`
+/// A priori temporel de la coupe `k` du stack `si` pour un recalage qui part de la pose `depart` (celle de la coupe préparée) : la cible de chaque pixel de `points` (à la pose `depart`) est la moyenne, sur les voisines directes dans le temps ([`temporal_neighbours`] : `k − 1` et `k + 1` sans ordre d'acquisition connu) qui ont assez de pixels de masque, de la position que lui donnerait leur mouvement RELATIF `M_voisine · depart⁻¹`
 /// (poses `poses` du début du cycle, donc indépendantes de l'ordre des coupes). `None` si `weight <= 0` ou si la coupe n'a aucune voisine utilisable.
 pub(crate) fn prior_temporel(
     stack: &Stack,
@@ -186,9 +185,9 @@ pub(crate) fn prior_temporel(
         return None;
     }
     let inverse = depart.try_inverse()?;
-    let relatives: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
+    let relatives: Vec<Matrix4<f64>> = temporal_neighbours(stack.slice_times(), stack.dim().2, k)
         .into_iter()
-        .filter(|&kv| kv < stack.dim().2 && preparer_coupe(stack, kv, *poses.get(si, kv)).is_some())
+        .filter(|&kv| preparer_coupe(stack, kv, *poses.get(si, kv)).is_some())
         .map(|kv| poses.get(si, kv) * inverse)
         .collect();
     if relatives.is_empty() {

@@ -10,7 +10,7 @@ use nalgebra::{Matrix4, Vector3, Vector4};
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 
-use crate::align::{preparer_coupe, verifier_entrees, AlignmentReport, SliceReport};
+use crate::align::{preparer_coupe, temporal_neighbours, verifier_entrees, AlignmentReport, SliceReport};
 use crate::diff::pose_to_matrix;
 use crate::diff::{apply_pose, ncc, rotation_matrix, PoseModule, RegistrationConfig, RegistrationResult};
 use crate::recon::SlicePoses;
@@ -1301,7 +1301,7 @@ pub(crate) fn robust_scale(debut: f64, fin: f64, balayage: usize, total: usize) 
     debut * (fin / debut).powf(balayage.min(total - 1) as f64 / (total - 1) as f64)
 }
 
-/// Entrées de la régularisation temporelle d'une coupe `k` du stack `si` : `(points, cibles)`. Les `points` sont `n_points` pixels de masque de la coupe (pas régulier parmi `tous_les_points`) ; la cible de chacun est la moyenne, sur les voisines directes recalables (`k − 1` et `k + 1`, absentes aux bords ou si
+/// Entrées de la régularisation temporelle d'une coupe `k` du stack `si` : `(points, cibles)`. Les `points` sont `n_points` pixels de masque de la coupe (pas régulier parmi `tous_les_points`) ; la cible de chacun est la moyenne, sur les voisines directes recalables dans le temps ([`temporal_neighbours`] : `k − 1` et `k + 1` sans ordre d'acquisition connu ; absentes aux bords ou si
 /// elles n'ont pas de pixel de masque), de la position que lui donnerait leur mouvement RELATIF `M_voisine · M_coupe⁻¹` (poses courantes). `None` si la coupe n'a aucune voisine recalable.
 pub(crate) fn temporal_prior_inputs(
     stack: &Stack,
@@ -1312,9 +1312,9 @@ pub(crate) fn temporal_prior_inputs(
     n_points: usize,
 ) -> Option<(Vec<Vector3<f64>>, Vec<Vector3<f64>>)> {
     let courante = *courantes.get(si, k);
-    let relatives: Vec<Matrix4<f64>> = [k.wrapping_sub(1), k + 1]
+    let relatives: Vec<Matrix4<f64>> = temporal_neighbours(stack.slice_times(), stack.dim().2, k)
         .into_iter()
-        .filter(|&kv| kv < stack.dim().2 && preparer_coupe(stack, kv, *courantes.get(si, kv)).is_some())
+        .filter(|&kv| preparer_coupe(stack, kv, *courantes.get(si, kv)).is_some())
         .map(|kv| courantes.get(si, kv) * courante.try_inverse().expect("une pose est inversible"))
         .collect();
     if relatives.is_empty() {

@@ -85,6 +85,15 @@ impl From<S2vInitArg> for medoxide_svr::pipeline::S2vInit {
     }
 }
 
+/// Ordre d'acquisition des coupes pour l'a priori temporel, tel qu'écrit sur la ligne de commande (`--slice-timing`).
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SliceTimingArg {
+    /// Les voisines temporelles d'une coupe sont ses voisines d'indice (acquisition séquentielle supposée)
+    Index,
+    /// Ordre lu dans le `SliceTiming` du JSON voisin de chaque stack, quand il y en a un (sinon : indices)
+    Auto,
+}
+
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
@@ -216,6 +225,9 @@ enum SvrAction {
         /// Avec `--motion s2s` : stack d'ancrage (rang dans la liste `--input`, à partir de 0) : seules les paires de coupes qui l'impliquent servent à estimer le mouvement, les autres paires restent disponibles pour mesurer la cohérence des poses ; option d'évaluation (moins d'information), non recommandée en usage normal
         #[arg(long)]
         s2s_anchor_stack: Option<usize>,
+        /// Voisines temporelles de l'a priori temporel (coupe-coupe et coupe-volume) : par indice, ou d'après l'ordre d'acquisition (`SliceTiming`) du JSON voisin de chaque stack
+        #[arg(long, value_enum, default_value_t = SliceTimingArg::Index)]
+        slice_timing: SliceTimingArg,
         /// Avec `--motion s2v` : départ de la boucle (poses de l'en-tête, ou alignement par stack entier, avec ou sans correction de biais des stacks)
         #[arg(long, value_enum, default_value_t = ReconstructionConfig::default().s2v_init.into())]
         s2v_init: S2vInitArg,
@@ -400,6 +412,7 @@ fn svr_recon(
     destination: &DestinationSvr,
     device: Option<DeviceArg>,
     config: &ReconstructionConfig,
+    slice_timing: SliceTimingArg,
 ) -> ExitCode {
     if masques.len() != entrees.len() {
         eprintln!(
@@ -414,6 +427,19 @@ fn svr_recon(
         let mut stacks = medoxide_svr::read_stacks(entrees)?;
         for (s, m) in stacks.iter_mut().zip(masques) {
             s.set_brain_mask(m)?;
+        }
+        if slice_timing == SliceTimingArg::Auto {
+            let mut lus = 0;
+            for s in &mut stacks {
+                if let Some(instants) = medoxide_svr::read_slice_timing(s.path()) {
+                    s.set_slice_times(instants);
+                    lus += 1;
+                }
+            }
+            eprintln!(
+                "ordre d'acquisition lu dans le JSON voisin pour {lus} stack(s) sur {}",
+                stacks.len()
+            );
         }
         let n_coupes: usize = stacks.iter().map(|s| s.dim().2).sum();
         let kind = device.map_or_else(
@@ -857,6 +883,7 @@ fn main() -> ExitCode {
                     s2s_temporal_robust_start_mm,
                     s2s_temporal_info_exponent,
                     s2s_anchor_stack,
+                    slice_timing,
                     s2v_init,
                     s2v_temporal_weight,
                     robust_rounds,
@@ -934,7 +961,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            svr_recon(&entrees, &masques, &destination, device, &config)
+            svr_recon(&entrees, &masques, &destination, device, &config, slice_timing)
         }
         Command::Fetalbet {
             input,
@@ -1175,6 +1202,33 @@ mod tests {
             config.slice_scale_rounds
         );
         assert_eq!(*recon.get_one::<f64>("alpha").unwrap(), config.alpha);
+        assert!(
+            *recon.get_one::<super::SliceTimingArg>("slice_timing").unwrap() == super::SliceTimingArg::Index,
+            "l'ordre d'acquisition n'est utilisé que sur demande"
+        );
+        let avec_auto = Cli::command()
+            .try_get_matches_from([
+                "medx",
+                "svr",
+                "recon",
+                "--input",
+                "a",
+                "b",
+                "--mask",
+                "m",
+                "n",
+                "--output",
+                "v",
+                "--slice-timing",
+                "auto",
+            ])
+            .unwrap();
+        let recon = avec_auto
+            .subcommand_matches("svr")
+            .unwrap()
+            .subcommand_matches("recon")
+            .unwrap();
+        assert!(*recon.get_one::<super::SliceTimingArg>("slice_timing").unwrap() == super::SliceTimingArg::Auto);
     }
 
     /// Arguments de `medx svr recon` : hors BIDS `--input`, `--mask` et `--output` sont requis ; en BIDS seul `--participant` l'est, `--input` restreint la liste des piles (au moins deux) ; `--mask`, `--output`, `--poses` et `--quality` sont exclusifs de `--bids` ; `--participant`, `--session` et `--output-dir` demandent `--bids`.

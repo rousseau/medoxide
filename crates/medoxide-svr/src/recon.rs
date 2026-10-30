@@ -4768,6 +4768,113 @@ mod tests {
         );
     }
 
+    /// Instants d'acquisition d'un stack entrelacé de `n` coupes : les coupes paires d'abord (0, 2, 4, …), puis les impaires.
+    fn instants_entrelaces(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|j| if j % 2 == 0 { j / 2 } else { n.div_ceil(2) + j / 2 } as f64)
+            .collect()
+    }
+
+    /// Voisines temporelles branchées dans les deux a priori (F3.2) : pour une coupe paire intérieure d'un stack entrelacé, dont les voisines dans le temps sont k − 2 et k + 2 (translatées de (2, 0, 0) et (0, 4, 0)) tandis que k − 1 et k + 1 portent une autre pose (0, 0, 9), (a) coupe-volume (`align::prior_temporel`) : la cible est le décalage moyen (1, 2, 0) avec les instants, et celui de k ± 1 (0, 0, 9) sans instants ; (b) coupe-coupe (`s2s::temporal_prior_inputs`) : même contraste ; (c) pour des instants séquentiels, croissants ou décroissants, les cibles des deux a priori sont IDENTIQUES (même vecteur, bit à bit) à celles obtenues sans instants, sur toutes les coupes.
+    #[test]
+    fn the_temporal_priors_follow_the_acquisition_order() {
+        use crate::align::{preparer_coupe, prior_temporel};
+        use crate::s2s::temporal_prior_inputs;
+        let t = Temp::new("prior_ordre_acquisition");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let id = Matrix4::<f64>::identity();
+        let translation = |x: f64, y: f64, z: f64| Matrix4::new_translation(&nalgebra::Vector3::new(x, y, z));
+        let cibles_s2v = |stack: &Stack, poses: &SlicePoses, k: usize| -> Option<Vec<f32>> {
+            let points = preparer_coupe(stack, k, id)?.points;
+            let prior = prior_temporel(stack, poses, 0, k, id, &points, 0.05, &device)?;
+            Some(prior.targets.into_data().try_to_vec().unwrap())
+        };
+        let stack = &stacks[0];
+        let nz = stack.dim().2;
+        let k = (2..nz - 2)
+            .find(|&k| k % 2 == 0 && (k - 2..=k + 2).all(|j| preparer_coupe(stack, j, id).is_some()))
+            .expect("une coupe paire intérieure dont les quatre voisines sont utilisables");
+        let mut poses = SlicePoses::identity(&stacks);
+        poses.set(0, k - 2, translation(2.0, 0.0, 0.0));
+        poses.set(0, k + 2, translation(0.0, 4.0, 0.0));
+        poses.set(0, k - 1, translation(0.0, 0.0, 9.0));
+        poses.set(0, k + 1, translation(0.0, 0.0, 9.0));
+        let points = preparer_coupe(stack, k, id).unwrap().points;
+        let decale = |d: [f64; 3]| -> Vec<f32> {
+            points
+                .iter()
+                .flat_map(|p| [(p.x + d[0]) as f32, (p.y + d[1]) as f32, (p.z + d[2]) as f32])
+                .collect()
+        };
+        let proche = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+        let mut entrelace = stack.clone();
+        entrelace.set_slice_times(instants_entrelaces(nz));
+        // (a) coupe-volume
+        let avec = cibles_s2v(&entrelace, &poses, k).expect("voisines");
+        let sans = cibles_s2v(stack, &poses, k).expect("voisines");
+        assert!(proche(&avec, &decale([1.0, 2.0, 0.0])), "(a) avec instants : k ± 2");
+        assert!(proche(&sans, &decale([0.0, 0.0, 9.0])), "(a) sans instants : k ± 1");
+        // (b) coupe-coupe, stack 1 : même contraste (les poses de k ± 1 valent 9 en z, celles de k ± 2 les mêmes translations)
+        let si = 1usize;
+        let (stack1, nz1) = (&stacks[si], stacks[si].dim().2);
+        let k1 = (2..nz1 - 2)
+            .find(|&k| k % 2 == 0 && (k - 2..=k + 2).all(|j| preparer_coupe(stack1, j, id).is_some()))
+            .expect("une coupe paire intérieure du stack 1");
+        let mut poses1 = SlicePoses::identity(&stacks);
+        poses1.set(si, k1 - 2, translation(2.0, 0.0, 0.0));
+        poses1.set(si, k1 + 2, translation(0.0, 4.0, 0.0));
+        poses1.set(si, k1 - 1, translation(0.0, 0.0, 9.0));
+        poses1.set(si, k1 + 1, translation(0.0, 0.0, 9.0));
+        let tous: Vec<Vector3<f64>> = (0..200)
+            .map(|i| Vector3::new(i as f64 * 0.7 - 30.0, (i % 13) as f64 * 3.0, (i % 7) as f64 - 20.0))
+            .collect();
+        let mut entrelace1 = stack1.clone();
+        entrelace1.set_slice_times(instants_entrelaces(nz1));
+        let (pts_a, cib_a) = temporal_prior_inputs(&entrelace1, &poses1, si, k1, &tous, 20).expect("voisines");
+        let (pts_b, cib_b) = temporal_prior_inputs(stack1, &poses1, si, k1, &tous, 20).expect("voisines");
+        for ((p, a), b) in pts_a.iter().zip(&cib_a).zip(&cib_b) {
+            assert!(
+                (a - (p + Vector3::new(1.0, 2.0, 0.0))).norm() < 1e-9,
+                "(b) avec instants : k ± 2"
+            );
+            assert!(
+                (b - (p + Vector3::new(0.0, 0.0, 9.0))).norm() < 1e-9,
+                "(b) sans instants : k ± 1"
+            );
+        }
+        assert_eq!(pts_a.len(), pts_b.len());
+        // (c) séquentiel : identique à l'absence d'instants, toutes les coupes, deux sens d'acquisition
+        let mut poses_variees = SlicePoses::identity(&stacks);
+        for (si, stack) in stacks.iter().enumerate() {
+            for j in 0..stack.dim().2 {
+                poses_variees.set(si, j, translation(j as f64 * 0.3, (j % 3) as f64, -(j as f64) * 0.1));
+            }
+        }
+        for sens in [1.0, -1.0] {
+            let mut sequentiel = stacks.clone();
+            for s in &mut sequentiel {
+                s.set_slice_times((0..s.dim().2).map(|j| sens * (j as f64) * 0.89).collect());
+            }
+            for (si, (a, b)) in sequentiel.iter().zip(&stacks).enumerate() {
+                for j in 0..a.dim().2 {
+                    if si == 0 {
+                        assert_eq!(
+                            cibles_s2v(a, &poses_variees, j),
+                            cibles_s2v(b, &poses_variees, j),
+                            "(c) s2v coupe {j}, sens {sens}"
+                        );
+                    }
+                    assert_eq!(
+                        temporal_prior_inputs(a, &poses_variees, si, j, &tous, 20),
+                        temporal_prior_inputs(b, &poses_variees, si, j, &tous, 20),
+                        "(c) s2s stack {si} coupe {j}, sens {sens}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Réglages du gradient conjugué dans `pipeline::reconstruct_with_poses` (critère fixé avant, blobs à 3 stacks, poses d'en-tête, sans estimation de mouvement donc rapide) : le volume égale (1e-9 relatif)
     /// celui de `ReconstructionProblem` appelé directement, pour deux réglages qui rendent chacun l'autre paramètre actif ou inactif : (i) 2 itérations au plus, tolérance très faible (le nombre d'itérations
     /// décide) ; (ii) 300 itérations, tolérance 0,5 (la tolérance décide). Les deux volumes diffèrent entre eux (les réglages agissent) et de α = 0,01 (α agit).
