@@ -141,6 +141,35 @@ pub(crate) fn preparer_coupe(stack: &Stack, k: usize, courante: Matrix4<f64>) ->
     })
 }
 
+/// Coupes voisines de la coupe `k` DANS LE TEMPS, dans un stack de `n` coupes, par indice croissant (une seule aux extrémités de l'acquisition, jamais plus de deux).
+///
+/// `times` est le `SliceTiming` du stack (instant d'acquisition de chaque coupe, indexé par coupe). Les voisines sont alors la coupe acquise juste avant et celle acquise juste après `k` : pour un stack séquentiel, croissant ou décroissant, ce sont `k − 1` et `k + 1` ; pour un stack entrelacé (paires puis impaires), `k − 2` et `k + 2`.
+/// Les indices `k − 1` et `k + 1` (ceux de l'a priori temporel d'origine) sont rendus quand l'ordre est inconnu : `times` absent, de longueur différente de `n`, non fini, ou aux instants non tous distincts (des instants tous nuls, par exemple, ne disent rien de l'ordre).
+#[allow(dead_code)] // branchée aux deux a priori temporels à l'étape suivante (F3.2)
+pub(crate) fn temporal_neighbours(times: Option<&[f64]>, n: usize, k: usize) -> Vec<usize> {
+    let par_indice = || -> Vec<usize> { [k.wrapping_sub(1), k + 1].into_iter().filter(|&j| j < n).collect() };
+    let Some(times) = times.filter(|t| t.len() == n && t.iter().all(|x| x.is_finite())) else {
+        return par_indice();
+    };
+    let mut ordre: Vec<usize> = (0..n).collect();
+    // `f64` n'est pas `Ord` (NaN) : `total_cmp` donne un ordre total, sans risque ici puisque les instants sont finis.
+    ordre.sort_by(|&a, &b| times[a].total_cmp(&times[b]));
+    if ordre.windows(2).any(|w| times[w[0]] == times[w[1]]) {
+        return par_indice();
+    }
+    let rang = ordre
+        .iter()
+        .position(|&j| j == k)
+        .expect("k < n : la coupe est dans l'ordre");
+    let mut voisines: Vec<usize> = [rang.wrapping_sub(1), rang + 1]
+        .into_iter()
+        .filter(|&r| r < n)
+        .map(|r| ordre[r])
+        .collect();
+    voisines.sort_unstable();
+    voisines
+}
+
 /// A priori temporel de la coupe `k` du stack `si` pour un recalage qui part de la pose `depart` (celle de la coupe préparée) : la cible de chaque pixel de `points` (à la pose `depart`) est la moyenne, sur les voisines directes `k − 1` et `k + 1` du stack qui ont assez de pixels de masque, de la position que lui donnerait leur mouvement RELATIF `M_voisine · depart⁻¹`
 /// (poses `poses` du début du cycle, donc indépendantes de l'ordre des coupes). `None` si `weight <= 0` ou si la coupe n'a aucune voisine utilisable.
 pub(crate) fn prior_temporel(

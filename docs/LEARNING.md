@@ -1611,6 +1611,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (concept)** : le contrôle réutilise `IntersectionProblem::build` et son `cost` (le coût du SVR) aux poses d'en-tête, en lecture seule, évalués en parallèle par `par_iter` : même code, aucun nouveau modèle. La validation « le contrôle prédit ce que le SVR fera » (champ `registered`) est possible parce que les deux partagent exactement cette construction.
 - **Où** : `crates/medoxide-svr/src/qc.rs`, `crates/medx/src/main.rs` (`svr_qc`), `scripts/valider_qc_acquisition.py`, `book/src/svr.md`.
 
+## 2026-10-30 — Trier des flottants, et un test qui doit tuer ses mutants
+
+- **Quoi (concept)** : `f64` n'implémente pas `Ord` (NaN n'est comparable à rien), donc `sort()` ne compile pas sur des flottants. `sort_by(|a, b| x[*a].total_cmp(&x[*b]))` donne un ordre total (NaN compris) ; ici les valeurs sont vérifiées finies avant. Une tranche optionnelle `Option<&[f64]>` dit « un tableau emprunté, ou rien » sans le copier, et `Option::filter` l'écarte quand une condition échoue (longueur, valeur non finie) : on retombe sur le comportement historique par un seul chemin (`let ... else`).
+- **Quoi (méthode)** : la fonction pure `temporal_neighbours` (voisines d'une coupe dans le TEMPS, d'après `SliceTiming`) est écrite et testée avant d'être branchée : sur un stack séquentiel elle rend exactement `k − 1` et `k + 1`, donc brancher plus tard ne peut rien changer aux sujets séquentiels. Une mutation (retirer la détection des instants égaux) a d'abord SURVÉCU : le test ne contenait que des cas où l'ordre stable des instants égaux coïncidait par hasard avec l'ordre des indices ; un cas où il ne coïncide pas l'a tuée. Un test qui passe ne prouve rien tant qu'on n'a pas vu une mutation le faire échouer.
+- **Où** : `crates/medoxide-svr/src/align.rs` (`temporal_neighbours`), `crates/medoxide-svr/src/recon.rs` (`the_temporal_neighbours_follow_the_acquisition_order`).
+
 ---
 
 *(à compléter à la prochaine étape)*

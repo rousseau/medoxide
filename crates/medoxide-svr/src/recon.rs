@@ -7604,6 +7604,60 @@ mod tests {
         assert_eq!(robust_scale(8.0, 2.0, 99, 4), 2.0, "balayage au-delà : borné à la fin");
     }
 
+    /// Voisines dans le temps : (a) sans `SliceTiming`, ou avec un `SliceTiming` inutilisable (mauvaise longueur, valeur non finie, instants égaux comme les horaires tous nuls d'un stack réel), ce sont `k − 1` et `k + 1`, une seule aux extrémités ; (b) pour un stack séquentiel croissant ou décroissant, le résultat est EXACTEMENT celui de l'indice (aucun changement pour les sujets séquentiels) ; (c) pour un stack entrelacé (paires puis impaires), ce sont les coupes acquises juste avant et juste après, par indice croissant, y compris avec les horaires d'un stack réel (impaires d'abord).
+    #[test]
+    fn the_temporal_neighbours_follow_the_acquisition_order() {
+        use crate::align::temporal_neighbours as voisines;
+        // (a) ordre inconnu ou inutilisable : indices k ± 1
+        assert_eq!(voisines(None, 5, 0), vec![1]);
+        assert_eq!(voisines(None, 5, 2), vec![1, 3]);
+        assert_eq!(voisines(None, 5, 4), vec![3]);
+        assert_eq!(voisines(Some(&[0.0; 5]), 5, 2), vec![1, 3], "horaires tous nuls");
+        assert_eq!(
+            voisines(Some(&[52.9, 0.0, 0.0, 0.0, 0.0]), 5, 2),
+            vec![1, 3],
+            "instants égaux"
+        );
+        assert_eq!(
+            voisines(Some(&[5.0, 1.0, 1.0, 0.0, 2.0]), 5, 2),
+            vec![1, 3],
+            "instants égaux dans un ordre qui n'est pas celui des indices"
+        );
+        assert_eq!(voisines(Some(&[0.0, 1.0, 2.0]), 5, 2), vec![1, 3], "mauvaise longueur");
+        assert_eq!(
+            voisines(Some(&[0.0, f64::NAN, 2.0, 3.0, 4.0]), 5, 2),
+            vec![1, 3],
+            "valeur non finie"
+        );
+        // (b) séquentiel : identique à l'indice, pour toutes les coupes
+        let croissant = [0.0, 0.89, 1.78, 2.67, 3.56];
+        let decroissant = [3.56, 2.67, 1.78, 0.89, 0.0];
+        for k in 0..5 {
+            assert_eq!(
+                voisines(Some(&croissant), 5, k),
+                voisines(None, 5, k),
+                "croissant, coupe {k}"
+            );
+            assert_eq!(
+                voisines(Some(&decroissant), 5, k),
+                voisines(None, 5, k),
+                "décroissant, coupe {k}"
+            );
+        }
+        // (c) entrelacé, paires puis impaires : ordre d'acquisition 0, 2, 4, 1, 3, 5
+        let entrelace = [0.0, 3.0, 1.0, 4.0, 2.0, 5.0];
+        assert_eq!(voisines(Some(&entrelace), 6, 0), vec![2], "première coupe acquise");
+        assert_eq!(voisines(Some(&entrelace), 6, 2), vec![0, 4]);
+        assert_eq!(voisines(Some(&entrelace), 6, 4), vec![1, 2]);
+        assert_eq!(voisines(Some(&entrelace), 6, 1), vec![3, 4]);
+        assert_eq!(voisines(Some(&entrelace), 6, 5), vec![3], "dernière coupe acquise");
+        // horaires d'un stack réel entrelacé (impaires d'abord, puis paires)
+        let reel = [16.3, 0.0, 17.9, 1.6, 19.6, 3.3, 21.2, 4.9];
+        assert_eq!(voisines(Some(&reel), 8, 0), vec![2, 7]);
+        assert_eq!(voisines(Some(&reel), 8, 7), vec![0, 5]);
+        assert_eq!(voisines(Some(&reel), 8, 1), vec![3], "première coupe acquise");
+    }
+
     /// Entrées de la régularisation temporelle (blobs, stack coronal, poses courantes connues) : (a) pour une coupe intérieure, chaque cible est la MOYENNE, sur ses deux voisines (k − 1 et k + 1), de `M_voisine · M_coupe⁻¹ · p` (valeur recalculée à la main, avec une rotation sur la coupe pour fixer l'ordre de composition) ; (b) pour une coupe dont la voisine suivante est
     /// absente (dernière coupe), la cible n'utilise que la voisine précédente ; (c) les points sont `n_points` pixels de masque à pas régulier (au plus `n_points`), et leur nombre est celui des cibles ; (d) sans aucune voisine (stack d'une seule coupe), le résultat est `None`.
     #[test]
