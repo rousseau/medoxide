@@ -6243,7 +6243,7 @@ mod tests {
 
     /// Réglages du coupe-coupe à comparer, séparés par des points-virgules : `fin` (recalage fin seul), `σ,balayages,niveaux` du gros-vers-fin (éventuellement suivi de `:bas,haut` pour la fiabilité des partenaires), ou des jetons séparés par `+` :
     /// `c=σ,balayages,niveaux` (gros vers fin), `b=niveaux,recherche_mm` (alignement par blocs), `bs=balayages` (balayages par niveau de blocs), `m=pas_deg,départs` (multi-départ de bloc), `t=poids` (régularisation temporelle), `i=γ` (pondération du poids temporel par l'information), `r=c_mm` ou `r=c0_mm,c1_mm` (échelle de la pénalité temporelle robuste, constante ou décroissante) ;
-    /// `bias=1` et `v=N` sont ignorés ici (lus par l'appelant : `bias=1` corrige les stacks du biais avant le recalage, `v=N` fait suivre le coupe-coupe de `N` cycles coupe-volume partant de ses poses).
+    /// `bias=1`, `v=N` et `st=1` sont ignorés ici (lus par l'appelant : `bias=1` corrige les stacks du biais avant le recalage, `v=N` fait suivre le coupe-coupe de `N` cycles coupe-volume partant de ses poses, `st=1` donne au recalage les instants d'acquisition des stacks, voir `MEDOXIDE_ENTRELACE`).
     fn variantes_s2s(spec: &str, fin: crate::s2s::S2sConfig) -> Vec<(String, crate::s2s::S2sConfig)> {
         use crate::s2s::S2sConfig;
         spec.split(';')
@@ -6270,7 +6270,7 @@ mod tests {
                                 (config.temporal_robust_start_mm, config.temporal_robust_mm) =
                                     if x.len() > 1 { (x[0], x[1]) } else { (0.0, x[0]) }
                             }
-                            "bias" | "v" => {}
+                            "bias" | "v" | "st" => {}
                             _ => panic!("jeton de variante inconnu : {nom}"),
                         }
                     }
@@ -6307,13 +6307,22 @@ mod tests {
             .collect()
     }
 
+    /// Les coupes d'un stack dans l'ordre d'acquisition : celui des instants `SliceTiming` s'ils sont attachés au stack, sinon l'ordre des indices (le tri est stable : sans instants, rien ne change).
+    fn coupes_dans_l_ordre(stack: &Stack) -> Vec<crate::Slice<'_>> {
+        let mut coupes: Vec<_> = stack.slices().collect();
+        if let Some(instants) = stack.slice_times() {
+            coupes.sort_by(|a, b| instants[a.index()].total_cmp(&instants[b.index()]));
+        }
+        coupes
+    }
+
     /// Mouvement par coupe À SAUTS le long de chaque stack : comme [`poses_lisses`] (marche autorégressive de coefficient `rho`, bornée à ± amplitude), mais à chaque coupe, avec la probabilité `proba`, chaque paramètre est retiré uniformément dans ± amplitude (un saut qui persiste ensuite).
     fn poses_a_sauts(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64, proba: f64) -> SlicePoses {
         let mut alea = Alea(graine);
         let mut poses = SlicePoses::identity(stacks);
         for (si, stack) in stacks.iter().enumerate() {
             let mut x = [0.0_f64; 6];
-            for coupe in stack.slices() {
+            for coupe in coupes_dans_l_ordre(stack) {
                 let saut = alea.suivant() < proba;
                 for (p, v) in x.iter_mut().enumerate() {
                     let amplitude = if p < 3 { degres } else { mm };
@@ -6434,8 +6443,15 @@ mod tests {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::pipeline::correct_stacks;
         use crate::s2s::{register_slices_s2s, S2sConfig};
-        let modeles = stacks_reels();
+        let mut modeles = stacks_reels();
         let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
+        // MEDOXIDE_ENTRELACE=1 : acquisition simulée entrelacée (coupes paires puis impaires) ; le mouvement lisse ou à sauts l'est dans le TEMPS d'acquisition
+        let entrelace = lire("MEDOXIDE_ENTRELACE", "0") == "1";
+        if entrelace {
+            for stack in &mut modeles {
+                stack.set_slice_times(instants_entrelaces(stack.dim().2));
+            }
+        }
         let volume = Volume::from_stack(
             &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap(),
         );
@@ -6486,7 +6502,7 @@ mod tests {
                 let (p, m, q) = part(&SlicePoses::identity(&stacks));
                 println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
                 for (nom, config) in &variantes {
-                    let travail = if nom.contains("bias=1") {
+                    let mut travail = if nom.contains("bias=1") {
                         correct_stacks(
                             &stacks,
                             &estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default())
@@ -6496,6 +6512,13 @@ mod tests {
                     } else {
                         stacks.clone()
                     };
+                    if nom.contains("st=1") {
+                        for (stack, reference) in travail.iter_mut().zip(&modeles) {
+                            if let Some(instants) = reference.slice_times() {
+                                stack.set_slice_times(instants.to_vec());
+                            }
+                        }
+                    }
                     let rapport =
                         register_slices_s2s(&travail, &SlicePoses::identity(&travail), config, &device).unwrap();
                     let ncc_finale: std::collections::HashMap<(usize, usize), f64> = rapport
@@ -11521,7 +11544,7 @@ mod tests {
         let mut poses = SlicePoses::identity(stacks);
         for (si, stack) in stacks.iter().enumerate() {
             let mut x = [0.0_f64; 6];
-            for coupe in stack.slices() {
+            for coupe in coupes_dans_l_ordre(stack) {
                 for (p, v) in x.iter_mut().enumerate() {
                     let amplitude = if p < 3 { degres } else { mm };
                     let sigma = amplitude / 3.0_f64.sqrt();
