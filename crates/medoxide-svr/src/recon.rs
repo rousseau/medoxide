@@ -5953,6 +5953,154 @@ mod tests {
         ));
     }
 
+    /// Similarité locale branchée dans le recalage coupe-volume (F3.1, critères fixés avant, jeu de blobs, départ perturbé, recalage court) : (a) `Similarity::Ncc` redonne EXACTEMENT (au bit près) le recalage de la configuration par défaut (la seule différence avec le comportement d'avant est un champ de plus) ;
+    /// (b) `Lncc` change les poses (écart > 1e-4 sur au moins une coupe) dans les DEUX chemins (coupe par coupe avec a priori temporel, par lots sans a priori) ; (c) les mêmes coupes sont recalées avec `Lncc` qu'avec `Ncc` (le masque ne change pas) ;
+    /// (d) les coupes non recalées gardent exactement leur pose avec `Lncc` ; (e) ORACLE : sans itération, la NCC rendue pour une coupe recalée sur quatre égale (1e-4) celle recalculée à part avec les briques de base (référence de la coupe construite des stacks d'origine, puis normalisée localement avec `Lncc` ; coupe lue dans le stack normalisé localement avec `Lncc`), donc les DEUX côtés sont normalisés ; vrai aussi pour `Ncc`.
+    #[test]
+    fn the_local_similarity_reaches_both_registration_paths() {
+        use crate::diff::Similarity;
+        let t = Temp::new("similarite_locale");
+        let volume = volume_de_blobs();
+        let modeles = modeles_de_blobs_larges(&t);
+        let vraies = poses_aleatoires(&modeles, 2.0, 2.0, 91);
+        let stacks = simuler_blobs(&t, &volume, &modeles, &vraies);
+        let grille = reconstruction_grid(&stacks, 2.0, 6.0).unwrap();
+        let device = burn::tensor::Device::flex().autodiff();
+        let depart = poses_aleatoires(&stacks, 1.0, 1.0, 5);
+        let base = RobustConfig {
+            base: crate::diff::RegistrationConfig {
+                iterations: 12,
+                ..crate::diff::RegistrationConfig::DEFAULT
+            },
+            extra_starts: 1,
+            start_amplitude_mm: 2.0,
+            ..RobustConfig::new(0.99)
+        };
+        let ecart = |a: &SlicePoses, b: &SlicePoses| {
+            stacks
+                .iter()
+                .enumerate()
+                .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+                .map(|(si, k)| (a.get(si, k) - b.get(si, k)).abs().max())
+                .fold(0.0_f64, f64::max)
+        };
+        for (lots, prior) in [(false, 0.01), (true, 0.0)] {
+            let config = RobustConfig {
+                batched: lots,
+                temporal_weight: prior,
+                ..base
+            };
+            let lancer = |c: RobustConfig| {
+                align::register_slices_leave_slice_out(&grille, &stacks, &depart, c, &device).unwrap()
+            };
+            let (defaut, explicite, locale) = (
+                lancer(config),
+                lancer(RobustConfig {
+                    similarity: Similarity::Ncc,
+                    ..config
+                }),
+                lancer(RobustConfig {
+                    similarity: Similarity::Lncc,
+                    ..config
+                }),
+            );
+            // (a)
+            assert_eq!(
+                ecart(&defaut.poses, &explicite.poses),
+                0.0,
+                "(lots {lots}) Ncc explicite"
+            );
+            // (b)
+            let e = ecart(&locale.poses, &defaut.poses);
+            println!("(lots {lots}) écart de poses Lncc / Ncc : {e:.2e}");
+            assert!(e > 1e-4, "(lots {lots}) Lncc devrait changer les poses : {e}");
+            // (e) ORACLE : sans itération, `ncc_first` est la corrélation à la pose de départ ; on la recalcule à part, avec les briques de base, pour une coupe recalée sur quatre : la référence de la coupe (construite des
+            // stacks d'origine), normalisée localement avec `Lncc`, comparée à la coupe lue dans le stack normalisé localement avec `Lncc` (les deux côtés ; un seul côté normalisé donne une autre valeur)
+            let (numerateur, denominateur) = adjoint_sums(&grille, &stacks, &depart).unwrap();
+            let geometrie = grille.zeros();
+            let sans_iteration = RobustConfig {
+                base: crate::diff::RegistrationConfig {
+                    iterations: 0,
+                    ..config.base
+                },
+                ..config
+            };
+            for sim in [Similarity::Ncc, Similarity::Lncc] {
+                let rapport = align::register_slices_leave_slice_out(
+                    &grille,
+                    &stacks,
+                    &depart,
+                    RobustConfig {
+                        similarity: sim,
+                        ..sans_iteration
+                    },
+                    &device,
+                )
+                .unwrap();
+                let sigma = crate::diff::SIGMA_SIMILARITE_LOCALE_MM;
+                let normalises: Vec<Stack> = stacks.iter().map(|s| s.locally_normalised(sigma)).collect();
+                let mut verifiees = 0;
+                for r in rapport.slices.iter().filter(|r| r.registered).step_by(4) {
+                    let image = align::reference_de_la_coupe(
+                        &grille,
+                        &geometrie,
+                        &stacks[r.stack],
+                        r.stack,
+                        r.slice,
+                        &depart,
+                        0,
+                        &numerateur,
+                        &denominateur,
+                    );
+                    let reference = Volume::new(image, grille.affine).unwrap();
+                    let (reference, vu) = match sim {
+                        Similarity::Ncc => (reference, &stacks[r.stack]),
+                        Similarity::Lncc => (
+                            reference.locally_normalised(sigma / grille.resolution_mm).unwrap(),
+                            &normalises[r.stack],
+                        ),
+                    };
+                    let p = align::preparer_coupe(vu, r.slice, *depart.get(r.stack, r.slice)).unwrap();
+                    let attendu = crate::diff::slice_ncc(
+                        &VolumeTensors::new(&reference, &device),
+                        align::vecteurs_vers_tenseur(&p.points, &device),
+                        align::tenseur_1d(&[p.pivot.x, p.pivot.y, p.pivot.z], &device),
+                        align::tenseur_1d(&[0.0; 6], &device),
+                        p.echelle,
+                        align::tenseur_1d(&p.intensites, &device),
+                        align::tenseur_1d(&vec![1.0; p.points.len()], &device),
+                    )
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()[0];
+                    assert!(
+                        (r.ncc_first - f64::from(attendu)).abs() < 1e-4,
+                        "(lots {lots}, {sim:?}) coupe ({}, {}) : NCC rendue {} contre {attendu} recalculée",
+                        r.stack,
+                        r.slice,
+                        r.ncc_first
+                    );
+                    verifiees += 1;
+                }
+                assert!(
+                    verifiees >= 5,
+                    "(lots {lots}, {sim:?}) trop peu de coupes vérifiées : {verifiees}"
+                );
+            }
+            // (c) et (d)
+            for (l, n) in locale.slices.iter().zip(&defaut.slices) {
+                assert_eq!(
+                    (l.stack, l.slice, l.registered),
+                    (n.stack, n.slice, n.registered),
+                    "(lots {lots})"
+                );
+                if !l.registered {
+                    assert_eq!(locale.poses.get(l.stack, l.slice), depart.get(l.stack, l.slice));
+                }
+            }
+        }
+    }
+
     /// Recalage « sans la fenêtre » en parallèle (critères fixés avant, jeu de blobs, poses de départ perturbées, recalage court : l'égalité ne dépend pas de la convergence) : (a) pour (fenêtre, σ) = (0, 0), (2, 0), (0, 1) la
     /// version parallèle égale l'implémentation en série (somme de la fenêtre par glissement) : mêmes coupes recalées et mêmes nombres de recalages, poses à 1e-6 près (toute entrée de la matrice, mm), NCC à 1e-6 près ;
     /// (b) deux exécutions parallèles donnent des poses IDENTIQUES au bit près ; (c) les coupes non recalées gardent exactement leur pose.

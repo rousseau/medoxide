@@ -161,6 +161,8 @@ pub struct ReconstructionConfig {
     pub s2v_init: S2vInit,
     /// Coupe-volume : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (pénalité sur l'écart entre son mouvement et celui de ses voisines directes du stack, voir [`crate::diff::TemporalPrior`]) ; 0 : aucun (historique). Défaut 0,01 (F2.3 : résiduel de mouvement par coupe ramené à celui du coupe-coupe sur les agités). Sans effet avec `s2v_batched` ou sans `s2v_leave_slice_out`.
     pub s2v_temporal_weight: f64,
+    /// Coupe-volume : mesure de similarité du recalage de chaque coupe, voir [`crate::diff::Similarity`]. Défaut `Ncc` (historique) ; `Lncc` est une option mesurée en F3.1 (`docs/ROADMAP.md`). Sans effet sans `s2v_leave_slice_out` ; avec `Lncc`, le seuil `s2v_suspect_ncc` s'applique à la corrélation des images normalisées (non recalibré).
+    pub s2v_similarity: crate::diff::Similarity,
     /// Rejet robuste après la reconstruction finale (voir [`trim_outliers`]) : nombre de tours « écarter les pixels et les coupes incohérents avec le volume, reconstruire de nouveau » ; 0 : aucun (défaut, option).
     pub robust_rounds: usize,
     /// Rejet robuste : un pixel est écarté si son résidu dépasse ce nombre d'écarts types robustes (1,4826 × médiane des écarts absolus du stack).
@@ -211,6 +213,7 @@ impl Default for ReconstructionConfig {
             s2v_skip_unused_reconstructions: true,
             s2v_init: S2vInit::StacksBias,
             s2v_temporal_weight: 0.01,
+            s2v_similarity: crate::diff::Similarity::Ncc,
             robust_rounds: 0,
             robust_threshold: 3.0,
             slice_scale_rounds: 1,
@@ -772,6 +775,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
             start_amplitude_mm: config.s2v_start_amplitude_mm,
             batched: config.s2v_batched,
             temporal_weight: config.s2v_temporal_weight,
+            similarity: config.s2v_similarity,
             ..RobustConfig::new(config.s2v_suspect_ncc)
         },
         leave_one_stack_out_cycles: if config.s2v_leave_slice_out { 0 } else { cycles },

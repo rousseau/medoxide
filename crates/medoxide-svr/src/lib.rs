@@ -1113,7 +1113,6 @@ impl Stack {
     }
 
     /// Copie du stack dont chaque coupe est **normalisée localement** dans son masque ([`s2s::normalisation_locale_coupe`], écart type `sigma_mm` converti en pixels avec le pas moyen dans le plan) : l'image que voit le recalage quand la similarité est locale (F3.1). Dans le plan seulement : les coupes ne se mélangent jamais (leurs poses diffèrent). Sans masque, copie telle quelle.
-    #[allow(dead_code)] // branchée à l'étape suivante de F3.1
     pub(crate) fn locally_normalised(&self, sigma_mm: f64) -> Stack {
         let mut copie = self.clone();
         let Some(masque) = self.mask.as_ref() else {

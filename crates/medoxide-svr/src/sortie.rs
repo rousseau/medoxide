@@ -134,6 +134,13 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2v_leave_slice_out", Json::Bool(c.s2v_leave_slice_out)),
         ("s2v_batched", Json::Bool(c.s2v_batched)),
         ("s2v_temporal_weight", reel(c.s2v_temporal_weight)),
+        (
+            "s2v_similarity",
+            Json::texte(match c.s2v_similarity {
+                crate::diff::Similarity::Ncc => "ncc",
+                crate::diff::Similarity::Lncc => "lncc",
+            }),
+        ),
         ("robust_rounds", entier(c.robust_rounds)),
         ("robust_threshold", reel(c.robust_threshold)),
         ("slice_scale_rounds", entier(c.slice_scale_rounds)),

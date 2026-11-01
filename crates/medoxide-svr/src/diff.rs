@@ -761,6 +761,19 @@ pub fn register_slices_robust_batch(
     resultats
 }
 
+/// Mesure de similarité du recalage coupe-volume (F3.1) : ce que compare la corrélation entre la coupe et le volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Similarity {
+    /// Corrélation normalisée globale des intensités (comportement historique).
+    #[default]
+    Ncc,
+    /// Corrélation normalisée des images **normalisées localement** ([`crate::Volume::locally_normalised`], [`crate::Stack::locally_normalised`] : moyenne et variance locales par flou gaussien de [`SIGMA_SIMILARITE_LOCALE_MM`]) : insensible aux écarts de contraste ou de signal qui varient lentement dans l'image.
+    Lncc,
+}
+
+/// Écart type (mm) du flou de la normalisation locale de [`Similarity::Lncc`] : 9 pixels de 0,62 mm. Fixé a priori (F3.1), non réglé sur une mesure.
+pub const SIGMA_SIMILARITE_LOCALE_MM: f64 = 5.6;
+
 /// Réglages de [`register_slice_robust`].
 #[derive(Debug, Clone, Copy)]
 pub struct RobustConfig {
@@ -781,6 +794,8 @@ pub struct RobustConfig {
     pub batched: bool,
     /// Poids λ (1/mm²) de l'a priori temporel du recalage coupe-volume ([`TemporalPrior`]) : pris en compte par [`crate::align::register_slices_leave_window_out`] (coupe par coupe, donc sans `batched`) ; 0 : sans a priori. Ignoré par [`register_slice_robust`] elle-même, qui reçoit l'a priori en argument.
     pub temporal_weight: f64,
+    /// Mesure de similarité : prise en compte par [`crate::align::register_slices_leave_window_out`] (les images comparées sont normalisées localement avec [`Similarity::Lncc`]) ; ignorée ailleurs. Avec `Lncc`, `suspect_ncc` s'applique à la corrélation des images normalisées (seuil non recalibré).
+    pub similarity: Similarity,
 }
 
 /// Résultat de [`register_slice_robust`].
@@ -945,6 +960,7 @@ impl RobustConfig {
             seed: 8675309,
             batched: false,
             temporal_weight: 0.0,
+            similarity: Similarity::Ncc,
         }
     }
 }
@@ -2113,6 +2129,7 @@ mod tests {
             seed: 7,
             batched: false,
             temporal_weight: 0.0,
+            similarity: Similarity::Ncc,
         };
         let args = || {
             (
@@ -2584,6 +2601,7 @@ mod tests {
         seed: 8675309,
         batched: false,
         temporal_weight: 0.0,
+        similarity: Similarity::Ncc,
     };
 
     /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est

@@ -136,7 +136,6 @@ pub(crate) const PLANCHER_NORMALISATION_LOCALE: f64 = 0.1;
 /// **Normalisation locale d'une coupe dans son masque** : `(I − m) / √(v + ε)` où `m` est la moyenne locale (flou gaussien dans le masque, [`blur_slice_in_mask`]), `v` la variance locale (le même flou de `(I − m)²`) et
 /// `ε = (`[`PLANCHER_NORMALISATION_LOCALE`]` · écart type de l'image dans le masque)²` empêche d'amplifier le bruit là où l'image est presque uniforme. Un gain ou un décalage d'intensité, même lentement variable, disparaît : `a·I + b` (a > 0) donne le même résultat que `I`.
 /// Hors du masque, la valeur d'origine est conservée (jamais lue par le recalage). Une image constante donne 0 dans le masque ; un masque vide, l'image telle quelle.
-#[allow(dead_code)] // branchée à l'étape suivante de F3.1
 pub(crate) fn normalisation_locale_coupe(
     image: ArrayView2<f32>,
     masque: ArrayView2<bool>,

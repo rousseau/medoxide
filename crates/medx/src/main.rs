@@ -85,6 +85,33 @@ impl From<S2vInitArg> for medoxide_svr::pipeline::S2vInit {
     }
 }
 
+/// Mesure de similarité du recalage coupe-volume, telle qu'écrite sur la ligne de commande (`--s2v-similarity`).
+#[derive(Clone, Copy, ValueEnum)]
+enum S2vSimilarityArg {
+    /// Corrélation normalisée globale des intensités
+    Ncc,
+    /// Corrélation des images normalisées localement (moyenne et variance locales)
+    Lncc,
+}
+
+impl From<medoxide_svr::diff::Similarity> for S2vSimilarityArg {
+    fn from(i: medoxide_svr::diff::Similarity) -> Self {
+        match i {
+            medoxide_svr::diff::Similarity::Ncc => Self::Ncc,
+            medoxide_svr::diff::Similarity::Lncc => Self::Lncc,
+        }
+    }
+}
+
+impl From<S2vSimilarityArg> for medoxide_svr::diff::Similarity {
+    fn from(i: S2vSimilarityArg) -> Self {
+        match i {
+            S2vSimilarityArg::Ncc => Self::Ncc,
+            S2vSimilarityArg::Lncc => Self::Lncc,
+        }
+    }
+}
+
 /// Ordre d'acquisition des coupes pour l'a priori temporel, tel qu'écrit sur la ligne de commande (`--slice-timing`).
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SliceTimingArg {
@@ -234,6 +261,9 @@ enum SvrAction {
         /// Avec `--motion s2v` : poids λ (1/mm²) de l'a priori temporel du recalage de chaque coupe (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2v_temporal_weight)]
         s2v_temporal_weight: f64,
+        /// Avec `--motion s2v` : mesure de similarité du recalage de chaque coupe (`lncc` : images normalisées localement, option mesurée en F3.1)
+        #[arg(long, value_enum, default_value_t = ReconstructionConfig::default().s2v_similarity.into())]
+        s2v_similarity: S2vSimilarityArg,
         /// Rejet robuste après la reconstruction : tours « écarter les pixels et coupes incohérents avec le volume, reconstruire » (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().robust_rounds)]
         robust_rounds: usize,
@@ -886,6 +916,7 @@ fn main() -> ExitCode {
                     slice_timing,
                     s2v_init,
                     s2v_temporal_weight,
+                    s2v_similarity,
                     robust_rounds,
                     robust_threshold,
                     slice_scale_rounds,
@@ -921,6 +952,7 @@ fn main() -> ExitCode {
                 s2s_anchor_stack,
                 s2v_init: s2v_init.into(),
                 s2v_temporal_weight,
+                s2v_similarity: s2v_similarity.into(),
                 robust_rounds,
                 robust_threshold,
                 slice_scale_rounds,
@@ -1196,6 +1228,10 @@ mod tests {
         assert_eq!(
             *recon.get_one::<f64>("s2v_temporal_weight").unwrap(),
             config.s2v_temporal_weight
+        );
+        assert_eq!(
+            medoxide_svr::diff::Similarity::from(*recon.get_one::<super::S2vSimilarityArg>("s2v_similarity").unwrap()),
+            config.s2v_similarity
         );
         assert_eq!(
             *recon.get_one::<usize>("slice_scale_rounds").unwrap(),

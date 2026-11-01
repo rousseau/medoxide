@@ -8,7 +8,8 @@ use rayon::prelude::*;
 
 use crate::diff::{
     pose_to_matrix, register_slice_robust, register_slice_robust_with_prior, register_slices_robust_batch,
-    rotation_scale_mm, BatchSlice, BatchSlices, BatchVolumes, RobustConfig, RobustResult, TemporalPrior, VolumeTensors,
+    rotation_scale_mm, BatchSlice, BatchSlices, BatchVolumes, RobustConfig, RobustResult, Similarity, TemporalPrior,
+    VolumeTensors, SIGMA_SIMILARITE_LOCALE_MM,
 };
 use crate::recon::{
     adjoint_sums, normalized_adjoint_with_poses, GridSpec, ReconstructionProblem, SlicePoses, SUPPORT_MIN,
@@ -251,7 +252,7 @@ fn delta_et_rapport(p: &CoupePreparee, si: usize, k: usize, resultat: &RobustRes
 }
 
 /// Référence « sans la fenêtre » de la coupe `k` du stack `si` : `(N − Σ_{|j−k| ≤ window} nⱼ) / (D − Σ dⱼ)`, la somme de la fenêtre étant recalculée ici (sans glissement entre coupes).
-fn reference_de_la_coupe(
+pub(crate) fn reference_de_la_coupe(
     grid: &GridSpec,
     geometrie: &Volume,
     stack: &Stack,
@@ -317,6 +318,16 @@ pub fn register_slices_leave_window_out(
     }
     let (numerateur, denominateur) = adjoint_sums(grid, stacks, poses)?;
     let geometrie = grid.zeros();
+    // Similarité locale (F3.1) : le recalage voit des stacks et des références normalisés localement ; la référence de chaque coupe reste construite des stacks d'origine.
+    let normalises: Option<Vec<Stack>> = (config.similarity == Similarity::Lncc).then(|| {
+        stacks
+            .iter()
+            .map(|s| s.locally_normalised(SIGMA_SIMILARITE_LOCALE_MM))
+            .collect()
+    });
+    let sigma_reference =
+        (config.similarity == Similarity::Lncc).then(|| SIGMA_SIMILARITE_LOCALE_MM / grid.resolution_mm);
+    let vus_par_le_recalage: &[Stack] = normalises.as_deref().unwrap_or(stacks);
     if config.batched && coarse_sigma_voxels == 0.0 && config.temporal_weight <= 0.0 {
         return register_leave_window_out_by_batches(
             grid,
@@ -328,6 +339,8 @@ pub fn register_slices_leave_window_out(
             &geometrie,
             &numerateur,
             &denominateur,
+            vus_par_le_recalage,
+            sigma_reference,
         );
     }
     // Chaque coupe est une tâche indépendante (sa référence, son recalage) : on les lance en parallèle. `collect` garde l'ordre des tâches, donc le résultat ne dépend pas du nombre de threads.
@@ -340,8 +353,9 @@ pub fn register_slices_leave_window_out(
         .par_iter()
         .map(|&(si, k)| {
             let stack = &stacks[si];
+            let vu = &vus_par_le_recalage[si];
             let courante = *poses.get(si, k);
-            let Some(preparee) = preparer_coupe(stack, k, courante) else {
+            let Some(preparee) = preparer_coupe(vu, k, courante) else {
                 return (
                     Matrix4::identity(),
                     SliceReport {
@@ -367,11 +381,15 @@ pub fn register_slices_leave_window_out(
                 &denominateur,
             );
             let reference = Volume::new(image, grid.affine).expect("l'affine d'une grille est inversible");
+            let reference = match sigma_reference {
+                Some(sigma) => reference.locally_normalised(sigma).expect("σ fini et positif"),
+                None => reference,
+            };
             let (delta, rapport) = if coarse_sigma_voxels > 0.0 {
                 // gros vers fin : une passe contre la référence floutée de cette coupe, puis une passe contre la référence nette depuis la pose de la première
                 let floue = reference.blurred(coarse_sigma_voxels).expect("σ validé");
                 let prior1 = prior_temporel(
-                    stack,
+                    vu,
                     poses,
                     si,
                     k,
@@ -389,10 +407,10 @@ pub fn register_slices_leave_window_out(
                     prior1.as_ref(),
                     device,
                 );
-                match preparer_coupe(stack, k, d1 * courante) {
+                match preparer_coupe(vu, k, d1 * courante) {
                     Some(deuxieme) => {
                         let prior2 = prior_temporel(
-                            stack,
+                            vu,
                             poses,
                             si,
                             k,
@@ -416,7 +434,7 @@ pub fn register_slices_leave_window_out(
                 }
             } else {
                 let prior = prior_temporel(
-                    stack,
+                    vu,
                     poses,
                     si,
                     k,
@@ -464,20 +482,34 @@ fn register_leave_window_out_by_batches(
     geometrie: &Volume,
     numerateur: &Array3<f64>,
     denominateur: &Array3<f64>,
+    vus_par_le_recalage: &[Stack],
+    sigma_reference: Option<f64>,
 ) -> Result<AlignmentReport, SvrError> {
     let mut nouvelles = poses.clone();
     let mut rapports = Vec::new();
     for (si, stack) in stacks.iter().enumerate() {
         let nz = stack.dim().2;
-        let preparees: Vec<Option<CoupePreparee>> =
-            (0..nz).map(|k| preparer_coupe(stack, k, *poses.get(si, k))).collect();
+        let preparees: Vec<Option<CoupePreparee>> = (0..nz)
+            .map(|k| preparer_coupe(&vus_par_le_recalage[si], k, *poses.get(si, k)))
+            .collect();
         let retenues: Vec<usize> = (0..nz).filter(|&k| preparees[k].is_some()).collect();
         let mut resultats: Vec<Option<RobustResult>> = vec![None; nz];
         if !retenues.is_empty() {
             // les références (une par coupe retenue) sont indépendantes : calculées en parallèle, puis mises bout à bout
             let references: Vec<Array3<f32>> = retenues
                 .par_iter()
-                .map(|&k| reference_de_la_coupe(grid, geometrie, stack, si, k, poses, window, numerateur, denominateur))
+                .map(|&k| {
+                    let image =
+                        reference_de_la_coupe(grid, geometrie, stack, si, k, poses, window, numerateur, denominateur);
+                    match sigma_reference {
+                        Some(sigma) => Volume::new(image, grid.affine)
+                            .and_then(|v| v.locally_normalised(sigma))
+                            .expect("l'affine d'une grille est inversible, σ fini et positif")
+                            .data()
+                            .clone(),
+                        None => image,
+                    }
+                })
                 .collect();
             let mut voxels = Vec::with_capacity(retenues.len() * grid.dims.0 * grid.dims.1 * grid.dims.2);
             for r in &references {
@@ -1166,11 +1198,11 @@ fn recaler_sans_soi_meme(
     })
 }
 
-fn tenseur_1d(v: &[f64], device: &Device) -> burn::prelude::Tensor<1> {
+pub(crate) fn tenseur_1d(v: &[f64], device: &Device) -> burn::prelude::Tensor<1> {
     burn::prelude::Tensor::<1>::from_floats(v.iter().map(|&x| x as f32).collect::<Vec<_>>().as_slice(), device)
 }
 
-fn vecteurs_vers_tenseur(points: &[Vector3<f64>], device: &Device) -> burn::prelude::Tensor<2> {
+pub(crate) fn vecteurs_vers_tenseur(points: &[Vector3<f64>], device: &Device) -> burn::prelude::Tensor<2> {
     let v: Vec<f32> = points
         .iter()
         .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
