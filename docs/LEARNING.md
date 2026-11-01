@@ -1623,6 +1623,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : l'absence de `SliceTiming` n'est pas une erreur (15 stacks TRUFI sur 41 n'en ont pas) : `None`, et l'appelant retombe sur l'indice.
 - **Où** : `crates/medoxide-svr/src/lib.rs` (`read_slice_timing`, `Stack::set_slice_times`), `crates/medoxide-svr/Cargo.toml` (`serde_json`, déjà dans le graphe).
 
+## 2026-11-01 — Normalisation locale : un plancher relatif ne protège pas d'une image constante
+
+- **Quoi (méthode)** : la normalisation locale `(I − m) / √(v + ε)` (moyenne et variance locales par flou gaussien) rend une image insensible à un gain ou un décalage d'intensité. Le plancher `ε` est un pourcentage de la variance GLOBALE (`ε = (0,1·σ_global)²`) pour ne pas amplifier le bruit là où l'image est presque uniforme ; mais sur une image constante la variance globale est nulle, donc `ε = 0`, et la division compare deux erreurs d'arrondi : le test « constante → 0 » l'a trouvé (valeurs de l'ordre de 1 au lieu de 0). Une garde explicite (variance globale ≤ 1e-10·moyenne²) règle le cas. Moralité : un plancher défini par une grandeur mesurée disparaît avec elle.
+- **Quoi (méthode, tests)** : deux préconditions de mes propres tests étaient fausses (une rampe de contraste ×8 ne donne qu'un rapport ≈ 2,7 entre les bandes mesurées ; une transformation `3v + 40` qui laisse les zéros à zéro n'est pas affine). Écrire dans le test la précondition (`assert!(avant > 3.0)`) a révélé la première tout de suite. Les mutants (variance non lissée, moyenne sans masque) sont tués ; le premier a demandé d'ajouter un critère (l'écart type de `|valeur|`).
+- **Où** : `crates/medoxide-svr/src/s2s.rs` (`normalisation_locale_coupe`), `crates/medoxide-svr/src/lib.rs` (`Volume::locally_normalised`, `Stack::locally_normalised`), `crates/medoxide-svr/src/recon.rs` (`the_local_normalisation_removes_gain_and_offset_and_respects_the_mask`).
+
 ---
 
 *(à compléter à la prochaine étape)*

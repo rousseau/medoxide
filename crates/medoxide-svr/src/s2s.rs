@@ -130,6 +130,52 @@ pub(crate) fn blur_slice_in_mask(image: ArrayView2<f32>, masque: ArrayView2<bool
     sortie
 }
 
+/// Part de l'écart type global de l'image dans le plancher de variance de la normalisation locale ([`normalisation_locale_coupe`], [`crate::Volume::locally_normalised`]) : `ε = (0,1 · écart type global)²`. Fixée a priori (F3.1), non réglée sur une mesure.
+pub(crate) const PLANCHER_NORMALISATION_LOCALE: f64 = 0.1;
+
+/// **Normalisation locale d'une coupe dans son masque** : `(I − m) / √(v + ε)` où `m` est la moyenne locale (flou gaussien dans le masque, [`blur_slice_in_mask`]), `v` la variance locale (le même flou de `(I − m)²`) et
+/// `ε = (`[`PLANCHER_NORMALISATION_LOCALE`]` · écart type de l'image dans le masque)²` empêche d'amplifier le bruit là où l'image est presque uniforme. Un gain ou un décalage d'intensité, même lentement variable, disparaît : `a·I + b` (a > 0) donne le même résultat que `I`.
+/// Hors du masque, la valeur d'origine est conservée (jamais lue par le recalage). Une image constante donne 0 dans le masque ; un masque vide, l'image telle quelle.
+#[allow(dead_code)] // branchée à l'étape suivante de F3.1
+pub(crate) fn normalisation_locale_coupe(
+    image: ArrayView2<f32>,
+    masque: ArrayView2<bool>,
+    sigma_pixels: f64,
+) -> Array2<f32> {
+    let valeurs: Vec<f64> = image
+        .iter()
+        .zip(masque.iter())
+        .filter(|(_, &m)| m)
+        .map(|(&v, _)| f64::from(v))
+        .collect();
+    let mut sortie = image.to_owned();
+    if valeurs.is_empty() {
+        return sortie;
+    }
+    let moyenne_globale = valeurs.iter().sum::<f64>() / valeurs.len() as f64;
+    let variance_globale = valeurs.iter().map(|v| (v - moyenne_globale).powi(2)).sum::<f64>() / valeurs.len() as f64;
+    // image (quasi) constante : plancher nul, la division ne comparerait que des erreurs d'arrondi ; rien à normaliser, 0 dans le masque
+    if variance_globale <= 1e-10 * moyenne_globale.powi(2) {
+        for ((i, j), v) in sortie.indexed_iter_mut() {
+            if masque[[i, j]] {
+                *v = 0.0;
+            }
+        }
+        return sortie;
+    }
+    let plancher = PLANCHER_NORMALISATION_LOCALE.powi(2) * variance_globale;
+    let moyenne = blur_slice_in_mask(image, masque, sigma_pixels);
+    let carres = Array2::from_shape_fn(image.dim(), |(i, j)| (image[[i, j]] - moyenne[[i, j]]).powi(2));
+    let variance = blur_slice_in_mask(carres.view(), masque, sigma_pixels);
+    for ((i, j), v) in sortie.indexed_iter_mut() {
+        if masque[[i, j]] {
+            *v = ((f64::from(image[[i, j]]) - f64::from(moyenne[[i, j]]))
+                / (f64::from(variance[[i, j]]) + plancher).sqrt()) as f32;
+        }
+    }
+    sortie
+}
+
 impl SliceAtlas {
     /// Construit l'atlas de `stacks` (masques requis) sur `device`.
     ///

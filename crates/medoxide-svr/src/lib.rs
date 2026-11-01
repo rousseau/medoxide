@@ -374,6 +374,41 @@ impl Volume {
         })
     }
 
+    /// **Normalisation locale** du volume : `(I − m) / √(v + ε)` avec `m` la moyenne locale (flou gaussien 3D de `sigma_voxels`, [`Volume::blurred`]), `v` la variance locale (le même flou de `(I − m)²`) et
+    /// `ε = (0,1 · écart type global des voxels non nuls)²`. Un gain ou un décalage d'intensité, même lentement variable, disparaît (`a·I + b`, `a > 0`, donne le même volume). Les voxels exactement nuls (hors support d'une référence) restent nuls.
+    ///
+    /// # Erreurs
+    /// [`SvrError::InvalidBlur`] si `sigma_voxels` est négatif ou non fini.
+    pub fn locally_normalised(&self, sigma_voxels: f64) -> Result<Volume, SvrError> {
+        let moyenne = self.blurred(sigma_voxels)?;
+        let non_nuls: Vec<f64> = self.data.iter().filter(|&&v| v != 0.0).map(|&v| f64::from(v)).collect();
+        if non_nuls.is_empty() {
+            return Ok(self.clone());
+        }
+        let m_globale = non_nuls.iter().sum::<f64>() / non_nuls.len() as f64;
+        let v_globale = non_nuls.iter().map(|v| (v - m_globale).powi(2)).sum::<f64>() / non_nuls.len() as f64;
+        // volume (quasi) constant : rien à normaliser, 0 partout (les voxels nuls le sont déjà)
+        if v_globale <= 1e-10 * m_globale.powi(2) {
+            let mut zeros = self.clone();
+            zeros.data.fill(0.0);
+            return Ok(zeros);
+        }
+        let plancher = s2s::PLANCHER_NORMALISATION_LOCALE.powi(2) * v_globale;
+        let mut carres = self.clone();
+        carres.data.zip_mut_with(&moyenne.data, |v, &m| *v = (*v - m).powi(2));
+        let variance = carres.blurred(sigma_voxels)?;
+        let mut sortie = self.clone();
+        ndarray::Zip::from(&mut sortie.data)
+            .and(&moyenne.data)
+            .and(&variance.data)
+            .for_each(|v, &m, &var| {
+                if *v != 0.0 {
+                    *v = ((f64::from(*v) - f64::from(m)) / (f64::from(var) + plancher).sqrt()) as f32;
+                }
+            });
+        Ok(sortie)
+    }
+
     /// Indices de voxel **continus** `(i, j, k)` d'un point du monde (les centres de voxel sont aux entiers).
     pub fn voxel_coordinates(&self, monde: &Vector3<f64>) -> Vector3<f64> {
         (self.inverse * monde.push(1.0)).xyz()
@@ -1073,6 +1108,25 @@ impl Stack {
         for ((i, j, k), v) in copie.data.indexed_iter_mut() {
             let x = (affine * Vector4::new(i as f64, j as f64, k as f64, 1.0)).xyz();
             *v = (f64::from(*v) / log_champ(&x).exp()) as f32;
+        }
+        copie
+    }
+
+    /// Copie du stack dont chaque coupe est **normalisée localement** dans son masque ([`s2s::normalisation_locale_coupe`], écart type `sigma_mm` converti en pixels avec le pas moyen dans le plan) : l'image que voit le recalage quand la similarité est locale (F3.1). Dans le plan seulement : les coupes ne se mélangent jamais (leurs poses diffèrent). Sans masque, copie telle quelle.
+    #[allow(dead_code)] // branchée à l'étape suivante de F3.1
+    pub(crate) fn locally_normalised(&self, sigma_mm: f64) -> Stack {
+        let mut copie = self.clone();
+        let Some(masque) = self.mask.as_ref() else {
+            return copie;
+        };
+        let pas = (self.spacing()[0] + self.spacing()[1]) / 2.0;
+        for k in 0..self.data.dim().2 {
+            let normalisee = s2s::normalisation_locale_coupe(
+                self.data.index_axis(Axis(2), k),
+                masque.voxels().index_axis(Axis(2), k),
+                sigma_mm / pas,
+            );
+            copie.data.index_axis_mut(Axis(2), k).assign(&normalisee);
         }
         copie
     }

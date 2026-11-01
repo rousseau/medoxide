@@ -9856,6 +9856,131 @@ mod tests {
         assert_eq!(format!("{:?}", s2s_config(&c)), format!("{attendu:?}"));
     }
 
+    /// Normalisation locale (F3.1, critères fixés avant) : (a) un gain et un décalage d'intensité constants ne changent rien : `a·I + b` (a > 0, constants) donne la même coupe et le même volume à 1e-3 près ; (b) une image constante donne 0 dans le masque ;
+    /// (c) un pixel hors du masque n'influence AUCUN pixel de masque et reste inchangé ; (d) une texture dont le contraste est multiplié par 31 de gauche à droite a, une fois normalisée, des écarts types des bandes gauche et droite à moins de 1,5 l'un de l'autre (contre un rapport de plus de 3 avant) ; (e) un stack est normalisé coupe par coupe (deux coupes
+    /// différentes ne se mélangent pas) et son masque est conservé ; (f) les voxels nuls d'un volume restent nuls ; (g) la variance locale est lissée (|valeur| varie d'un pixel à l'autre).
+    #[test]
+    fn the_local_normalisation_removes_gain_and_offset_and_respects_the_mask() {
+        use crate::s2s::normalisation_locale_coupe;
+        use ndarray::{Array2, Array3};
+        let (nx, ny) = (48usize, 40usize);
+        let plein = Array2::from_elem((nx, ny), true);
+        let demi = Array2::from_shape_fn((nx, ny), |(i, j)| i + j > 20 && i < 42);
+        let mut alea = Alea(21);
+        let bruit = Array2::from_shape_fn((nx, ny), |_| (alea.suivant() * 100.0) as f32);
+        let sigma = 4.0;
+        // (a), coupe : gain 3 et décalage 40 ; gain lentement variable : une rampe multiplicative n'est PAS exactement annulée, on ne la teste donc qu'en (d)
+        let n0 = normalisation_locale_coupe(bruit.view(), demi.view(), sigma);
+        let n1 = normalisation_locale_coupe(bruit.mapv(|v| 3.0 * v + 40.0).view(), demi.view(), sigma);
+        for ((i, j), &v) in n0.indexed_iter() {
+            if demi[[i, j]] {
+                assert!(
+                    (v - n1[[i, j]]).abs() < 1e-3,
+                    "gain/décalage en ({i},{j}) : {v} contre {}",
+                    n1[[i, j]]
+                );
+            }
+        }
+        // (b)
+        let constante = Array2::from_elem((nx, ny), 7.5_f32);
+        let nc = normalisation_locale_coupe(constante.view(), demi.view(), sigma);
+        assert!(nc
+            .indexed_iter()
+            .filter(|(idx, _)| demi[*idx])
+            .all(|(_, &v)| v.abs() < 1e-4));
+        // (c)
+        let mut modifiee = bruit.clone();
+        for ((i, j), v) in modifiee.indexed_iter_mut() {
+            if !demi[[i, j]] {
+                *v += 1000.0;
+            }
+        }
+        let nm = normalisation_locale_coupe(modifiee.view(), demi.view(), sigma);
+        for ((i, j), &v) in nm.indexed_iter() {
+            if demi[[i, j]] {
+                assert!(
+                    (v - n0[[i, j]]).abs() < 1e-3,
+                    "un pixel hors masque a contribué en ({i},{j})"
+                );
+            } else {
+                assert_eq!(v, modifiee[[i, j]], "un pixel hors masque a été modifié en ({i},{j})");
+            }
+        }
+        // (g) la variance locale est lissée : sans lissage, chaque pixel serait divisé par son propre écart à la moyenne et |valeur| vaudrait ≈ 1 partout (écart type de |valeur| nul)
+        let absolues: Vec<f64> = n0
+            .indexed_iter()
+            .filter(|(idx, _)| demi[*idx])
+            .map(|(_, &v)| f64::from(v).abs())
+            .collect();
+        let m_abs = absolues.iter().sum::<f64>() / absolues.len() as f64;
+        let e_abs = (absolues.iter().map(|x| (x - m_abs).powi(2)).sum::<f64>() / absolues.len() as f64).sqrt();
+        assert!(e_abs > 0.2, "écart type de |valeur| : {e_abs}");
+        // (d)
+        let rampe = Array2::from_shape_fn((nx, ny), |(i, j)| {
+            bruit[[i, j]] * (1.0 + 30.0 * i as f32 / (nx - 1) as f32)
+        });
+        let ecart = |image: &Array2<f32>, gauche: bool| {
+            let colonnes = if gauche { 6..14 } else { nx - 14..nx - 6 };
+            let v: Vec<f64> = image
+                .indexed_iter()
+                .filter(|((i, _), _)| colonnes.contains(i))
+                .map(|(_, &x)| f64::from(x))
+                .collect();
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+        };
+        let avant = ecart(&rampe, false) / ecart(&rampe, true);
+        let nr = normalisation_locale_coupe(rampe.view(), plein.view(), 5.0);
+        let apres = ecart(&nr, false) / ecart(&nr, true);
+        assert!(
+            avant > 3.0,
+            "le contraste de départ devrait croître d'un facteur supérieur à 3 entre les bandes : {avant}"
+        );
+        assert!(
+            apres < 1.5 && apres > 1.0 / 1.5,
+            "rapport après normalisation : {apres}"
+        );
+        // (a), volume sans voxel nul : gain 3 et décalage 40
+        let (a, b, c) = (14usize, 12usize, 10usize);
+        let volume = Array3::from_shape_fn((a, b, c), |_| 1.0 + (alea.suivant() * 100.0) as f32);
+        let v0 = Volume::new(volume.clone(), Matrix4::identity()).unwrap();
+        let v1 = Volume::new(volume.mapv(|v| 3.0 * v + 40.0), Matrix4::identity()).unwrap();
+        let (n0v, n1v) = (v0.locally_normalised(2.0).unwrap(), v1.locally_normalised(2.0).unwrap());
+        for (x, y) in n0v.data().iter().zip(n1v.data().iter()) {
+            assert!((x - y).abs() < 1e-2, "volume : gain/décalage {x} contre {y}");
+        }
+        // (f) les voxels nuls restent nuls
+        let mut avec_zeros = volume.clone();
+        for i in 0..a {
+            avec_zeros[[i, 0, 0]] = 0.0;
+        }
+        let nz = Volume::new(avec_zeros, Matrix4::identity())
+            .unwrap()
+            .locally_normalised(2.0)
+            .unwrap();
+        for i in 0..a {
+            assert_eq!(nz.data()[[i, 0, 0]], 0.0, "un voxel nul doit rester nul");
+        }
+        // (e) stack : chaque coupe est celle que donne la fonction de coupe, avec σ converti en pixels ; le masque est conservé
+        let t = Temp::new("normalisation_locale_stack");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let stack = &stacks[0];
+        let normalise = stack.locally_normalised(6.0);
+        assert_eq!(
+            normalise.brain_mask().unwrap().voxels(),
+            stack.brain_mask().unwrap().voxels()
+        );
+        let pas = (stack.spacing()[0] + stack.spacing()[1]) / 2.0;
+        for k in 0..stack.dim().2 {
+            let attendu = normalisation_locale_coupe(
+                stack.data().index_axis(ndarray::Axis(2), k),
+                stack.brain_mask().unwrap().voxels().index_axis(ndarray::Axis(2), k),
+                6.0 / pas,
+            );
+            assert_eq!(normalise.data().index_axis(ndarray::Axis(2), k), attendu, "coupe {k}");
+        }
+    }
+
     /// Flou d'une coupe dans son masque (critères fixés avant) : (a) `sigma = 0` rend l'image telle quelle ; (b) une image constante reste constante dans le masque, quel que soit le masque et quel que soit σ ; (c) un pixel hors du masque ne contribue à AUCUN
     /// pixel de masque (changer ses valeurs ne change pas la sortie dans le masque) et sa valeur de sortie est inchangée ; (d) avec un masque plein, une impulsion unité donne un noyau gaussien (somme 1 loin des bords, valeur centrale
     /// 1/(2πσ²) à 1 % près pour σ = 3) ; (e) un σ plus grand lisse davantage (la variance de l'image diminue).
