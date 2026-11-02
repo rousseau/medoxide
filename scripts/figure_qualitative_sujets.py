@@ -7,6 +7,7 @@ choisi sans regarder les images), avec la même fenêtre d'intensité (0 à 99,5
 avant d'examiner les images. Les identifiants de sujets sont passés en arguments (aucun dans le code). Données de patientes : la figure est écrite dans docs/svr/figures/ (ignoré par Git), à ne pas publier.
 
 Fichiers lus dans data/svr/results/<sujet>/ : f21/entete_h<h>, svrtk_sans<h>, nesvor_sans<h>, niftymic_sans<h>, fig/s2v_h<h>, f21/sc1_h<h> (chacun `.nii.gz` et `.nii.gz.juge.tsv`).
+Mise à jour 2026-11-02 : `fig/s2v_h1` (6 sujets de développement) vient de la mesure F3.1 (`f31/juge/ncc_h1`, binaire de 12f7d86, défauts actuels, départ `stacks-bias`) ; les volumes d'avant (binaire 0d1b10c, dont le défaut CLI était `--s2v-init header` ; les options passées n'étaient pas enregistrées) sont dans `fig/archive_avant_f31/`. `f21/sc1_h1` est inchangé : recalcul aux défauts actuels (un sujet calme, repli 1) identique bit à bit.
 
 Usage : python scripts/figure_qualitative_sujets.py --sujets sub-A sub-B ... --etiquettes "calme 1" ... [--repli 1]
 """
