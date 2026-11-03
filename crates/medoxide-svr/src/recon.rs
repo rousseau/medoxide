@@ -8296,6 +8296,7 @@ mod tests {
                 sweeps: 0,
                 coarse_sweeps: 0,
                 block_levels: 1,
+                block_parallel_gradient: true,
                 ..crate::pipeline::s2s_config(&base)
             },
             &device,

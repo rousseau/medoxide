@@ -496,7 +496,7 @@ pub fn reconstruct(
     }
 }
 
-/// Stacks et poses de départ de la boucle coupe-volume selon `config.s2v_init` : `Header` rend les `stacks` et les poses de l'en-tête tels quels ; `Stacks` et `StacksBias` font d'abord l'alignement par stack entier du coupe-coupe (`block_levels = 1`, aucun balayage par coupe, grossier compris), `StacksBias` sur des stacks corrigés du biais, estimé aux poses de l'en-tête puis réestimé aux poses alignées (les stacks rendus sont alors corrigés).
+/// Stacks et poses de départ de la boucle coupe-volume selon `config.s2v_init` : `Header` rend les `stacks` et les poses de l'en-tête tels quels ; `Stacks` et `StacksBias` font d'abord l'alignement par stack entier du coupe-coupe (`block_levels = 1`, aucun balayage par coupe, grossier compris), `StacksBias` sur des stacks corrigés du biais, estimé aux poses de l'en-tête puis réestimé aux poses alignées (les stacks rendus sont alors corrigés). Le gradient des blocs y est toujours calculé en parallèle, quel que soit `s2s_block_parallel_gradient`.
 pub(crate) fn s2v_start(
     stacks: &[Stack],
     header_poses: SlicePoses,
@@ -521,6 +521,8 @@ pub(crate) fn s2v_start(
         sweeps: 0,
         coarse_sweeps: 0,
         block_levels: config.s2s_block_levels.max(1),
+        // gradient des blocs coupe par coupe en parallèle : −15 % de temps mural sur le s2v complet, juge, netteté et concordance inchangés (mesure B1, 6 sujets de développement)
+        block_parallel_gradient: true,
         ..s2s_config(config)
     };
     let poses = phase("alignement par stack (départ coupe-volume)", || {
