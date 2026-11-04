@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive", "env"] }
 nifti = "0.18"
 # Même version que celle utilisée par nifti (un seul ndarray dans le binaire).
 ndarray = "0.17"
-# Burn 0.22.1 (stable), même version que surfoxide (gyroxide suivra).
+# Burn 0.22.1 (stable), même version que surfoxide et gyroxide.
 # default-features = false : on évite l'entraînement (autodiff, optim, rl) dont
 # on n'a pas besoin pour de l'inférence.
 burn = { version = "0.22.1", default-features = false, features = ["std", "wgpu"] }
