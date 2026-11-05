@@ -4,5 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Téléchargement des poids des modèles au premier usage (module `cache`) : client HTTP bloquant et SHA-256.
+ureq = { workspace = true }
+sha2 = { workspace = true }
 nifti = { workspace = true }
 ndarray = { workspace = true }

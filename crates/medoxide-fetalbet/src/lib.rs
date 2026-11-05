@@ -7,16 +7,13 @@
 //! Le modèle est celui de Fetal-BET (Faghihpirayesh et al., 2024, CC BY 4.0) :
 //! voir l'attribution complète dans `model.rs` et dans le `README.md` racine.
 
-use std::ffi::OsString;
-use std::fs::File;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+
+use medoxide_core::cache::{cache_dir_from, download_verified};
 
 use burn::tensor::{Device, Tensor, TensorData};
 use medoxide_core::{read_volume, volume_info, CoreError};
 use ndarray::{s, Array2, Array3, Array4, Axis};
-use sha2::{Digest, Sha256};
 
 mod model;
 
@@ -334,78 +331,6 @@ const MODEL_SHA256: &str = "a70bcbe8da5f791b751c293a851505eb1aa9aa44c50def0afc41
 /// Nom du fichier de poids dans le dossier de cache.
 const MODEL_FILE: &str = "attunet.bpk";
 
-/// Dossier de cache de medoxide : `$XDG_CACHE_HOME/medoxide`, sinon
-/// `$HOME/.cache/medoxide`. `None` si aucune de ces variables n'est définie.
-/// Les valeurs sont passées en paramètres pour pouvoir tester sans toucher à
-/// l'environnement du processus.
-fn cache_dir_from(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let base = match xdg_cache_home.filter(|v| !v.is_empty()) {
-        Some(xdg) => PathBuf::from(xdg),
-        // `?` fonctionne aussi sur un `Option` : si `home` est vide ou absent, la
-        // fonction renvoie `None` immédiatement.
-        None => PathBuf::from(home.filter(|v| !v.is_empty())?).join(".cache"),
-    };
-    Some(base.join("medoxide"))
-}
-
-/// Télécharge `url` vers `dest` et vérifie son SHA-256.
-///
-/// Le contenu est écrit par blocs dans un fichier temporaire voisin (`.part`),
-/// haché au fur et à mesure, puis renommé en `dest` seulement si l'empreinte est
-/// la bonne : un téléchargement interrompu ou corrompu ne laisse jamais un faux
-/// fichier de poids. Une progression par tranche de 10 % est écrite sur stderr.
-fn download_verified(url: &str, dest: &Path, expected_sha256: &str) -> Result<(), MaskError> {
-    let echec = |contexte: &str, e: &dyn std::fmt::Display| MaskError::ModelDownload(format!("{contexte} : {e}"));
-    let partiel = dest.with_extension("part");
-
-    let resultat = (|| {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_global(Some(Duration::from_secs(30 * 60)))
-            .build()
-            .into();
-        let reponse = agent.get(url).call().map_err(|e| echec(url, &e))?;
-        let total = reponse.body().content_length();
-        let mut lecteur = reponse.into_body().into_reader();
-
-        let mut fichier = File::create(&partiel).map_err(|e| echec(&partiel.display().to_string(), &e))?;
-        let mut hachage = Sha256::new();
-        let mut tampon = vec![0u8; 64 * 1024];
-        let (mut recu, mut dernier_pourcent) = (0u64, 0u64);
-        loop {
-            let n = lecteur.read(&mut tampon).map_err(|e| echec("lecture réseau", &e))?;
-            if n == 0 {
-                break;
-            }
-            hachage.update(&tampon[..n]);
-            fichier.write_all(&tampon[..n]).map_err(|e| echec("écriture", &e))?;
-            recu += n as u64;
-            if let Some(total) = total.filter(|&t| t > 0) {
-                let pourcent = recu * 100 / total / 10 * 10;
-                if pourcent > dernier_pourcent {
-                    dernier_pourcent = pourcent;
-                    eprintln!("  {pourcent} %");
-                }
-            }
-        }
-        fichier.flush().map_err(|e| echec("écriture", &e))?;
-
-        // Le résultat est un tableau d'octets : chacun s'écrit sur 2 chiffres hexadécimaux.
-        let obtenu: String = hachage.finalize().iter().map(|o| format!("{o:02x}")).collect();
-        if obtenu != expected_sha256 {
-            return Err(MaskError::ModelDownload(format!(
-                "SHA-256 inattendu (obtenu {obtenu}, attendu {expected_sha256})"
-            )));
-        }
-        std::fs::rename(&partiel, dest).map_err(|e| echec(&dest.display().to_string(), &e))
-    })();
-
-    if resultat.is_err() {
-        let _ = std::fs::remove_file(&partiel); // nettoyage ; l'erreur d'origine prime
-    }
-    resultat
-}
-
 /// Chemin des poids par défaut du modèle, téléchargés au besoin.
 ///
 /// Les poids sont cherchés dans le cache (`$XDG_CACHE_HOME/medoxide/attunet.bpk`,
@@ -433,7 +358,7 @@ pub fn default_model_path() -> Result<PathBuf, MaskError> {
         "Téléchargement des poids du modèle (121 Mo) vers {}\n  depuis {MODEL_URL}",
         chemin.display()
     );
-    download_verified(MODEL_URL, &chemin, MODEL_SHA256)?;
+    download_verified(MODEL_URL, &chemin, MODEL_SHA256).map_err(|e| MaskError::ModelDownload(e.to_string()))?;
     eprintln!("Poids téléchargés et vérifiés.");
     Ok(chemin)
 }
@@ -927,46 +852,6 @@ mod tests {
             Some(Path::new(&format!("{racine}/models/attunet.bpk"))),
         );
         assert!(matches!(r, Err(MaskError::OutputDirNotFound(_))), "{r:?}");
-    }
-
-    #[test]
-    fn cache_dir_prefers_xdg_then_home() {
-        let os = |v: &str| Some(OsString::from(v));
-        assert_eq!(
-            cache_dir_from(os("/xdg"), os("/home/u")),
-            Some(PathBuf::from("/xdg/medoxide"))
-        );
-        assert_eq!(
-            cache_dir_from(None, os("/home/u")),
-            Some(PathBuf::from("/home/u/.cache/medoxide"))
-        );
-        // Variables vides : traitées comme absentes.
-        assert_eq!(
-            cache_dir_from(os(""), os("/home/u")),
-            Some(PathBuf::from("/home/u/.cache/medoxide"))
-        );
-        assert_eq!(cache_dir_from(None, None), None);
-        assert_eq!(cache_dir_from(os(""), os("")), None);
-    }
-
-    /// Réseau : une empreinte fausse est refusée et ne laisse aucun fichier.
-    /// Lancer avec `cargo test -p medoxide-fetalbet -- --ignored download_rejects`.
-    #[test]
-    #[ignore = "nécessite le réseau"]
-    fn download_rejects_wrong_checksum_and_cleans_up() {
-        let dossier = std::env::temp_dir().join(format!("medoxide_dl_{}", std::process::id()));
-        std::fs::create_dir_all(&dossier).unwrap();
-        let dest = dossier.join("fiche.md");
-        // Petit fichier du dépôt Hugging Face (la fiche), avec une empreinte volontairement fausse.
-        let url = "https://huggingface.co/rousseau/medoxide-fetalbet/resolve/main/README.md";
-        let r = download_verified(url, &dest, &"0".repeat(64));
-        let reste = std::fs::read_dir(&dossier).unwrap().count();
-        std::fs::remove_dir_all(&dossier).unwrap();
-        assert!(
-            matches!(r, Err(MaskError::ModelDownload(ref m)) if m.contains("SHA-256")),
-            "{r:?}"
-        );
-        assert_eq!(reste, 0, "fichier résiduel après un échec");
     }
 
     /// Étape 8 : `segment` de bout en bout (fichier NIfTI → fichier NIfTI) contre

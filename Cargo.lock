@@ -3943,6 +3943,8 @@ version = "0.1.0"
 dependencies = [
  "ndarray 0.17.2",
  "nifti",
+ "sha2 0.11.0",
+ "ureq 3.4.2",
 ]
 
 [[package]]
@@ -3954,8 +3956,6 @@ dependencies = [
  "medoxide-core",
  "ndarray 0.17.2",
  "nifti",
- "sha2 0.11.0",
- "ureq 3.4.2",
 ]
 
 [[package]]
