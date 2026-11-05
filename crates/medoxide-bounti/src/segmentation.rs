@@ -22,20 +22,25 @@ const COTE_TISSUS: usize = 256;
 /// Machine de calcul des réseaux.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Calcul {
-    /// GPU (wgpu : Metal sur Mac, Vulkan sous Linux).
+    /// GPU NVIDIA par CUDA (crate compilé avec la feature `cuda`).
+    Cuda,
+    /// GPU par wgpu (Metal sur Mac, Vulkan sous Linux).
     Gpu,
     /// CPU de la machine (backend `flex` de Burn), plus lent (BOUNTI : 2 min 19 s sur la PGX, 58 s sur le GPU d'un Mac M4 Pro).
     Cpu,
 }
 
 impl Calcul {
-    /// Machine par défaut : le GPU sous macOS (Metal), le CPU ailleurs.
+    /// Machine par défaut, la plus rapide que la machine offre : CUDA si le crate est compilé avec la feature `cuda` et qu'un
+    /// pilote NVIDIA est chargé, sinon le GPU sous macOS (Metal), sinon le CPU.
     ///
-    /// Sous Linux, wgpu passe par Vulkan : à 256³, les réseaux demandent un tampon de 2 Gio (2³¹ octets) que Vulkan refuse
+    /// Pas de wgpu sous Linux : wgpu y passe par Vulkan : à 256³, les réseaux demandent un tampon de 2 Gio (2³¹ octets) que Vulkan refuse
     /// (« can't allocate buffer of size: 2147483648 », sur la PGX comme sur la RTX 2080 Ti, novembre 2026), quelle que soit la
     /// mémoire de la carte. Metal l'accepte.
     pub fn par_defaut() -> Calcul {
-        if cfg!(target_os = "macos") {
+        if cfg!(feature = "cuda") && medoxide_core::machine::gpu_nvidia() {
+            Calcul::Cuda
+        } else if cfg!(target_os = "macos") {
             Calcul::Gpu
         } else {
             Calcul::Cpu
@@ -43,9 +48,16 @@ impl Calcul {
     }
 
     /// Appareil Burn correspondant.
+    ///
+    /// # Panique
+    /// Pour [`Calcul::Cuda`] si le crate est compilé sans la feature `cuda` (`medx` le refuse avant).
     pub fn appareil(self) -> Device {
         match self {
-            Calcul::Gpu => Device::default(),
+            #[cfg(feature = "cuda")]
+            Calcul::Cuda => Device::cuda(0),
+            #[cfg(not(feature = "cuda"))]
+            Calcul::Cuda => panic!("medoxide-bounti compilé sans la feature cuda"),
+            Calcul::Gpu => Device::wgpu(burn::tensor::DeviceKind::DefaultDevice),
             Calcul::Cpu => Device::flex(),
         }
     }
@@ -251,10 +263,12 @@ mod tests {
         }
     }
 
-    /// Machine par défaut : le GPU seulement sous macOS (voir [`Calcul::par_defaut`]).
+    /// Machine par défaut : CUDA s'il est compilé et qu'un pilote NVIDIA est chargé, sinon le GPU seulement sous macOS (voir [`Calcul::par_defaut`]).
     #[test]
-    fn the_default_machine_is_the_gpu_only_on_macos() {
-        let attendue = if cfg!(target_os = "macos") {
+    fn the_default_machine_is_cuda_then_the_gpu_on_macos_then_the_cpu() {
+        let attendue = if cfg!(feature = "cuda") && medoxide_core::machine::gpu_nvidia() {
+            Calcul::Cuda
+        } else if cfg!(target_os = "macos") {
             Calcul::Gpu
         } else {
             Calcul::Cpu

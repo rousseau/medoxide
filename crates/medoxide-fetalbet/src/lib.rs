@@ -373,6 +373,16 @@ pub fn default_model_path() -> Result<PathBuf, MaskError> {
 /// si l'entrée est invalide ; `MaskError::ModelDownload` si le téléchargement des
 /// poids par défaut échoue. Un fichier de poids présent mais invalide fait
 /// paniquer le chargement du modèle (code généré).
+/// Device du réseau : CUDA si le crate est compilé avec la feature `cuda` et qu'un pilote NVIDIA est chargé, sinon le GPU
+/// par wgpu (Metal sur Mac, Vulkan sous Linux ; à défaut de GPU, wgpu se rabat sur un rendu logiciel).
+fn appareil() -> Device {
+    #[cfg(feature = "cuda")]
+    if medoxide_core::machine::gpu_nvidia() {
+        return Device::cuda(0);
+    }
+    Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
+}
+
 pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>) -> Result<(), MaskError> {
     if let Some(chemin) = model_path {
         if !chemin.exists() {
@@ -399,7 +409,7 @@ pub fn segment(input_path: &Path, output_path: &Path, model_path: Option<&Path>)
     let mut prep = resample_in_plane(&volume, spacing);
     normalize_slices(&mut prep);
 
-    let device = Device::default();
+    let device = appareil();
     let modele = model::Model::from_file(&model_path, &device);
     let logits = infer_logits(&modele, &device, &prep);
 

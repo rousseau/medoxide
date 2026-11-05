@@ -15,3 +15,7 @@ nifti = { workspace = true }
 # Tenseurs, différentiation automatique et optimiseurs pour le recalage des coupes (étape 3).
 # `flex` : backend CPU de Burn (Rust pur), déterministe, sans GPU ; utilisé par les tests et par `--device cpu`.
 burn = { workspace = true, features = ["autodiff", "optim", "flex"] }
+
+[features]
+# GPU NVIDIA par CUDA (`--device cuda`) ; le recalage reste sur CPU par défaut (voir `pipeline::default_device_kind`).
+cuda = ["burn/cuda"]

@@ -4,11 +4,12 @@
 //! dépend d'aucun module (ni de Burn, ni d'un modèle) : un module peut lire un
 //! volume sans en tirer les dépendances d'un autre.
 //!
-//! Les chemins et fichiers communs aux sorties BIDS des commandes `medx` sont dans [`bids`], l'écriture de JSON dans [`json`], la lecture des tableaux de sortie (qualité et mouvement par coupe, table des étiquettes) dans [`sorties`], le dossier de cache et le téléchargement vérifié des poids dans [`cache`].
+//! Les chemins et fichiers communs aux sorties BIDS des commandes `medx` sont dans [`bids`], l'écriture de JSON dans [`json`], la lecture des tableaux de sortie (qualité et mouvement par coupe, table des étiquettes) dans [`sorties`], le dossier de cache et le téléchargement vérifié des poids dans [`cache`], ce que la machine offre pour le calcul (pilote NVIDIA) dans [`machine`].
 
 pub mod bids;
 pub mod cache;
 pub mod json;
+pub mod machine;
 pub mod sorties;
 
 use std::path::Path;

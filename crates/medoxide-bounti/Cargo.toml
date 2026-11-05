@@ -15,3 +15,7 @@ ndarray = { workspace = true }
 nalgebra = { workspace = true }
 # Écriture des étiquettes et du masque en NIfTI.
 nifti = { workspace = true }
+
+[features]
+# GPU NVIDIA par CUDA (sous Linux : pas de plafond de 2 Gio par tampon comme avec Vulkan) ; compilation plus longue.
+cuda = ["burn/cuda"]

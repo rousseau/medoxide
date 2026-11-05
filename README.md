@@ -26,6 +26,11 @@ cargo build --release
 Pour utiliser un fichier de poids local (hors ligne), passez `--model` ou définissez
 `MEDOXIDE_MODEL`.
 
+Sous Linux avec un GPU NVIDIA, compiler avec CUDA (CUDA Toolkit requis ; sous Linux aarch64, lier avec `lld`) :
+`cargo build --release --features cuda`. Les réseaux (`fetalbet`, `bounti`, `multibounti`) choisissent alors CUDA
+d'eux-mêmes ; sans CUDA, ils tournent sur le GPU sous macOS (Metal) et sur le CPU sous Linux (Vulkan refuse les
+tampons de 2 Go dont BOUNTI a besoin). `--device` force un choix.
+
 Reconstruction d'un volume à partir de stacks (au moins deux, de plans différents, avec un
 masque cérébral chacun, par exemple obtenus par `medx fetalbet`) :
 

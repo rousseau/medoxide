@@ -24,6 +24,8 @@ pub enum DeviceKind {
     Wgpu,
     /// CPU de la machine, par le backend `flex` de Burn (Rust pur, déterministe).
     Cpu,
+    /// GPU NVIDIA par CUDA (crate compilé avec la feature `cuda`) ; à demander explicitement, comme `Wgpu`.
+    Cuda,
 }
 
 /// Device par défaut d'un algorithme de mouvement : le CPU de la machine pour les deux, le choix étant fait **par algorithme** (le `match` oblige à décider pour tout nouvel algorithme).
@@ -39,10 +41,17 @@ pub fn default_device_kind(motion: Motion) -> DeviceKind {
 }
 
 /// Le device de calcul demandé, avec la différentiation automatique activée (nécessaire au recalage).
+///
+/// # Panique
+/// Pour [`DeviceKind::Cuda`] si le crate est compilé sans la feature `cuda` (`medx` le refuse avant).
 pub fn autodiff_device(kind: DeviceKind) -> Device {
     match kind {
         DeviceKind::Wgpu => Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff(),
         DeviceKind::Cpu => Device::flex().autodiff(),
+        #[cfg(feature = "cuda")]
+        DeviceKind::Cuda => Device::cuda(0).autodiff(),
+        #[cfg(not(feature = "cuda"))]
+        DeviceKind::Cuda => panic!("medoxide-svr compilé sans la feature cuda"),
     }
 }
 

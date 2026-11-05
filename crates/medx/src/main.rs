@@ -124,10 +124,24 @@ enum SliceTimingArg {
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
-    /// GPU (wgpu : Metal sur Mac), plus lent aujourd'hui
+    /// GPU (wgpu : Metal sur Mac, Vulkan sous Linux)
     Wgpu,
     /// CPU de la machine (backend flex, déterministe)
     Cpu,
+    /// GPU NVIDIA par CUDA (medx compilé avec `--features cuda`)
+    Cuda,
+}
+
+impl DeviceArg {
+    /// Refuse `--device cuda` quand medx est compilé sans CUDA, avec un message qui dit comment l'obtenir.
+    fn verifie(self) -> Result<DeviceArg, String> {
+        if matches!(self, DeviceArg::Cuda) && !cfg!(feature = "cuda") {
+            return Err(
+                "--device cuda : medx est compilé sans CUDA (cargo build --release --features cuda)".to_string(),
+            );
+        }
+        Ok(self)
+    }
 }
 
 impl From<DeviceArg> for medoxide_bounti::segmentation::Calcul {
@@ -135,6 +149,7 @@ impl From<DeviceArg> for medoxide_bounti::segmentation::Calcul {
         match d {
             DeviceArg::Wgpu => Self::Gpu,
             DeviceArg::Cpu => Self::Cpu,
+            DeviceArg::Cuda => Self::Cuda,
         }
     }
 }
@@ -144,6 +159,7 @@ impl From<DeviceArg> for DeviceKind {
         match d {
             DeviceArg::Wgpu => DeviceKind::Wgpu,
             DeviceArg::Cpu => DeviceKind::Cpu,
+            DeviceArg::Cuda => DeviceKind::Cuda,
         }
     }
 }
@@ -368,8 +384,8 @@ enum Command {
         /// https://huggingface.co/rousseau/medoxide-bounti (GPL v3), vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long)]
         weights: Option<PathBuf>,
-        /// GPU (wgpu) ou CPU. Par défaut : GPU sous macOS (Metal), CPU ailleurs (sous Linux, Vulkan refuse les tampons
-        /// de 2 Go dont les réseaux ont besoin à 256³)
+        /// Par défaut, la machine la plus rapide disponible : CUDA si medx est compilé avec et qu'un GPU NVIDIA est là, sinon
+        /// le GPU sous macOS (Metal), sinon le CPU (sous Linux, Vulkan refuse les tampons de 2 Go dont les réseaux ont besoin à 256³)
         #[arg(long, value_enum)]
         device: Option<DeviceArg>,
     },
@@ -386,8 +402,8 @@ enum Command {
         /// https://huggingface.co/rousseau/medoxide-multibounti, vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long, env = "MEDOXIDE_MULTIBOUNTI_WEIGHTS")]
         weights: Option<PathBuf>,
-        /// GPU (wgpu) ou CPU. Par défaut : GPU sous macOS (Metal), CPU ailleurs (sous Linux, Vulkan refuse les tampons
-        /// de 2 Go dont les réseaux ont besoin à 256³)
+        /// Par défaut, la machine la plus rapide disponible : CUDA si medx est compilé avec et qu'un GPU NVIDIA est là, sinon
+        /// le GPU sous macOS (Metal), sinon le CPU (sous Linux, Vulkan refuse les tampons de 2 Go dont les réseaux ont besoin à 256³)
         #[arg(long, value_enum)]
         device: Option<DeviceArg>,
     },
@@ -449,6 +465,10 @@ fn svr_recon(
     config: &ReconstructionConfig,
     slice_timing: SliceTimingArg,
 ) -> ExitCode {
+    if let Some(Err(e)) = device.map(DeviceArg::verifie) {
+        eprintln!("medx svr recon : {e}");
+        return ExitCode::FAILURE;
+    }
     if masques.len() != entrees.len() {
         eprintln!(
             "medx svr recon : {} masque(s) pour {} stack(s) : il en faut un par stack",
@@ -483,7 +503,7 @@ fn svr_recon(
         );
         // sur GPU, le recalage coupe-volume se fait par lots (bien plus rapide) ; sur CPU, le lot n'apporte rien
         let config = &ReconstructionConfig {
-            s2v_batched: kind == DeviceKind::Wgpu,
+            s2v_batched: kind != DeviceKind::Cpu,
             ..config.clone()
         };
         eprintln!(
@@ -493,6 +513,7 @@ fn svr_recon(
             match kind {
                 DeviceKind::Wgpu => "GPU (wgpu)",
                 DeviceKind::Cpu => "CPU (flex)",
+                DeviceKind::Cuda => "GPU (CUDA)",
             }
         );
         let sortie_reconstruction =
@@ -790,6 +811,15 @@ fn multibounti(
     ExitCode::SUCCESS
 }
 
+/// Machine des réseaux (BOUNTI, Multi-BOUNTI) : `--device` vérifié s'il est donné, sinon la plus rapide que la machine offre
+/// ([`medoxide_bounti::segmentation::Calcul::par_defaut`]).
+fn calcul_des_reseaux(device: Option<DeviceArg>) -> Result<medoxide_bounti::segmentation::Calcul, String> {
+    Ok(match device {
+        Some(d) => d.verifie()?.into(),
+        None => medoxide_bounti::segmentation::Calcul::par_defaut(),
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -843,28 +873,26 @@ fn main() -> ExitCode {
                     "--output ou --bids requis".to_string(),
                 )),
             };
-            bounti(
-                &entree,
-                fichiers,
-                weights.as_deref(),
-                device
-                    .map(Into::into)
-                    .unwrap_or_else(medoxide_bounti::segmentation::Calcul::par_defaut),
-            )
+            match calcul_des_reseaux(device) {
+                Ok(calcul) => bounti(&entree, fichiers, weights.as_deref(), calcul),
+                Err(e) => {
+                    eprintln!("medx bounti : {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Multibounti {
             input,
             output,
             weights,
             device,
-        } => multibounti(
-            &input,
-            &output,
-            weights.as_deref(),
-            device
-                .map(Into::into)
-                .unwrap_or_else(medoxide_bounti::segmentation::Calcul::par_defaut),
-        ),
+        } => match calcul_des_reseaux(device) {
+            Ok(calcul) => multibounti(&input, &output, weights.as_deref(), calcul),
+            Err(e) => {
+                eprintln!("medx multibounti : {e}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Svr {
             action:
                 SvrAction::Qc {
@@ -1106,7 +1134,7 @@ fn fetalbet_bids(
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::Cli;
+    use super::{calcul_des_reseaux, Cli, DeviceArg};
 
     /// Les définitions d'arguments sont cohérentes (pas de doublon, valeurs par défaut valides) : clap le vérifie pour toutes les sous-commandes.
     #[test]
@@ -1437,7 +1465,35 @@ mod tests {
             "cpu"
         ]));
         assert!(essai(&["multibounti", "--input", "a", "--output", "b"]));
+        assert!(essai(&[
+            "multibounti",
+            "--input",
+            "a",
+            "--output",
+            "b",
+            "--device",
+            "cuda"
+        ]));
         assert!(!essai(&["multibounti", "--output", "b", "--weights", "w"]));
         assert!(!essai(&["multibounti", "--input", "a", "--weights", "w"]));
+    }
+
+    /// `--device cuda` n'est accepté que si medx est compilé avec la feature `cuda` ; les autres choix le sont toujours.
+    #[test]
+    fn cuda_is_refused_unless_compiled_in() {
+        assert_eq!(DeviceArg::Cuda.verifie().is_ok(), cfg!(feature = "cuda"));
+        assert!(DeviceArg::Cpu.verifie().is_ok() && DeviceArg::Wgpu.verifie().is_ok());
+        assert_eq!(
+            calcul_des_reseaux(Some(DeviceArg::Cuda)).is_ok(),
+            cfg!(feature = "cuda")
+        );
+        assert_eq!(
+            calcul_des_reseaux(Some(DeviceArg::Cpu)),
+            Ok(medoxide_bounti::segmentation::Calcul::Cpu)
+        );
+        assert_eq!(
+            calcul_des_reseaux(None),
+            Ok(medoxide_bounti::segmentation::Calcul::par_defaut())
+        );
     }
 }

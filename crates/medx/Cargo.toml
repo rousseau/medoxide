@@ -13,3 +13,7 @@ medoxide-bounti = { path = "../medoxide-bounti" }
 medoxide-core = { path = "../medoxide-core" }
 medoxide-fetalbet = { path = "../medoxide-fetalbet" }
 medoxide-svr = { path = "../medoxide-svr" }
+
+[features]
+# GPU NVIDIA par CUDA pour les réseaux et le recalage : `cargo build --release --features cuda` (Linux avec CUDA Toolkit).
+cuda = ["medoxide-bounti/cuda", "medoxide-fetalbet/cuda", "medoxide-svr/cuda"]

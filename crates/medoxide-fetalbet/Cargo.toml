@@ -10,6 +10,10 @@ ndarray = { workspace = true }
 burn = { workspace = true }
 burn-store = { workspace = true }
 
+[features]
+# GPU NVIDIA par CUDA, choisi automatiquement quand un pilote NVIDIA est chargé.
+cuda = ["burn/cuda"]
+
 # burn + burn-onnx arriveront ici à l'étape "import du modèle ONNX".
 # On les ajoute seulement quand on en a un usage concret (principe YAGNI) :
 # pas de dépendance avant d'avoir le code qui la justifie.
