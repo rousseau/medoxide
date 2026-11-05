@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use medoxide_core::cache::{cache_dir_from, download_verified};
+use medoxide_core::cache::{cache_dir_from, cached_verified};
 
 use burn::tensor::{Device, Tensor, TensorData};
 use medoxide_core::{read_volume, volume_info, CoreError};
@@ -334,10 +334,10 @@ const MODEL_FILE: &str = "attunet.bpk";
 /// Chemin des poids par défaut du modèle, téléchargés au besoin.
 ///
 /// Les poids sont cherchés dans le cache (`$XDG_CACHE_HOME/medoxide/attunet.bpk`,
-/// sinon `~/.cache/medoxide/attunet.bpk`). S'ils sont absents, ils sont
-/// téléchargés depuis Hugging Face (environ 121 Mo, message sur stderr), vérifiés
-/// par SHA-256, puis conservés pour les lancements suivants. Un fichier déjà
-/// présent n'est pas revérifié.
+/// sinon `~/.cache/medoxide/attunet.bpk`). S'ils sont absents, ou d'une autre
+/// révision que celle attendue par ce code, ils sont téléchargés depuis Hugging
+/// Face (environ 121 Mo, message sur stderr), vérifiés par SHA-256, puis conservés
+/// pour les lancements suivants (voir [`cached_verified`]).
 ///
 /// # Erreurs
 /// `MaskError::ModelDownload` si aucun dossier de cache n'est déterminable, ou si
@@ -349,18 +349,7 @@ pub fn default_model_path() -> Result<PathBuf, MaskError> {
             "aucun dossier de cache (ni XDG_CACHE_HOME ni HOME) ; indiquez les poids avec --model".to_string(),
         )
     })?;
-    let chemin = dossier.join(MODEL_FILE);
-    if chemin.exists() {
-        return Ok(chemin);
-    }
-    std::fs::create_dir_all(&dossier).map_err(|e| MaskError::ModelDownload(format!("{} : {e}", dossier.display())))?;
-    eprintln!(
-        "Téléchargement des poids du modèle (121 Mo) vers {}\n  depuis {MODEL_URL}",
-        chemin.display()
-    );
-    download_verified(MODEL_URL, &chemin, MODEL_SHA256).map_err(|e| MaskError::ModelDownload(e.to_string()))?;
-    eprintln!("Poids téléchargés et vérifiés.");
-    Ok(chemin)
+    cached_verified(&dossier, MODEL_FILE, MODEL_URL, MODEL_SHA256).map_err(|e| MaskError::ModelDownload(e.to_string()))
 }
 
 /// Calcule le masque cérébral d'un volume IRM fœtal et l'écrit en NIfTI.
