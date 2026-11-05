@@ -8276,7 +8276,7 @@ mod tests {
         };
         let en_tete = SlicePoses::identity(&stacks);
         // (a)
-        let (s, p) = s2v_start(&stacks, en_tete.clone(), &base, &device).unwrap();
+        let (s, p) = s2v_start(&stacks, en_tete.clone(), &base).unwrap();
         assert!(memes_stacks(&s, &stacks) && ecart(&p, &en_tete) == 0.0, "(a)");
         // (b)
         let (s, p) = s2v_start(
@@ -8286,7 +8286,6 @@ mod tests {
                 s2v_init: S2vInit::Stacks,
                 ..base.clone()
             },
-            &device,
         )
         .unwrap();
         let direct = register_slices_s2s(
@@ -8321,7 +8320,6 @@ mod tests {
                 s2v_init: S2vInit::StacksBias,
                 ..base.clone()
             },
-            &device,
         )
         .unwrap();
         assert!(memes_stacks(&s_biais, &stacks), "(c) stacks modifiés sans biais");
@@ -8335,7 +8333,6 @@ mod tests {
                 s2s_bias_min_reduction: 0.0,
                 ..base
             },
-            &device,
         )
         .unwrap();
         assert!(

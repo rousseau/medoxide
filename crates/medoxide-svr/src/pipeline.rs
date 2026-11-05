@@ -30,6 +30,7 @@ pub enum DeviceKind {
 ///
 /// Mesures (étude 06, §41) : le recalage coupe par coupe lance un grand nombre de petits calculs, que le GPU (`wgpu`) traite plus lentement que le CPU (coupe-coupe : 118 s contre 18 s sur des
 /// stacks simulés, 556 s contre 150 s sur un sujet réel, avec des poses de même qualité). Coupe-volume, sujet réel à trois stacks : 151 s sur CPU ; sur GPU 349 s avec le recalage par lots (`s2v_batched`), après avoir dépassé 90 min coupe par coupe : le CPU reste le plus rapide.
+/// Quel que soit ce choix, le départ du coupe-volume ([`s2v_start`], un recalage coupe-coupe) se calcule sur CPU.
 pub fn default_device_kind(motion: Motion) -> DeviceKind {
     match motion {
         Motion::SliceToSlice => DeviceKind::Cpu,
@@ -472,7 +473,7 @@ pub fn reconstruct(
         }
         Motion::SliceToVolume => {
             let loop_config = loop_config(config);
-            let (stacks, departs) = s2v_start(stacks, header_poses, config, device)?;
+            let (stacks, departs) = s2v_start(stacks, header_poses, config)?;
             let stacks = stacks.as_slice();
             let result =
                 reconstruct_with_motion_correction(&grid, stacks, &departs, loop_config, device, |_, _, _| {})?;
@@ -497,11 +498,14 @@ pub fn reconstruct(
 }
 
 /// Stacks et poses de départ de la boucle coupe-volume selon `config.s2v_init` : `Header` rend les `stacks` et les poses de l'en-tête tels quels ; `Stacks` et `StacksBias` font d'abord l'alignement par stack entier du coupe-coupe (`block_levels = 1`, aucun balayage par coupe, grossier compris), `StacksBias` sur des stacks corrigés du biais, estimé aux poses de l'en-tête puis réestimé aux poses alignées (les stacks rendus sont alors corrigés). Le gradient des blocs y est toujours calculé en parallèle, quel que soit `s2s_block_parallel_gradient`.
+///
+/// Toujours sur CPU, quel que soit le device de la boucle : c'est un recalage coupe-coupe (beaucoup de petits calculs, plus lents sur GPU, voir [`default_device_kind`]),
+/// et son gradient parallèle lance une passe avant et arrière par coupe sur chaque fil. Sur GPU (`wgpu`), ce départ prenait à lui seul 852 s sur la PGX (séance de développement, trois stacks), contre 337 s
+/// pour toute la reconstruction coupe-volume sur CPU. Les poses rendues sont des `f64` ordinaires : la boucle les reprend sur son propre device sans conversion.
 pub(crate) fn s2v_start(
     stacks: &[Stack],
     header_poses: SlicePoses,
     config: &ReconstructionConfig,
-    device: &Device,
 ) -> Result<(Vec<Stack>, SlicePoses), SvrError> {
     if config.s2v_init == S2vInit::Header {
         return Ok((stacks.to_vec(), header_poses));
@@ -525,8 +529,9 @@ pub(crate) fn s2v_start(
         block_parallel_gradient: true,
         ..s2s_config(config)
     };
+    let cpu = autodiff_device(DeviceKind::Cpu);
     let poses = phase("alignement par stack (départ coupe-volume)", || {
-        register_slices_s2s(&a_aligner, &header_poses, &alignement, device)
+        register_slices_s2s(&a_aligner, &header_poses, &alignement, &cpu)
     })?
     .poses;
     if !avec_biais {
