@@ -364,7 +364,8 @@ enum Command {
         #[arg(long, conflicts_with = "output")]
         output_dir: Option<PathBuf>,
         /// Dossier des poids convertis. Priorité : cette option, puis la variable d'environnement
-        /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti). Poids sur https://huggingface.co/rousseau/medoxide-bounti (GPL v3)
+        /// MEDOXIDE_BOUNTI_WEIGHTS, puis le cache (~/.cache/medoxide/bounti), où ils sont téléchargés au premier usage depuis
+        /// https://huggingface.co/rousseau/medoxide-bounti (GPL v3), vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long)]
         weights: Option<PathBuf>,
         /// GPU (wgpu) ou CPU (beaucoup plus lent)
@@ -379,9 +380,11 @@ enum Command {
         /// Étiquettes de sortie (NIfTI)
         #[arg(long)]
         output: PathBuf,
-        /// Dossier des poids convertis (`bet/`, `lr/`, `multi/`, `gabarit/` : voir docs/MULTIBOUNTI.md ; licence GPL v3, non inclus dans le dépôt)
+        /// Dossier des poids convertis (`bet/`, `lr/`, `multi/`, `gabarit/` : voir docs/MULTIBOUNTI.md ; licence GPL v3, non inclus dans le
+        /// dépôt). Par défaut, ils sont téléchargés au premier usage dans le cache (~/.cache/medoxide/multibounti) depuis
+        /// https://huggingface.co/rousseau/medoxide-multibounti, vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long, env = "MEDOXIDE_MULTIBOUNTI_WEIGHTS")]
-        weights: PathBuf,
+        weights: Option<PathBuf>,
         /// GPU (wgpu) ou CPU (beaucoup plus lent)
         #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
         device: DeviceArg,
@@ -736,10 +739,22 @@ fn bounti(
 fn multibounti(
     entree: &std::path::Path,
     sortie: &std::path::Path,
-    poids: &std::path::Path,
+    poids: Option<&std::path::Path>,
     calcul: medoxide_bounti::segmentation::Calcul,
 ) -> ExitCode {
-    use medoxide_bounti::{geometrie::Volume, segmentation_multi, sortie as ecriture};
+    use medoxide_bounti::{geometrie::Volume, poids::MULTIBOUNTI, segmentation_multi, sortie as ecriture};
+    // Sans dossier donné : poids du cache, téléchargés ou mis à jour au besoin.
+    let poids = match poids {
+        Some(p) => p.to_path_buf(),
+        None => match MULTIBOUNTI.dans_le_cache() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("medx multibounti : {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let poids = poids.as_path();
     let manquants = segmentation_multi::fichiers_manquants(poids);
     if !manquants.is_empty() {
         eprintln!(
@@ -833,7 +848,7 @@ fn main() -> ExitCode {
             output,
             weights,
             device,
-        } => multibounti(&input, &output, &weights, device.into()),
+        } => multibounti(&input, &output, weights.as_deref(), device.into()),
         Command::Svr {
             action:
                 SvrAction::Qc {
@@ -1381,7 +1396,7 @@ mod tests {
         );
     }
 
-    /// Arguments de `medx multibounti` : `--input`, `--output` et `--weights` (ou la variable `MEDOXIDE_MULTIBOUNTI_WEIGHTS`, non lue ici) sont requis ; `--device` accepte `cpu`.
+    /// Arguments de `medx multibounti` : `--input` et `--output` sont requis ; `--weights` est facultatif (poids du cache par défaut) ; `--device` accepte `cpu`.
     #[test]
     fn the_multibounti_arguments_are_required_as_documented() {
         let essai = |args: &[&str]| Cli::try_parse_from(std::iter::once("medx").chain(args.iter().copied())).is_ok();
@@ -1405,10 +1420,7 @@ mod tests {
             "--device",
             "cpu"
         ]));
-        assert!(
-            !essai(&["multibounti", "--input", "a", "--output", "b"])
-                || std::env::var_os("MEDOXIDE_MULTIBOUNTI_WEIGHTS").is_some()
-        );
+        assert!(essai(&["multibounti", "--input", "a", "--output", "b"]));
         assert!(!essai(&["multibounti", "--output", "b", "--weights", "w"]));
         assert!(!essai(&["multibounti", "--input", "a", "--weights", "w"]));
     }
