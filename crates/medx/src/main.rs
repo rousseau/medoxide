@@ -368,9 +368,10 @@ enum Command {
         /// https://huggingface.co/rousseau/medoxide-bounti (GPL v3), vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long)]
         weights: Option<PathBuf>,
-        /// GPU (wgpu) ou CPU (beaucoup plus lent)
-        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
-        device: DeviceArg,
+        /// GPU (wgpu) ou CPU. Par défaut : GPU sous macOS (Metal), CPU ailleurs (sous Linux, Vulkan refuse les tampons
+        /// de 2 Go dont les réseaux ont besoin à 256³)
+        #[arg(long, value_enum)]
+        device: Option<DeviceArg>,
     },
     /// Segmentation du cerveau fœtal en 43 étiquettes (portage de Multi-BOUNTI) d'une reconstruction 3D T2 à 0,5 mm
     Multibounti {
@@ -385,9 +386,10 @@ enum Command {
         /// https://huggingface.co/rousseau/medoxide-multibounti, vérifiés par SHA-256 et mis à jour automatiquement
         #[arg(long, env = "MEDOXIDE_MULTIBOUNTI_WEIGHTS")]
         weights: Option<PathBuf>,
-        /// GPU (wgpu) ou CPU (beaucoup plus lent)
-        #[arg(long, value_enum, default_value_t = DeviceArg::Wgpu)]
-        device: DeviceArg,
+        /// GPU (wgpu) ou CPU. Par défaut : GPU sous macOS (Metal), CPU ailleurs (sous Linux, Vulkan refuse les tampons
+        /// de 2 Go dont les réseaux ont besoin à 256³)
+        #[arg(long, value_enum)]
+        device: Option<DeviceArg>,
     },
     /// Extraction du masque cérébral en IRM fœtale (portage de Fetal-BET)
     Fetalbet {
@@ -841,14 +843,28 @@ fn main() -> ExitCode {
                     "--output ou --bids requis".to_string(),
                 )),
             };
-            bounti(&entree, fichiers, weights.as_deref(), device.into())
+            bounti(
+                &entree,
+                fichiers,
+                weights.as_deref(),
+                device
+                    .map(Into::into)
+                    .unwrap_or_else(medoxide_bounti::segmentation::Calcul::par_defaut),
+            )
         }
         Command::Multibounti {
             input,
             output,
             weights,
             device,
-        } => multibounti(&input, &output, weights.as_deref(), device.into()),
+        } => multibounti(
+            &input,
+            &output,
+            weights.as_deref(),
+            device
+                .map(Into::into)
+                .unwrap_or_else(medoxide_bounti::segmentation::Calcul::par_defaut),
+        ),
         Command::Svr {
             action:
                 SvrAction::Qc {

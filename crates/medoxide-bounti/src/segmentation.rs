@@ -24,11 +24,24 @@ const COTE_TISSUS: usize = 256;
 pub enum Calcul {
     /// GPU (wgpu : Metal sur Mac, Vulkan sous Linux).
     Gpu,
-    /// CPU de la machine (backend `flex` de Burn), beaucoup plus lent.
+    /// CPU de la machine (backend `flex` de Burn), plus lent (BOUNTI : 2 min 19 s sur la PGX, 58 s sur le GPU d'un Mac M4 Pro).
     Cpu,
 }
 
 impl Calcul {
+    /// Machine par défaut : le GPU sous macOS (Metal), le CPU ailleurs.
+    ///
+    /// Sous Linux, wgpu passe par Vulkan : à 256³, les réseaux demandent un tampon de 2 Gio (2³¹ octets) que Vulkan refuse
+    /// (« can't allocate buffer of size: 2147483648 », sur la PGX comme sur la RTX 2080 Ti, novembre 2026), quelle que soit la
+    /// mémoire de la carte. Metal l'accepte.
+    pub fn par_defaut() -> Calcul {
+        if cfg!(target_os = "macos") {
+            Calcul::Gpu
+        } else {
+            Calcul::Cpu
+        }
+    }
+
     /// Appareil Burn correspondant.
     pub fn appareil(self) -> Device {
         match self {
@@ -236,5 +249,16 @@ mod tests {
             }
             println!("BET {id} : {differents} voxels d'étiquette différente sur {voxels} (marge de logits maximale des voxels différents {marge_max:.2e})");
         }
+    }
+
+    /// Machine par défaut : le GPU seulement sous macOS (voir [`Calcul::par_defaut`]).
+    #[test]
+    fn the_default_machine_is_the_gpu_only_on_macos() {
+        let attendue = if cfg!(target_os = "macos") {
+            Calcul::Gpu
+        } else {
+            Calcul::Cpu
+        };
+        assert_eq!(Calcul::par_defaut(), attendue);
     }
 }
