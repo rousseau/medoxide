@@ -124,8 +124,8 @@ balayages (les stacks se voient entre eux avec leurs poses déjà corrigées). I
 
 SVRTK, la référence de la communauté, ajoute notamment l'alignement global des stacks, la mise à l'échelle
 des intensités par coupe, un champ de biais, des statistiques robustes avec exclusion de coupes et un lissage
-adaptatif préservant les contours. Nous n'avons rien de tout cela dans la chaîne par défaut (une mise à
-l'échelle par coupe est écrite et testée mais non branchée). À l'inverse, notre opérateur a un adjoint exact,
+adaptatif préservant les contours. Dans la chaîne par défaut, nous avons le champ de biais par stack et un tour de mise à
+l'échelle par coupe ; le reste manque (le rejet robuste de `--robust-rounds` est « dur » et désactivé par défaut). À l'inverse, notre opérateur a un adjoint exact,
 notre objectif est écrit (donc validable), et les références « sans la coupe » n'existent pas chez SVRTK, qui
 recale contre un volume contenant la coupe.
 

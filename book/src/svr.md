@@ -270,8 +270,7 @@ ne partagent pas un repère (écart de plus de 18 mm entre barycentres de masque
 - **Repère du volume** : le volume est ancré par les données. Avec `s2s`, rien ne fixe le repère (la solution
   est définie à un mouvement rigide commun près), donc la position et l'orientation du volume dans le repère du
   scanner ne sont pas garanties. Pour le comparer à un autre volume ou à un atlas, recalez-le rigidement.
-- **Correction d'intensité partielle** : un champ de biais polynomial par stack est corrigé (voir `--s2s-bias-rounds`), mais ni la mise à l'échelle par coupe, ni la
-  pondération robuste des coupes aberrantes (coupes sombres). SVRTK le fait. Sur nos données TRUFI, les
+- **Correction d'intensité partielle** : un champ de biais polynomial par stack est corrigé (voir `--s2s-bias-rounds`), puis un tour de mise à l'échelle par coupe après la reconstruction (`--slice-scale-rounds`, défaut 1 : aucun des six sujets de développement n'y perd, gain de 0,008 à 0,010 de juge sur deux agités). Il n'y a pas de pondération douce des coupes et pixels aberrants comme dans SVRTK : l'option `--robust-rounds` écarte durement les pixels et coupes incohérents avec le volume, et reste désactivée par défaut. Sur nos données TRUFI, les
   facteurs d'échelle mesurés sont petits, mais ce n'est pas démontré pour d'autres contrastes (HASTE :
   non évalué).
 - **Fœtus très agités** : sur deux de nos six sujets, aucune méthode testée (la nôtre, SVRTK, NeSVoR)
