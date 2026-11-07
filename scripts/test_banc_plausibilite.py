@@ -41,11 +41,35 @@ class TestBruit(unittest.TestCase):
         # |N(0, σ)| : écart type σ √(1 − 2/π)
         self.assertAlmostEqual(bp.rapport_bruit(s, m, carres) * 400.0, 3.0 * np.sqrt(1 - 2 / np.pi), delta=0.1)
 
-    def test_pas_assez_de_carres_d_air(self):
+    def test_pas_assez_de_carres_d_air_pour_le_sujet(self):
         s, m = pile_synthetique()
         s[:, :, :] = np.maximum(s, 100.0)  # plus d'air nulle part
+        carres = bp.choisir_carres(s, 400.0)
+        self.assertEqual(carres, [])
         with self.assertRaises(ValueError):
-            bp.choisir_carres(s, 400.0)
+            bp.exiger_carres([carres, carres, carres])
+        s2, m2 = pile_synthetique(2)
+        bp.exiger_carres([bp.choisir_carres(s2, 400.0), [], []])  # 30 carrés : suffisant
+        dix = bp.choisir_carres(s2, 400.0)[:10]
+        bp.exiger_carres([dix, dix, dix])  # 30 carrés au total, aucune pile n'atteint 20 : le seuil est bien par sujet
+        with self.assertRaises(ValueError):
+            bp.exiger_carres([dix[:5], dix[:5], dix[:5]])  # 15 carrés
+
+    def test_bruit_du_sujet_regroupe_les_piles_normalisees_par_leur_propre_tissu(self):
+        # deux piles : la seconde est la première multipliée par 2 (tissu 800, bruit doublé) : après normalisation par μ_tissu de chaque pile, mêmes valeurs
+        s1, m1 = pile_synthetique(3)
+        s2 = 2.0 * s1
+        carres = [bp.choisir_carres(s1, 400.0), bp.choisir_carres(s2, 800.0)]
+        r = bp.rapport_bruit_sujet([s1, s2], [m1, m1], carres)
+        un = bp.rapport_bruit_sujet([s1], [m1], [carres[0]])
+        self.assertAlmostEqual(r, un, places=12)
+        # contre un calcul direct : toutes les valeurs des carrés, divisées par 400 (pile 1) ou 800 (pile 2)
+        brutes = []
+        for pile, mu in ((s1, 400.0), (s2, 800.0)):
+            for k in range(10):
+                for (i0, j0) in ((0, 48), (48, 0), (48, 48)):
+                    brutes.extend((pile[i0 : i0 + 12, j0 : j0 + 12, k] / mu).ravel().tolist())
+        self.assertAlmostEqual(r, float(np.std(brutes)), places=12)
 
 
 class TestBord(unittest.TestCase):
@@ -104,10 +128,11 @@ class TestCalibrage(unittest.TestCase):
     def test_rapports_mediane_sur_les_trois_piles(self):
         import banc_calibrage as bc
 
-        reel = [{"bruit": 0.01, "largeur": 10.0}] * 3
-        mes = [{"bruit": 0.02, "largeur": 5.0}, {"bruit": 0.01, "largeur": 10.0}, {"bruit": 0.03, "largeur": 20.0}]
+        reel = [{"bruit_sujet": 0.01, "largeur": 10.0}] * 3
+        mes = [{"bruit_sujet": 0.02, "largeur": 5.0}] * 3
+        mes = [dict(mes[0], largeur=5.0), dict(mes[0], largeur=10.0), dict(mes[0], largeur=20.0)]
         r = bc.rapports(reel, mes, [0.2, 0.2, 0.2], [0.1, 0.3, 0.4])
-        self.assertAlmostEqual(r["bruit"], 2.0)  # médiane de (2, 1, 3)
+        self.assertAlmostEqual(r["bruit"], 2.0)  # le bruit est celui du sujet, identique pour les trois piles
         self.assertAlmostEqual(r["largeur"], 1.0)  # médiane de (0,5 ; 1 ; 2)
         self.assertAlmostEqual(r["biais"], 0.3 / 0.2)
 

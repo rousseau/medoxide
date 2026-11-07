@@ -84,19 +84,23 @@ def mesures_reelles(racine, sujet):
         carres = bp.choisir_carres(s, mu)
         emp = bp.emplacements_de_bord(s, m, mu)
         esp = float(nib.load(piles[k]).header.get_zooms()[2])
-        sortie.append({"carres": carres, "emplacements": emp, "espacement": esp, "bruit": bp.rapport_bruit(s, m, carres),
+        sortie.append({"carres": carres, "emplacements": emp, "espacement": esp,
                        "largeur": float(np.median(bp.largeur_de_bord(s, emp, esp))), "mu": mu})
+    donnees = [lire(f) for f in piles]
+    ms = [lire(f) > 0 for f in masques]
+    bruit = bp.rapport_bruit_sujet(donnees, ms, [r["carres"] for r in sortie])  # lève ValueError sous 20 carrés pour le sujet
+    for r in sortie:
+        r["bruit_sujet"] = bruit
     return sortie
 
 
 def mesures_simulees(reel, masques, piles_sim):
     """Mêmes quantités sur les piles simulées (une par K), aux mêmes carrés et emplacements que le réel."""
-    sortie = []
-    for k in range(3):
-        s, m = lire(piles_sim[k]), lire(masques[k]) > 0
-        sortie.append({"bruit": bp.rapport_bruit(s, m, reel[k]["carres"]),
-                       "largeur": float(np.median(bp.largeur_de_bord(s, reel[k]["emplacements"], reel[k]["espacement"])))})
-    return sortie
+    sim = [lire(f) for f in piles_sim]
+    ms = [lire(f) > 0 for f in masques]
+    bruit = bp.rapport_bruit_sujet(sim, ms, [r["carres"] for r in reel])
+    return [{"bruit_sujet": bruit,
+             "largeur": float(np.median(bp.largeur_de_bord(sim[k], reel[k]["emplacements"], reel[k]["espacement"])))} for k in range(3)]
 
 
 def simuler_sujet(medx, resultats, racine, travail, sujet, bruit, biais, profil, etiquette):
@@ -113,7 +117,7 @@ def simuler_sujet(medx, resultats, racine, travail, sujet, bruit, biais, profil,
 
 def rapports(reel, mes, plages_reelles, plages_sim):
     """Trois rapports simulé/réel (médiane sur les trois piles) : bruit, largeur de bord, plage du biais."""
-    r_bruit = float(np.median([m["bruit"] / r["bruit"] for m, r in zip(mes, reel)]))
+    r_bruit = float(np.median([m["bruit_sujet"] / r["bruit_sujet"] for m, r in zip(mes, reel)]))
     r_larg = float(np.median([m["largeur"] / r["largeur"] for m, r in zip(mes, reel)]))
     r_biais = float(np.median(plages_sim) / np.median(plages_reelles))
     return {"bruit": r_bruit, "largeur": r_larg, "biais": r_biais}
@@ -141,7 +145,7 @@ def main():
     masques = {s: piles_du_sujet(a.racine, s)[1] for s in a.sujets}
     plages_reelles = {s: plage_de_biais(a.bin_test, *piles_du_sujet(a.racine, s)) for s in a.sujets}
     for s in a.sujets:
-        print(f"{s} réel : bruit {[round(r['bruit'], 5) for r in reel[s]]} ; largeur {[round(r['largeur'], 2) for r in reel[s]]} mm ; plage du biais {[round(x, 3) for x in plages_reelles[s]]}", flush=True)
+        print(f"{s} réel : bruit (sujet) {reel[s][0]['bruit_sujet']:.5f} ; largeur {[round(r['largeur'], 2) for r in reel[s]]} mm ; plage du biais {[round(x, 3) for x in plages_reelles[s]]}", flush=True)
 
     def evaluer(s, bruit, biais, profil, etiquette):
         sim = simuler_sujet(a.medx, a.resultats, a.racine, a.travail, s, bruit, biais, profil, etiquette)
@@ -152,7 +156,7 @@ def main():
     if a.action == "calibrer":
         # bruit : proportionnalité à partir d'un essai à BRUIT_ESSAI %
         essais = {s: evaluer(s, BRUIT_ESSAI, 0.0, 1.0, "bruit") for s in a.sujets}
-        facteur = float(np.median([m["bruit"] / r["bruit"] for s in a.sujets for m, r in zip(essais[s][0], reel[s])]))
+        facteur = float(np.median([essais[s][0][0]["bruit_sujet"] / reel[s][0]["bruit_sujet"] for s in a.sujets]))
         bruit = BRUIT_ESSAI / facteur
         print(f"bruit_pct calibré = {bruit:.4f} (rapport simulé/réel à {BRUIT_ESSAI} % : {facteur:.3f})", flush=True)
         # profil : grille, au bruit calibré, sans biais

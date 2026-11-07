@@ -27,7 +27,7 @@ def moyenne_tissu(pile, masque):
 def choisir_carres(pile, mu):
     """Carrés d'air : pour chaque coupe `k`, chacun des quatre coins `CARRE × CARRE` dont le maximum est inférieur à `SEUIL_AIR · mu`.
 
-    Renvoie une liste de `(k, i0, j0)` (coin supérieur gauche du carré). Moins de `MIN_CARRES` carrés : `ValueError` (pas de mesure)."""
+    Renvoie une liste de `(k, i0, j0)` (coin supérieur gauche du carré), éventuellement vide : le seuil de `MIN_CARRES` s'applique au SUJET (voir `exiger_carres`)."""
     ni, nj, nk = pile.shape
     carres = []
     for k in range(nk):
@@ -35,9 +35,14 @@ def choisir_carres(pile, mu):
             for j0 in (0, nj - CARRE):
                 if pile[i0 : i0 + CARRE, j0 : j0 + CARRE, k].max() < SEUIL_AIR * mu:
                     carres.append((k, i0, j0))
-    if len(carres) < MIN_CARRES:
-        raise ValueError(f"{len(carres)} carrés d'air seulement (minimum {MIN_CARRES}) : pas de mesure du bruit")
     return carres
+
+
+def exiger_carres(carres_par_pile):
+    """Vérifie que le sujet (toutes ses piles) a au moins `MIN_CARRES` carrés d'air ; sinon `ValueError` (pas de mesure du bruit : arrêt prévu par le protocole)."""
+    total = sum(len(c) for c in carres_par_pile)
+    if total < MIN_CARRES:
+        raise ValueError(f"{total} carrés d'air seulement pour le sujet (minimum {MIN_CARRES}) : pas de mesure du bruit")
 
 
 def sigma_air(pile, carres):
@@ -47,8 +52,19 @@ def sigma_air(pile, carres):
 
 
 def rapport_bruit(pile, masque, carres):
-    """`σ_air / μ_tissu` de la pile, les carrés d'air étant ceux choisis sur la pile réelle."""
+    """`σ_air / μ_tissu` d'UNE pile, les carrés d'air étant ceux choisis sur la pile réelle (la mesure du protocole est `rapport_bruit_sujet`)."""
     return sigma_air(pile, carres) / moyenne_tissu(pile, masque)
+
+
+def rapport_bruit_sujet(piles, masques, carres_par_pile):
+    """`R_bruit` d'un sujet : écart type regroupé des pixels des carrés d'air de ses piles, chaque pixel divisé par `μ_tissu` de SA pile (moyenne dans le masque
+    de cette pile). `carres_par_pile[n]` : carrés choisis sur la pile réelle `n`, réutilisés sur la pile simulée `n`."""
+    exiger_carres(carres_par_pile)
+    valeurs = []
+    for pile, masque, carres in zip(piles, masques, carres_par_pile):
+        mu = moyenne_tissu(pile, masque)
+        valeurs.extend(pile[i0 : i0 + CARRE, j0 : j0 + CARRE, k].ravel() / mu for k, i0, j0 in carres)
+    return float(np.concatenate(valeurs).std())
 
 
 def emplacements_de_bord(pile, masque, mu, n_max=N_EMPLACEMENTS):
