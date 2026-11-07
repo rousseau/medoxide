@@ -28,6 +28,9 @@
 pub mod align;
 pub mod bias;
 pub mod diff;
+// Générateurs de mouvement vrai remontés des tests (F4.0.1) ; inutilisés hors tests jusqu'au simulateur.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod mouvement;
 pub mod optimizers;
 pub mod pipeline;
 pub mod qc;

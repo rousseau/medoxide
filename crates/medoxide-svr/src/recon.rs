@@ -741,6 +741,9 @@ impl EdgeWeights {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mouvement::{
+        mouvement_rigide, mouvement_vrai, poses_aleatoires, poses_lisses, poses_par_stack_reel, Alea,
+    };
     use nalgebra::{Rotation3, Vector4};
     use nifti::{writer::WriterOptions, NiftiHeader};
     use std::path::{Path, PathBuf};
@@ -1335,16 +1338,6 @@ mod tests {
     use nalgebra::{DMatrix, DVector};
 
     /// Générateur pseudo-aléatoire (xorshift64) déterministe, valeurs dans [0, 1[.
-    struct Alea(u64);
-    impl Alea {
-        fn suivant(&mut self) -> f64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            (self.0 >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
-
     /// Deux petits stacks (axial et coronal, 6 × 6 × 2 pixels de 3 mm, épaisseur 4 mm, obliques), intensités et masques (≈ 70 %)
     /// aléatoires, et leur grille de 5 mm avec une marge de 12 mm, assez large pour que des voxels soient **hors du domaine** (sans quoi les vérifications
     /// « hors du domaine » seraient vides) : un problème assez petit pour construire sa matrice dense.
@@ -1452,34 +1445,6 @@ mod tests {
     #[test]
     fn objective_with_poses_matches_dense_linear_algebra() {
         verifier_objectif_dense(true);
-    }
-
-    /// Mouvement rigide `M = T(c + t) · R(ω) · T(−c)` : rotation du vecteur `omega` (rad) autour du point `c`, puis translation `t`.
-    fn mouvement_rigide(omega: &Vector3<f64>, t: &Vector3<f64>, c: &Vector3<f64>) -> Matrix4<f64> {
-        let r = Rotation3::from_scaled_axis(*omega);
-        let mut m = Matrix4::identity();
-        m.fixed_view_mut::<3, 3>(0, 0).copy_from(r.matrix());
-        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&(c + t - r * c));
-        m
-    }
-
-    /// Poses aléatoires par coupe (autour du centre de la coupe) : rotation et translation tirées uniformément dans ± `degres` et ± `mm`.
-    fn poses_aleatoires(stacks: &[Stack], degres: f64, mm: f64, graine: u64) -> SlicePoses {
-        let mut alea = Alea(graine);
-        let mut poses = SlicePoses::identity(stacks);
-        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
-        for (si, stack) in stacks.iter().enumerate() {
-            for coupe in stack.slices() {
-                let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
-                let t = Vector3::new(tire(mm), tire(mm), tire(mm));
-                poses.set(
-                    si,
-                    coupe.index(),
-                    mouvement_rigide(&omega, &t, &coupe.geometric_center()),
-                );
-            }
-        }
-        poses
     }
 
     fn verifier_objectif_dense(avec_poses: bool) {
@@ -6453,55 +6418,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    /// Les coupes d'un stack dans l'ordre d'acquisition : celui des instants `SliceTiming` s'ils sont attachés au stack, sinon l'ordre des indices (le tri est stable : sans instants, rien ne change).
-    fn coupes_dans_l_ordre(stack: &Stack) -> Vec<crate::Slice<'_>> {
-        let mut coupes: Vec<_> = stack.slices().collect();
-        if let Some(instants) = stack.slice_times() {
-            coupes.sort_by(|a, b| instants[a.index()].total_cmp(&instants[b.index()]));
-        }
-        coupes
-    }
-
-    /// Mouvement par coupe À SAUTS le long de chaque stack : comme [`poses_lisses`] (marche autorégressive de coefficient `rho`, bornée à ± amplitude), mais à chaque coupe, avec la probabilité `proba`, chaque paramètre est retiré uniformément dans ± amplitude (un saut qui persiste ensuite).
-    fn poses_a_sauts(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64, proba: f64) -> SlicePoses {
-        let mut alea = Alea(graine);
-        let mut poses = SlicePoses::identity(stacks);
-        for (si, stack) in stacks.iter().enumerate() {
-            let mut x = [0.0_f64; 6];
-            for coupe in coupes_dans_l_ordre(stack) {
-                let saut = alea.suivant() < proba;
-                for (p, v) in x.iter_mut().enumerate() {
-                    let amplitude = if p < 3 { degres } else { mm };
-                    let (u, w) = (alea.suivant().max(1e-12), alea.suivant());
-                    let gauss = (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * w).cos();
-                    *v = if saut {
-                        (alea.suivant() * 2.0 - 1.0) * amplitude
-                    } else {
-                        (rho * *v + (1.0 - rho * rho).sqrt() * amplitude / 3.0_f64.sqrt() * gauss)
-                            .clamp(-amplitude, amplitude)
-                    };
-                }
-                let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
-                poses.set(
-                    si,
-                    coupe.index(),
-                    mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()),
-                );
-            }
-        }
-        poses
-    }
-
-    /// Mouvement vrai d'un banc d'essai selon son modèle : `independante`, `lisse` (marche autorégressive, ρ = 0,9), `sauts` (lisse avec sauts de probabilité 0,08 par coupe) ou `stack` (un décalage rigide par stack).
-    fn mouvement_vrai(stacks: &[Stack], modele: &str, amplitude: f64, graine: u64) -> SlicePoses {
-        match modele {
-            "lisse" => poses_lisses(stacks, amplitude, amplitude, graine, 0.9),
-            "sauts" => poses_a_sauts(stacks, amplitude, amplitude, graine, 0.9, 0.08),
-            "stack" => poses_par_stack_reel(stacks, amplitude, amplitude, graine),
-            _ => poses_aleatoires(stacks, amplitude, amplitude, graine),
-        }
     }
 
     /// **Stacks semi-synthétiques à contenu réel** : simule, depuis un volume RÉEL reconstruit, les coupes des stacks `modeles` (géométrie, résolution et épaisseur des vrais stacks) avec le mouvement vrai `vraies`, avec un bruit gaussien de `bruit_pct` % de l'intensité moyenne et, si `biais_pct > 0`, un champ de biais multiplicatif lisse
@@ -11837,50 +11753,6 @@ mod tests {
         )
     }
 
-    /// Lit un fichier de poses (stack, coupe, 16 valeurs en ordre colonne) pour des stacks donnés ; les coupes absentes gardent l'identité.
-    /// Un mouvement rigide par STACK (le même pour toutes ses coupes), autour du barycentre cérébral du stack, tiré dans ± `degres` et ± `mm` : un décalage de stack entier, ce que l'alignement par blocs doit corriger.
-    fn poses_par_stack_reel(stacks: &[Stack], degres: f64, mm: f64, graine: u64) -> SlicePoses {
-        let mut alea = Alea(graine);
-        let mut poses = SlicePoses::identity(stacks);
-        let mut tire = |a: f64| (alea.suivant() * 2.0 - 1.0) * a;
-        for (si, stack) in stacks.iter().enumerate() {
-            let centre = stack.brain_barycenter_world().unwrap_or_else(Vector3::zeros);
-            let omega = Vector3::new(tire(degres), tire(degres), tire(degres)).map(f64::to_radians);
-            let m = mouvement_rigide(&omega, &Vector3::new(tire(mm), tire(mm), tire(mm)), &centre);
-            for k in 0..stack.dim().2 {
-                poses.set(si, k, m);
-            }
-        }
-        poses
-    }
-
-    /// Mouvement par coupe LISSE le long de chaque stack : chaque paramètre suit une marche autorégressive d'ordre 1 de coefficient `rho` (écart type `amplitude / √3`, comme un tirage uniforme dans ± `amplitude`), borné à ± `amplitude` ; les coupes voisines ont donc des poses proches.
-    fn poses_lisses(stacks: &[Stack], degres: f64, mm: f64, graine: u64, rho: f64) -> SlicePoses {
-        let mut alea = Alea(graine);
-        let mut gauss = move || {
-            let (u, v) = (alea.suivant().max(1e-12), alea.suivant());
-            (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
-        };
-        let mut poses = SlicePoses::identity(stacks);
-        for (si, stack) in stacks.iter().enumerate() {
-            let mut x = [0.0_f64; 6];
-            for coupe in coupes_dans_l_ordre(stack) {
-                for (p, v) in x.iter_mut().enumerate() {
-                    let amplitude = if p < 3 { degres } else { mm };
-                    let sigma = amplitude / 3.0_f64.sqrt();
-                    *v = (rho * *v + (1.0 - rho * rho).sqrt() * sigma * gauss()).clamp(-amplitude, amplitude);
-                }
-                let omega = Vector3::new(x[0], x[1], x[2]).map(f64::to_radians);
-                poses.set(
-                    si,
-                    coupe.index(),
-                    mouvement_rigide(&omega, &Vector3::new(x[3], x[4], x[5]), &coupe.geometric_center()),
-                );
-            }
-        }
-        poses
-    }
-
     fn lire_poses_tsv(chemin: &Path, stacks: &[Stack]) -> SlicePoses {
         let mut poses = SlicePoses::identity(stacks);
         for ligne in std::fs::read_to_string(chemin)
@@ -12311,9 +12183,19 @@ mod tests {
         stacks[1].set_slice_times(instants_entrelaces(12));
         let empreintes: Vec<(String, u64)> = ["independante", "lisse", "sauts", "stack"]
             .iter()
-            .map(|m| (m.to_string(), empreinte_des_poses(&mouvement_vrai(&stacks, m, 3.0, 7), &stacks)))
+            .map(|m| {
+                (
+                    m.to_string(),
+                    empreinte_des_poses(&mouvement_vrai(&stacks, m, 3.0, 7), &stacks),
+                )
+            })
             .collect();
-        let attendues: [u64; 4] = [6979914938435424673, 5240878286591737327, 17756321101287233842, 14471395011525650189];
+        let attendues: [u64; 4] = [
+            6979914938435424673,
+            5240878286591737327,
+            17756321101287233842,
+            14471395011525650189,
+        ];
         for ((m, e), a) in empreintes.iter().zip(attendues) {
             assert_eq!(*e, a, "modèle {m}");
         }

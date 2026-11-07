@@ -1629,6 +1629,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode, tests)** : deux préconditions de mes propres tests étaient fausses (une rampe de contraste ×8 ne donne qu'un rapport ≈ 2,7 entre les bandes mesurées ; une transformation `3v + 40` qui laisse les zéros à zéro n'est pas affine). Écrire dans le test la précondition (`assert!(avant > 3.0)`) a révélé la première tout de suite. Les mutants (variance non lissée, moyenne sans masque) sont tués ; le premier a demandé d'ajouter un critère (l'écart type de `|valeur|`).
 - **Où** : `crates/medoxide-svr/src/s2s.rs` (`normalisation_locale_coupe`), `crates/medoxide-svr/src/lib.rs` (`Volume::locally_normalised`, `Stack::locally_normalised`), `crates/medoxide-svr/src/recon.rs` (`the_local_normalisation_removes_gain_and_offset_and_respects_the_mask`).
 
+## 2026-11-07 — Remonter du code de test vers un module de production : `pub(crate)` et `cfg_attr`
+
+- **Quoi (concept)** : un élément Rust est privé par défaut ; `pub(crate)` le rend visible dans toute la crate mais pas pour les autres crates (ici, `medx` ne le voit pas), ce qui évite d'élargir l'API publique. Un module `#[cfg(test)]` n'existe que pour `cargo test` : ce qui s'y trouve est invisible du code de production. Pour réutiliser un helper de test dans un programme, on le déplace dans un module ordinaire, et les tests l'importent par `use crate::module::{…}`. Tant qu'aucun code de production ne l'appelle, le compilateur signale du code mort ; `#[cfg_attr(not(test), allow(dead_code))]` n'applique `allow(dead_code)` que hors tests, et se retire dès que le simulateur utilise le module.
+- **Quoi (méthode)** : avant de déplacer les générateurs de mouvement vrai d'E2, un test d'empreinte (repliement XOR des bits de toutes les poses de quatre modèles, graine fixée) est écrit sur l'ancien code, ses valeurs sont figées, puis il est relancé après le déplacement : le texte des fonctions est extrait par script, pas retapé, et l'identité est vérifiée bit à bit.
+- **Où** : `crates/medoxide-svr/src/mouvement.rs`, `crates/medoxide-svr/src/lib.rs` (déclaration du module), `crates/medoxide-svr/src/recon.rs` (`the_true_motion_models_keep_their_recorded_fingerprints`).
+
 ---
 
 *(à compléter à la prochaine étape)*
