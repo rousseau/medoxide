@@ -43,6 +43,14 @@ assemblée.
 
 Les écarts d'intensité sont relatifs au maximum de la valeur de référence.
 
+## Juge hors échantillon contre la vérité du banc interne (F4.0.2)
+
+**Question.** Le juge hors échantillon (reconstruire avec deux stacks, prédire le troisième) classe-t-il des variantes comme le fait la vérité d'un banc simulé ? **Mesure.** Six sujets simulés avec les réglages figés du banc interne, mouvement lisse ±6, trois replis par sujet (un stack mis de côté), cinq variantes : en-tête seul et alignement coupe-volume avec α = 0,03 / 0,05 / 0,1 / 0,3. Corrélation de rang de Spearman, par repli, entre le juge et le PSNR à la vérité, moyennée sur les replis puis sur les sujets (le sujet est l'unité statistique). **Critère fixé avant la mesure** : ρ̄ ≥ 0,8 le juge garde son rôle ; entre 0,5 et 0,8 il ne décide pas seul ; sous 0,5 il sort de la règle de décision.
+
+**Résultat : ρ̄ = +0,42** (de +0,23 à +0,60 selon le sujet), donc le juge sort de la règle de décision. Sur les seules variantes α, ρ̄ = −0,06 : le juge croît avec α dans les 18 replis (il désigne α = 0,3 partout) alors que le PSNR à la vérité est maximal à α = 0,1 et baisse à α = 0,3. Il voit en revanche l'écart grossier (l'en-tête seul est moins bon que α = 0,05 au juge comme au PSNR dans 17 replis sur 18). Hypothèse non vérifiée : le juge récompense le lissage, qui prédit mieux une pile mise de côté bruitée.
+
+**Limite.** Le banc interne n'est pas plausible en absolu (réglages non physiques) et n'est valable que pour des comparaisons relatives : ce résultat dit que le juge ne suit pas la vérité du banc, pas qu'il échouerait sur des données réelles.
+
 ## Limites
 
 - Les 8 volumes viennent d'un seul jeu de données, et les mesures d'un seul Mac.

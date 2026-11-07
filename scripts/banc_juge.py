@@ -80,6 +80,8 @@ def construire_racine(simule, racine, code):
 
 
 def preparer(a):
+    if not a.remote:
+        sys.exit("--remote (ou la variable d'environnement exportée OXIDE_REMOTE) est requis")
     sujets = bs.lire_tirage(a.tirage, "dev")
     lignes = []
     for numero, r in enumerate(sujets, start=1):
