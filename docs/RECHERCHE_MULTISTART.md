@@ -408,3 +408,16 @@ Lecture : (1) sur les sujets calmes, le mouvement entre coupes voisines est de 0
 **Critères.** L'oracle **passe** (la piste est poursuivie, c'est-à-dire qu'on réfléchit à un solveur pondéré et à une règle de détection réelle, avec ses propres critères écrits avant) si (a) `G` moyen sur les six âges ≥ **5 %** ; (b) la netteté S moyenne ne baisse pas de plus de 2 % ; (c) aucun âge n'a un `G` moyen inférieur à −2 %. Sinon, la pondération des coupes est **abandonnée** : l'option `--robust-rounds` et `--s2s-exclude-fraction` restent désactivées, le § 22 est confirmé, et on le consigne ici avec les chiffres.
 
 **Limites connues, écrites d'avance.** Le contenu est un atlas lisse et sans pathologie ni artefact : un oracle qui échoue ici n'exclut pas un gain sur des artefacts réels (coupes sombres, rayures), non simulés. La porte teste l'information de pose, pas l'information d'intensité (une pondération par aberrants d'intensité est un autre problème, non couvert).
+
+**Résultat (2026-11-07).** 36 runs prévus (6 âges × 2 scénarios × 3 graines) ; l'oracle exclut de 14 à 78 coupes sur 120 (couverture oracle/base de 0,51 à 0,77 selon l'âge). **Quatre reconstructions oracle sont dégénérées** (trois entièrement NaN, une à 489 voxels : CRL23 lisse graines 7 et 13, CRL29 lisse 13, CRL32 lisse 13) : le gradient conjugué diverge quand on retire autant de coupes d'un mouvement lisse ±6 mm. Ce cas n'était pas prévu par les critères ; il est écarté de la moyenne et listé (la moyenne porte sur 32 runs), ce qui avantage l'oracle (il n'est pas compté perdant sur ses échecs numériques).
+
+| âge | E base | E oracle | gain G | ΔS | couverture oracle/base |
+|---|---|---|---|---|---|
+| 23 | 0,368 | 0,414 | −11,8 % | −13,6 % | 0,51 |
+| 26 | 0,288 | 0,304 | −5,1 % | −7,8 % | 0,72 |
+| 29 | 0,257 | 0,274 | −6,2 % | −6,9 % | 0,76 |
+| 32 | 0,260 | 0,262 | +0,1 % | −7,4 % | 0,76 |
+| 35 | 0,251 | 0,251 | +0,3 % | −6,8 % | 0,77 |
+| 37 | 0,250 | 0,242 | +3,3 % | −5,6 % | 0,77 |
+
+(a) `G` moyen **−3,2 %** (≥ 5 % exigé) : non tenu ; (b) ΔS moyen **−8,0 %** (≥ −2 %) : non tenu ; (c) pire âge **−11,8 %** (≥ −2 %) : non tenu. **L'oracle échoue sur les trois critères : la pondération des coupes est abandonnée.** Même avec la vraie erreur de pose de chaque coupe, retirer les coupes mal recalées ne rapproche pas le volume de la vérité : la perte de couverture et d'information (chaque voxel est vu par moins de coupes) coûte plus que les coupes mal placées ne nuisent. Seul l'âge 37 (volume le plus grand, donc le plus redondant) approche un gain (+3,3 %), sous le seuil. Le solveur n'est pas modifié ; `--robust-rounds` et `--s2s-exclude-fraction` restent désactivés ; le § 22 est confirmé. La limite écrite d'avance reste valable : des artefacts d'intensité réels (coupes sombres, rayures) ne sont pas simulés. Données : `data/svr/oracle/oracle_resultats.tsv` (local, non publié) ; scripts `scripts/preparer_atlas_crl.py`, `lancer_oracle_ponderation.sh`, `analyse_oracle_ponderation.py` ; banc : `MEDOXIDE_ATLAS`, `MEDOXIDE_ORACLE_SORTIE` dans `diagnose_the_semi_synthetic_benchmark`.

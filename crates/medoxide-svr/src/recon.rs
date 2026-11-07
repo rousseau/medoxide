@@ -6591,8 +6591,12 @@ mod tests {
         use crate::bias::{estimate_bias_fields, BiasConfig};
         use crate::pipeline::correct_stacks;
         use crate::s2s::{register_slices_s2s, S2sConfig};
-        let mut modeles = stacks_reels();
         let lire = |nom: &str, defaut: &str| std::env::var(nom).unwrap_or_else(|_| defaut.into());
+        // MEDOXIDE_ATLAS=<nom> (par exemple `CRL29`, voir `scripts/preparer_atlas_crl.py`) : fantôme numérique, piles et contenu viennent de l'atlas (`stacks_atlas_sans_bruit`) au lieu d'un sujet réel
+        let atlas = std::env::var("MEDOXIDE_ATLAS")
+            .ok()
+            .map(|nom| stacks_atlas_sans_bruit(&nom));
+        let mut modeles = atlas.as_ref().map_or_else(stacks_reels, |(_, piles)| piles.clone());
         // MEDOXIDE_ENTRELACE=1 : acquisition simulée entrelacée (coupes paires puis impaires) ; le mouvement lisse ou à sauts l'est dans le TEMPS d'acquisition
         let entrelace = lire("MEDOXIDE_ENTRELACE", "0") == "1";
         if entrelace {
@@ -6600,9 +6604,18 @@ mod tests {
                 stack.set_slice_times(instants_entrelaces(stack.dim().2));
             }
         }
-        let volume = Volume::from_stack(
-            &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap(),
+        let volume = atlas.map_or_else(
+            || {
+                Volume::from_stack(
+                    &Stack::read(Path::new(&std::env::var("MEDOXIDE_VOLUME").expect("MEDOXIDE_VOLUME"))).unwrap(),
+                )
+            },
+            |(contenu, _)| contenu,
         );
+        // MEDOXIDE_ORACLE_SORTIE=<dossier> : après chaque variante, reconstruit deux volumes (α = 0,05, couverture 1) aux poses estimées, `base` (toutes les coupes) et `oracle` (les coupes dont
+        // l'erreur de pose VRAIE dépasse MEDOXIDE_ORACLE_MM, défaut 1,5 mm, ont leur masque vidé), écrits dans le dossier : porte « oracle » de la pondération des coupes (docs/RECHERCHE_MULTISTART.md § 24)
+        let oracle_sortie = std::env::var("MEDOXIDE_ORACLE_SORTIE").ok();
+        let oracle_mm: f64 = lire("MEDOXIDE_ORACLE_MM", "1.5").parse().unwrap();
         let modele = lire("MEDOXIDE_MODELE", "independante");
         let amplitudes: Vec<f64> = lire("MEDOXIDE_AMPLITUDES", "3")
             .split(',')
@@ -6701,6 +6714,42 @@ mod tests {
                     }
                     let (p, m, q) = part(&poses);
                     println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
+                    if let Some(dossier) = &oracle_sortie {
+                        let reglages = crate::pipeline::ReconstructionConfig {
+                            alpha: 0.05,
+                            min_stack_coverage: 1,
+                            ..Default::default()
+                        };
+                        let grille = reconstruction_grid(&travail, reglages.resolution_mm, reglages.margin_mm).unwrap();
+                        let erreurs = erreurs_de_pose_sans_mouvement_commun(&stacks, &poses, &vraies);
+                        let (mut i, mut exclues_total) = (0, 0);
+                        let oracle: Vec<Stack> = travail
+                            .iter()
+                            .map(|stack| {
+                                let exclues: Vec<usize> = (0..stack.dim().2)
+                                    .filter(|k| erreurs[i + k] > oracle_mm) // NaN : jamais exclue
+                                    .collect();
+                                i += stack.dim().2;
+                                exclues_total += exclues.len();
+                                stack.without_slices(&exclues)
+                            })
+                            .collect();
+                        std::fs::create_dir_all(dossier).unwrap();
+                        for (etiquette, piles) in [("base", &travail), ("oracle", &oracle)] {
+                            let x = crate::pipeline::reconstruct_with_poses(&grille, piles, &poses, &reglages).unwrap();
+                            let h = en_tete(&grille.affine, [grille.resolution_mm as f32; 3]);
+                            WriterOptions::new(
+                                Path::new(dossier).join(format!("{modele}_{a}_{graine}_{etiquette}.nii.gz")),
+                            )
+                            .reference_header(&h)
+                            .write_nifti(&x.mapv(|v| v as f32))
+                            .unwrap();
+                        }
+                        println!(
+                            "ORACLE {modele} {a} {graine} {nom} exclues {exclues_total} sur {}",
+                            erreurs.len()
+                        );
+                    }
                     if detail {
                         // une ligne par coupe : stack, coupe, déplacement vrai (écart de l'en-tête à la vérité) et erreur après recalage (mm)
                         let (avant, apres) = (
