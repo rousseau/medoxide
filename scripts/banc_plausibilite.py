@@ -116,6 +116,28 @@ def largeur_de_bord(pile, emplacements, espacement_mm):
     return np.array(largeurs)
 
 
+def _autres_axes(axe):
+    """Les deux autres axes d'un tableau 3D, dans l'ordre croissant."""
+    return [a for a in range(3) if a != axe]
+
+
+def emplacements_de_bord_axe(pile, masque, mu, axe, n_max=N_EMPLACEMENTS):
+    """Comme `emplacements_de_bord`, mais le long de l'axe `axe` du tableau (0 ou 1 : DANS le plan de la coupe ; 2 : entre coupes). Mêmes règles,
+    mêmes seuils ; les emplacements sont rendus en indices du tableau d'origine."""
+    deplace = np.moveaxis(pile, axe, 2)
+    emp = emplacements_de_bord(deplace, np.moveaxis(masque, axe, 2), mu, n_max)
+    sortie = np.empty_like(emp)
+    sortie[:, _autres_axes(axe)] = emp[:, :2]
+    sortie[:, axe] = emp[:, 2]
+    return sortie
+
+
+def largeur_de_bord_axe(pile, emplacements, pas_mm, axe):
+    """Comme `largeur_de_bord`, le long de l'axe `axe` (emplacements en indices du tableau d'origine, `pas_mm` : pas des voxels sur cet axe)."""
+    emp = np.asarray(emplacements, dtype=int).reshape(-1, 3)
+    return largeur_de_bord(np.moveaxis(pile, axe, 2), emp[:, _autres_axes(axe) + [axe]], pas_mm)
+
+
 def lire_plage_biais(texte):
     """Plages (`max − min` du log du champ) de chaque pile, lues dans la sortie de `diagnose_the_estimated_bias_range` (lignes `BIAIS pile min max etendue reduction`)."""
     return [float(m.group(1)) for m in re.finditer(r"^BIAIS \d+ \S+ \S+ (\S+) \S+$", texte, re.M)]

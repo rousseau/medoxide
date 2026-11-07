@@ -107,6 +107,40 @@ class TestBord(unittest.TestCase):
         self.assertEqual(len(bp.emplacements_de_bord(p, m, 1e6, n_max=10)), 0)
 
 
+class TestBordDansLePlan(unittest.TestCase):
+    def test_une_rampe_dans_chaque_axe_donne_la_meme_largeur(self):
+        """Une rampe de 4 pixels (0,8 × 4 = 3,2 pixels de 10 à 90 %) le long de l'axe 0, puis 1, puis 2 : même largeur en mm, emplacements sur l'axe demandé."""
+        for axe in (0, 1, 2):
+            n = [6, 6, 6]
+            n[axe] = 14
+            p = np.zeros(n)
+            idx = np.arange(14)
+            valeurs = 1000.0 * np.clip((idx - 4) / 4.0, 0.0, 1.0)
+            p = np.moveaxis(np.broadcast_to(valeurs, (6, 6, 14)).copy(), 2, axe)
+            m = np.ones(p.shape, dtype=bool)
+            emp = bp.emplacements_de_bord_axe(p, m, 500.0, axe, n_max=10)
+            self.assertGreater(len(emp), 0, axe)
+            self.assertTrue(all(e[axe] == 5 for e in emp), (axe, emp[:3]))
+            self.assertTrue(np.allclose(bp.largeur_de_bord_axe(p, emp, 0.7, axe), 3.2 * 0.7), axe)
+
+    def test_axe_2_identique_a_la_version_entre_coupes(self):
+        rng = np.random.default_rng(1)
+        p = np.cumsum(rng.random((8, 8, 16)) * 100.0, axis=2)
+        m = np.ones(p.shape, dtype=bool)
+        e1 = bp.emplacements_de_bord(p, m, 300.0, n_max=20)
+        e2 = bp.emplacements_de_bord_axe(p, m, 300.0, 2, n_max=20)
+        self.assertTrue(np.array_equal(e1, e2))
+        self.assertTrue(np.array_equal(bp.largeur_de_bord(p, e1, 2.0), bp.largeur_de_bord_axe(p, e2, 2.0, 2)))
+
+    def test_deux_axes_ne_se_confondent_pas(self):
+        """Bord seulement le long de x : aucun emplacement le long de y (le gradient en y est nul), un seul axe a des bords."""
+        p = np.zeros((14, 14, 14))
+        p[:, :, :] = (1000.0 * np.clip((np.arange(14) - 4) / 4.0, 0.0, 1.0))[:, None, None]
+        m = np.ones(p.shape, dtype=bool)
+        self.assertGreater(len(bp.emplacements_de_bord_axe(p, m, 500.0, 0)), 0)
+        self.assertEqual(len(bp.emplacements_de_bord_axe(p, m, 500.0, 1)), 0)
+
+
 class TestDivers(unittest.TestCase):
     def test_lecture_de_la_plage_du_biais(self):
         texte = "bruit\nBIAIS 0 -0.1000 0.2000 0.3000 0.0500\nBIAIS 1 -0.2 0.4 0.6 0.1\nautre\n"
@@ -128,13 +162,36 @@ class TestCalibrage(unittest.TestCase):
     def test_rapports_mediane_sur_les_trois_piles(self):
         import banc_calibrage as bc
 
-        reel = [{"bruit_sujet": 0.01, "largeur": 10.0}] * 3
-        mes = [{"bruit_sujet": 0.02, "largeur": 5.0}] * 3
+        reel = [{"bruit_sujet": 0.01, "largeur": 10.0, "largeur_plan": [3.0, 3.0]}] * 3
+        mes = [{"bruit_sujet": 0.02, "largeur": 5.0, "largeur_plan": [3.0, 3.0]}] * 3
         mes = [dict(mes[0], largeur=5.0), dict(mes[0], largeur=10.0), dict(mes[0], largeur=20.0)]
         r = bc.rapports(reel, mes, [0.2, 0.2, 0.2], [0.1, 0.3, 0.4])
         self.assertAlmostEqual(r["bruit"], 2.0)  # le bruit est celui du sujet, identique pour les trois piles
         self.assertAlmostEqual(r["largeur"], 1.0)  # médiane de (0,5 ; 1 ; 2)
         self.assertAlmostEqual(r["biais"], 0.3 / 0.2)
+        self.assertAlmostEqual(r["plan"], 1.0)
+
+    def test_le_rapport_dans_le_plan_est_le_pire_des_deux_directions(self):
+        import banc_calibrage as bc
+
+        reel = [{"bruit_sujet": 0.01, "largeur": 10.0, "largeur_plan": [3.0, 3.0]}] * 3
+        # x : 0,9 (écart de ln = 0,105) ; y : 0,5 (écart de ln = 0,693) -> retenu : y
+        mes = [{"bruit_sujet": 0.01, "largeur": 10.0, "largeur_plan": [2.7, 1.5]}] * 3
+        r = bc.rapports(reel, mes, [0.2] * 3, [0.2] * 3)
+        self.assertAlmostEqual(r["plan_x"], 0.9)
+        self.assertAlmostEqual(r["plan_y"], 0.5)
+        self.assertAlmostEqual(r["plan"], 0.5)
+        # direction trop large contre trop étroite : 1,6 (ln = 0,47) est pire que 0,8 (ln = 0,22)
+        mes = [{"bruit_sujet": 0.01, "largeur": 10.0, "largeur_plan": [4.8, 2.4]}] * 3
+        self.assertAlmostEqual(bc.rapports(reel, mes, [0.2] * 3, [0.2] * 3)["plan"], 1.6)
+
+    def test_rapport_de_calibrage_median_groupe(self):
+        import banc_calibrage as bc
+
+        reel = [[{"largeur_plan": [2.0, 2.0]}] * 3] * 2
+        mes = [[{"largeur_plan": [1.0, 4.0]}] * 3, [{"largeur_plan": [2.0, 2.0]}] * 3]
+        # rapports groupés : 12 valeurs = 6 × {0,5 ; 2} + 6 × {1 ; 1} -> triées : 0,5 ×3, 1 ×6, 2 ×3 -> médiane 1
+        self.assertAlmostEqual(bc.rapport_plan_pour_calibrage(reel, mes), 1.0)
 
 
 if __name__ == "__main__":
