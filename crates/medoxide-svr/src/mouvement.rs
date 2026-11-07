@@ -140,3 +140,10 @@ pub(crate) fn mouvement_vrai(stacks: &[Stack], modele: &str, amplitude: f64, gra
         _ => poses_aleatoires(stacks, amplitude, amplitude, graine),
     }
 }
+
+/// Instants d'acquisition d'un stack entrelacé de `n` coupes : les coupes paires d'abord (0, 2, 4, …), puis les impaires.
+pub(crate) fn instants_entrelaces(n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|j| if j % 2 == 0 { j / 2 } else { n.div_ceil(2) + j / 2 } as f64)
+        .collect()
+}

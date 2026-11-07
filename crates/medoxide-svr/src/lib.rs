@@ -28,17 +28,15 @@
 pub mod align;
 pub mod bias;
 pub mod diff;
-// Générateurs de mouvement vrai remontés des tests (F4.0.1) ; inutilisés hors tests jusqu'au simulateur.
-#[cfg_attr(not(test), allow(dead_code))]
+// Générateurs de mouvement vrai remontés des tests (F4.0.1), utilisés par le simulateur.
 pub(crate) mod mouvement;
 pub mod optimizers;
 pub mod pipeline;
 pub mod qc;
 pub mod recon;
 pub mod s2s;
-// Simulateur d'acquisition indépendant du modèle direct (F4.0.1) ; inutilisé hors tests jusqu'à `medx svr simulate`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod simulation;
+/// Simulateur d'acquisition indépendant du modèle direct de la reconstruction (banc de vérité terrain, F4.0.1) : `medx svr simulate`.
+pub mod simulation;
 pub mod sortie;
 
 use std::path::{Path, PathBuf};

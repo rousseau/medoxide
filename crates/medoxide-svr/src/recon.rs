@@ -742,7 +742,8 @@ impl EdgeWeights {
 mod tests {
     use super::*;
     use crate::mouvement::{
-        mouvement_rigide, mouvement_vrai, poses_aleatoires, poses_lisses, poses_par_stack_reel, Alea,
+        instants_entrelaces, mouvement_rigide, mouvement_vrai, poses_aleatoires, poses_lisses, poses_par_stack_reel,
+        Alea,
     };
     use nalgebra::{Rotation3, Vector4};
     use nifti::{writer::WriterOptions, NiftiHeader};
@@ -4731,13 +4732,6 @@ mod tests {
             prior_temporel(stack, &poses, 0, k, id, &points, 0.0, &device).is_none(),
             "(d)"
         );
-    }
-
-    /// Instants d'acquisition d'un stack entrelacé de `n` coupes : les coupes paires d'abord (0, 2, 4, …), puis les impaires.
-    fn instants_entrelaces(n: usize) -> Vec<f64> {
-        (0..n)
-            .map(|j| if j % 2 == 0 { j / 2 } else { n.div_ceil(2) + j / 2 } as f64)
-            .collect()
     }
 
     /// Voisines temporelles branchées dans les deux a priori (F3.2) : pour une coupe paire intérieure d'un stack entrelacé, dont les voisines dans le temps sont k − 2 et k + 2 (translatées de (2, 0, 0) et (0, 4, 0)) tandis que k − 1 et k + 1 portent une autre pose (0, 0, 9), (a) coupe-volume (`align::prior_temporel`) : la cible est le décalage moyen (1, 2, 0) avec les instants, et celui de k ± 1 (0, 0, 9) sans instants ; (b) coupe-coupe (`s2s::temporal_prior_inputs`) : même contraste ; (c) pour des instants séquentiels, croissants ou décroissants, les cibles des deux a priori sont IDENTIQUES (même vecteur, bit à bit) à celles obtenues sans instants, sur toutes les coupes.

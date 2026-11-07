@@ -6,14 +6,14 @@
 //! profil de coupe en sinc fenêtré et résolution dans le plan par un sinc fenêtré (au lieu de noyaux gaussiens), bruit de Rice, biais lisse,
 //! échelle par coupe. Il ne modifie aucun élément existant.
 
-use crate::mouvement::Alea;
+use crate::mouvement::{instants_entrelaces, mouvement_vrai, Alea};
 use crate::recon::SlicePoses;
-use crate::{Slice, Stack, SvrError, Volume};
+use crate::{read_stacks, Slice, Stack, SvrError, Volume};
 use nalgebra::{Matrix4, Vector3};
 use ndarray::{Array2, Array3};
 use nifti::{writer::WriterOptions, NiftiHeader};
 use rayon::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Pôle du préfiltre de la B-spline cubique : `z = √3 − 2`.
 const POLE: f64 = -0.267_949_192_431_122_7;
@@ -352,6 +352,16 @@ fn coupe_propre(
     sortie
 }
 
+/// Moteur qui calcule les valeurs SANS bruit d'une coupe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moteur {
+    /// Modèle de ce module : B-spline cubique, profil de coupe et noyau dans le plan en sinc fenêtré (indépendant de la reconstruction).
+    Independant,
+    /// Modèle direct de la reconstruction (`Volume::simulate_slice`, PSF gaussienne, interpolation trilinéaire) : le « crime inverse » du banc E2,
+    /// gardé pour mesurer son effet (critère (iv) de F4.0.1). Même mouvement, même biais, même bruit.
+    ModeleDirect,
+}
+
 /// **Simule une pile** : géométrie, résolution et épaisseur de `modele` ; mouvement vrai `poses` (pile numéro `pile`) ; biais, échelle de coupe
 /// et bruit de Rice selon `r`. Renvoie les valeurs et le masque (pixel dont la valeur sans bruit dépasse 3 % du maximum de la source). Déterministe :
 /// les graines dépendent de (réglage, pile, coupe), jamais de l'ordre d'exécution des fils.
@@ -362,6 +372,7 @@ pub(crate) fn simuler_pile(
     pile: usize,
     poses: &SlicePoses,
     r: &ReglagesSimulation,
+    moteur: Moteur,
     intensite_moyenne: f64,
 ) -> (Array3<f32>, Array3<u8>) {
     let dim = modele.dim();
@@ -380,7 +391,19 @@ pub(crate) fn simuler_pile(
         .map(|k| {
             let nominale = modele.slice(k).expect("indice de coupe valide");
             let posee = nominale.with_motion(*poses.get(pile, k));
-            let propre = coupe_propre(source, spline, &posee, &profil, &noyau_x, &noyau_y);
+            let propre = match moteur {
+                Moteur::Independant => coupe_propre(source, spline, &posee, &profil, &noyau_x, &noyau_y),
+                Moteur::ModeleDirect => {
+                    let sim = source.simulate_slice(&posee, &posee.psf());
+                    let mut v = Array2::<f64>::zeros((dim.0, dim.1));
+                    for ((i, j), x) in v.indexed_iter_mut() {
+                        if sim.coverage[[i, j]] >= 0.99 {
+                            *x = f64::from(sim.values[[i, j]]);
+                        }
+                    }
+                    v
+                }
+            };
             let mut alea = Alea(graine_de(r.graine, 1, pile, k));
             let mut valeurs = Array2::<f32>::zeros((dim.0, dim.1));
             let mut masque = Array2::<u8>::zeros((dim.0, dim.1));
@@ -456,6 +479,230 @@ pub(crate) fn ecrire_pile(
     let mut stack = Stack::read(image)?;
     stack.set_brain_mask(masque_chemin)?;
     Ok(stack)
+}
+
+/// Réglages complets de [`simuler`].
+#[derive(Debug, Clone)]
+pub struct ConfigSimulation {
+    /// Modèle de mouvement vrai : `aucun`, `independante`, `lisse`, `sauts` ou `stack` (voir `crate::mouvement`).
+    pub mouvement: String,
+    /// Amplitude du mouvement, en degrés et en mm (tirages bornés par ± amplitude).
+    pub amplitude: f64,
+    /// Acquisition entrelacée (coupes paires puis impaires) : le mouvement lisse ou à sauts l'est dans le TEMPS d'acquisition, et un fichier
+    /// `SliceTiming` accompagne chaque pile.
+    pub entrelace: bool,
+    /// Écart type du bruit de Rice, en % de l'intensité moyenne du tissu.
+    pub bruit_pct: f64,
+    /// Amplitude du biais multiplicatif lisse, en %.
+    pub biais_pct: f64,
+    /// Écart type, en %, du logarithme du facteur d'échelle de chaque coupe.
+    pub echelle_coupe_pct: f64,
+    /// Graine de tout le tirage (poses, bruit, biais, échelles).
+    pub graine: u64,
+    /// Moteur des valeurs sans bruit.
+    pub moteur: Moteur,
+}
+
+impl Default for ConfigSimulation {
+    /// Sans mouvement, bruit, biais ni échelle ; graine 1 ; moteur indépendant.
+    fn default() -> Self {
+        ConfigSimulation {
+            mouvement: "aucun".into(),
+            amplitude: 0.0,
+            entrelace: false,
+            bruit_pct: 0.0,
+            biais_pct: 0.0,
+            echelle_coupe_pct: 0.0,
+            graine: 1,
+            moteur: Moteur::Independant,
+        }
+    }
+}
+
+/// Fichiers écrits par [`simuler`] et part du cerveau de la source couverte par chaque pile.
+#[derive(Debug, Clone)]
+pub struct RapportSimulation {
+    /// Piles simulées (`<nom>_acq-<n>_T2w.nii.gz`), dans l'ordre des gabarits.
+    pub piles: Vec<PathBuf>,
+    /// Masques des piles (`<nom>_acq-<n>_mask.nii.gz`).
+    pub masques: Vec<PathBuf>,
+    /// Poses vraies (`<nom>_poses_vraies.tsv`), au format de `medx svr recon --poses` : le mouvement est composé APRÈS l'affine d'en-tête de la pile.
+    pub poses_vraies: PathBuf,
+    /// Pour chaque pile, part (0 à 1) des voxels du cerveau de la source qui tombent dans sa grille, à la pose d'en-tête.
+    pub couverture_du_cerveau: Vec<f64>,
+}
+
+fn erreur_ecriture(chemin: &Path, e: impl std::fmt::Display) -> SvrError {
+    SvrError::Write {
+        path: chemin.to_path_buf(),
+        message: e.to_string(),
+    }
+}
+
+/// Barycentre, en coordonnées du monde, des voxels de `stack` qui vérifient `garde`.
+fn barycentre_monde(stack: &Stack, garde: impl Fn(f32) -> bool) -> Vector3<f64> {
+    let (mut somme, mut n) = (Vector3::<f64>::zeros(), 0.0_f64);
+    for ((i, j, k), &v) in stack.data().indexed_iter() {
+        if garde(v) {
+            somme += Vector3::new(i as f64, j as f64, k as f64);
+            n += 1.0;
+        }
+    }
+    let b = somme / n.max(1.0);
+    (stack.affine() * b.push(1.0)).xyz()
+}
+
+/// Part des points `cerveau` (monde) qui tombent dans la grille de `pile` (affine d'en-tête, sans mouvement).
+fn couverture(pile: &Stack, cerveau: &[Vector3<f64>]) -> f64 {
+    let inverse = pile.affine().try_inverse().expect("l'affine d'un Stack est inversible");
+    let d = pile.dim();
+    let dedans = cerveau
+        .iter()
+        .filter(|p| {
+            let c = (inverse * p.push(1.0)).xyz();
+            c.x >= -0.5
+                && c.x <= d.0 as f64 - 0.5
+                && c.y >= -0.5
+                && c.y <= d.1 as f64 - 0.5
+                && c.z >= -0.5
+                && c.z <= d.2 as f64 - 0.5
+        })
+        .count();
+    dedans as f64 / cerveau.len().max(1) as f64
+}
+
+/// Écrit les poses vraies, au format de `medx svr recon --poses` (en-tête `stack slice m00 m10 …`, matrice 4 × 4 en ordre colonne, pile désignée par son nom).
+fn ecrire_poses_vraies(chemin: &Path, piles: &[Stack], poses: &SlicePoses) -> Result<(), SvrError> {
+    let colonnes: Vec<String> = (0..4).flat_map(|c| (0..4).map(move |l| format!("m{l}{c}"))).collect();
+    let mut lignes = vec![format!("stack\tslice\t{}", colonnes.join("\t"))];
+    for (s, pile) in piles.iter().enumerate() {
+        let nom = medoxide_core::bids::nom_de_pile(pile.path());
+        for k in 0..pile.dim().2 {
+            let valeurs: Vec<String> = poses.get(s, k).iter().map(|v| format!("{v:?}")).collect();
+            lignes.push(format!("{nom}\t{k}\t{}", valeurs.join("\t")));
+        }
+    }
+    std::fs::write(chemin, lignes.join("\n") + "\n").map_err(|e| erreur_ecriture(chemin, e))
+}
+
+/// **Simule une série de piles** à partir d'un volume source (reconstruction de haute qualité) : les piles ont la géométrie des `gabarits` (piles
+/// réelles, dont seuls l'en-tête et les dimensions servent), translatées pour que leur centre moyen tombe sur le centre du cerveau de la source
+/// (barycentre de `masque_source`, ou des voxels de plus de 3 % du maximum si absent), avec le mouvement vrai, le biais, l'échelle de coupe et le
+/// bruit de `cfg`. Écrit dans `dossier` les piles, leurs masques, les poses vraies et, si `cfg.entrelace`, un `SliceTiming` par pile.
+///
+/// # Erreurs
+/// Lecture de la source, du masque ou d'un gabarit ; écriture d'un fichier (avec son chemin).
+pub fn simuler(
+    source_chemin: &Path,
+    masque_source: Option<&Path>,
+    gabarits: &[PathBuf],
+    dossier: &Path,
+    nom: &str,
+    cfg: &ConfigSimulation,
+) -> Result<RapportSimulation, SvrError> {
+    std::fs::create_dir_all(dossier).map_err(|e| erreur_ecriture(dossier, e))?;
+    let source_stack = Stack::read(source_chemin)?;
+    let source = Volume::from_stack(&source_stack);
+    let spline = BSpline3::new(source.data());
+    let maximum = source.data().iter().copied().fold(0.0_f32, f32::max);
+    let centre_source = match masque_source {
+        Some(m) => barycentre_monde(&Stack::read(m)?, |v| v > 0.5),
+        None => barycentre_monde(&source_stack, |v| v > 0.03 * maximum),
+    };
+    let lus = read_stacks(gabarits)?;
+    let centres: Vec<Vector3<f64>> = lus
+        .iter()
+        .map(|g| {
+            let d = g.dim();
+            (g.affine()
+                * Vector3::new((d.0 - 1) as f64 / 2.0, (d.1 - 1) as f64 / 2.0, (d.2 - 1) as f64 / 2.0).push(1.0))
+            .xyz()
+        })
+        .collect();
+    let decalage = centre_source - centres.iter().sum::<Vector3<f64>>() / centres.len().max(1) as f64;
+
+    let (mut piles, mut chemins, mut masques) = (vec![], vec![], vec![]);
+    for (n, g) in lus.iter().enumerate() {
+        let base = format!("{nom}_acq-{}", n + 1);
+        let (image, masque) = (
+            dossier.join(format!("{base}_T2w.nii.gz")),
+            dossier.join(format!("{base}_mask.nii.gz")),
+        );
+        if cfg.entrelace {
+            let json = serde_json::json!({ "SliceTiming": instants_entrelaces(g.dim().2) });
+            let chemin_json = dossier.join(format!("{base}_T2w.json"));
+            std::fs::write(&chemin_json, json.to_string()).map_err(|e| erreur_ecriture(&chemin_json, e))?;
+        }
+        let mut affine = *g.affine();
+        for r in 0..3 {
+            affine[(r, 3)] += decalage[r];
+        }
+        let d = g.dim();
+        let mut pile = ecrire_pile(
+            &image,
+            &masque,
+            &Array3::zeros(d),
+            &Array3::from_elem(d, 1u8),
+            &affine,
+            g.spacing(),
+        )?;
+        if cfg.entrelace {
+            // `Stack::read` ne lit pas `SliceTiming` : on attache les instants pour que le mouvement lisse le soit dans le temps d'acquisition
+            pile.set_slice_times(instants_entrelaces(d.2));
+        }
+        piles.push(pile);
+        chemins.push(image);
+        masques.push(masque);
+    }
+    let poses = if cfg.mouvement == "aucun" {
+        SlicePoses::identity(&piles)
+    } else {
+        mouvement_vrai(&piles, &cfg.mouvement, cfg.amplitude, melange(cfg.graine) | 1)
+    };
+    let reglages = ReglagesSimulation {
+        bruit_pct: cfg.bruit_pct,
+        biais_pct: cfg.biais_pct,
+        echelle_coupe_pct: cfg.echelle_coupe_pct,
+        graine: cfg.graine,
+    };
+    let intensite = intensite_moyenne_du_tissu(&source);
+    for (n, modele) in piles.iter().enumerate() {
+        let (data, masque) = simuler_pile(&source, &spline, modele, n, &poses, &reglages, cfg.moteur, intensite);
+        ecrire_pile(
+            &chemins[n],
+            &masques[n],
+            &data,
+            &masque,
+            modele.affine(),
+            modele.spacing(),
+        )?;
+    }
+    let poses_vraies = dossier.join(format!("{nom}_poses_vraies.tsv"));
+    ecrire_poses_vraies(&poses_vraies, &piles, &poses)?;
+    let cerveau: Vec<Vector3<f64>> = match masque_source {
+        Some(m) => {
+            let ms = Stack::read(m)?;
+            ms.data()
+                .indexed_iter()
+                .filter(|(_, &v)| v > 0.5)
+                .map(|((i, j, k), _)| (ms.affine() * Vector3::new(i as f64, j as f64, k as f64).push(1.0)).xyz())
+                .collect()
+        }
+        None => source_stack
+            .data()
+            .indexed_iter()
+            .filter(|(_, &v)| v > 0.03 * maximum)
+            .map(|((i, j, k), _)| (source_stack.affine() * Vector3::new(i as f64, j as f64, k as f64).push(1.0)).xyz())
+            .collect(),
+    };
+    let pas = (cerveau.len() / 20_000).max(1);
+    let echantillon: Vec<Vector3<f64>> = cerveau.into_iter().step_by(pas).collect();
+    Ok(RapportSimulation {
+        couverture_du_cerveau: piles.iter().map(|p| couverture(p, &echantillon)).collect(),
+        piles: chemins,
+        masques,
+        poses_vraies,
+    })
 }
 
 #[cfg(test)]
@@ -698,6 +945,7 @@ mod tests {
             0,
             &SlicePoses::identity(std::slice::from_ref(&pile)),
             &NUL,
+            Moteur::Independant,
             100.0,
         );
         for &(i, j, k) in &[(0, 0, 0), (7, 8, 3), (15, 15, 7), (3, 12, 5)] {
@@ -730,7 +978,7 @@ mod tests {
                 ),
             );
         }
-        let (data, _) = simuler_pile(&source, &spline, &pile, 0, &poses, &NUL, 100.0);
+        let (data, _) = simuler_pile(&source, &spline, &pile, 0, &poses, &NUL, Moteur::Independant, 100.0);
         for k in [0, 3, 7] {
             let posee = pile.slice(k).unwrap().with_motion(*poses.get(0, k));
             let direct = source.simulate_slice(&posee, &posee.psf());
@@ -757,8 +1005,8 @@ mod tests {
         let spline = BSpline3::new(constante.data());
         let poses = SlicePoses::identity(std::slice::from_ref(&pile));
         let r = ReglagesSimulation { bruit_pct: 5.0, ..NUL };
-        let (a, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
-        let (b, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
+        let (a, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, Moteur::Independant, 100.0);
+        let (b, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, Moteur::Independant, 100.0);
         assert!(a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits()));
         let n = a.len() as f64;
         let e2 = a.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / n;
@@ -773,6 +1021,7 @@ mod tests {
             0,
             &poses,
             &ReglagesSimulation { graine: 6, ..r },
+            Moteur::Independant,
             100.0,
         );
         assert!(a.iter().zip(c.iter()).any(|(x, y)| x.to_bits() != y.to_bits()));
@@ -790,7 +1039,7 @@ mod tests {
             echelle_coupe_pct: 5.0,
             ..NUL
         };
-        let (data, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
+        let (data, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, Moteur::Independant, 100.0);
         let echelles = echelles_par_coupe(8, &r, 0);
         for k in 0..8 {
             for &(i, j) in &[(0, 0), (8, 8), (15, 3)] {
@@ -852,5 +1101,190 @@ mod tests {
         }
         let source = Volume::new(data, Matrix4::identity()).unwrap();
         assert!((intensite_moyenne_du_tissu(&source) - (10.0 * 100.0 + 20.0 * 150.0) / 30.0).abs() < 1e-9);
+    }
+
+    /// Nombre de coupes des gabarits synthétiques (18 × 3 mm = 54 mm : couvre la boule jusqu'au seuil du masque).
+    const NZ: usize = 18;
+
+    /// Source synthétique : boule gaussienne (σ = 9 mm, centre en (5, −3, 2) mm) sur 64³ voxels de 1 mm, et trois gabarits obliques (40 × 40 × 18 pixels de
+    /// 1,5 × 1,5 × 3 mm) placés LOIN de l'origine (centres vers (200, −100, 50)) pour vérifier le recentrage sur le cerveau. Renvoie (source, masque, gabarits).
+    fn source_et_gabarits(t: &Temp) -> (std::path::PathBuf, std::path::PathBuf, Vec<std::path::PathBuf>) {
+        let mut a = Matrix4::identity();
+        for r in 0..3 {
+            a[(r, 3)] = -32.0;
+        }
+        let f = |i: usize, j: usize, k: usize| {
+            let (x, y, z) = (i as f64 - 32.0 - 5.0, j as f64 - 32.0 + 3.0, k as f64 - 32.0 - 2.0);
+            1000.0 * (-(x * x + y * y + z * z) / (2.0 * 81.0)).exp()
+        };
+        let data = Array3::from_shape_fn((64, 64, 64), |(i, j, k)| f(i, j, k) as f32);
+        let masque = data.mapv(|v| u8::from(v > 30.0));
+        let source = t.fichier("source.nii.gz");
+        let masque_chemin = t.fichier("source_mask.nii.gz");
+        ecrire_pile(&source, &masque_chemin, &data, &masque, &a, [1.0, 1.0, 1.0]).unwrap();
+        let demi_tour = std::f64::consts::FRAC_PI_2;
+        let gabarits = [
+            nalgebra::Rotation3::from_euler_angles(0.05, -0.04, 0.03),
+            nalgebra::Rotation3::from_euler_angles(demi_tour + 0.04, 0.03, -0.05),
+            nalgebra::Rotation3::from_euler_angles(0.03, demi_tour - 0.04, 0.05),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(n, r)| {
+            let lineaire = r.matrix() * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.5, 1.5, 3.0));
+            let origine =
+                Vector3::new(200.0, -100.0, 50.0) - lineaire * Vector3::new(19.5, 19.5, (NZ as f64 - 1.0) / 2.0);
+            let mut affine = Matrix4::identity();
+            affine.fixed_view_mut::<3, 3>(0, 0).copy_from(&lineaire);
+            affine.fixed_view_mut::<3, 1>(0, 3).copy_from(&origine);
+            let chemin = t.fichier(&format!("gabarit{n}.nii.gz"));
+            ecrire_pile(
+                &chemin,
+                &t.fichier(&format!("gabarit{n}_mask.nii.gz")),
+                &Array3::zeros((40, 40, NZ)),
+                &Array3::from_elem((40, 40, NZ), 1u8),
+                &affine,
+                [1.5, 1.5, 3.0],
+            )
+            .unwrap();
+            chemin
+        })
+        .collect();
+        (source, masque_chemin, gabarits)
+    }
+
+    fn lire_poses(chemin: &Path, n_piles: usize, n_coupes: usize) -> Vec<Matrix4<f64>> {
+        let texte = std::fs::read_to_string(chemin).unwrap();
+        let lignes: Vec<&str> = texte.lines().collect();
+        assert_eq!(
+            lignes.len(),
+            1 + n_piles * n_coupes,
+            "une ligne par coupe et un en-tête"
+        );
+        lignes[1..]
+            .iter()
+            .map(|l| Matrix4::from_iterator(l.split('\t').skip(2).map(|v| v.parse::<f64>().unwrap())))
+            .collect()
+    }
+
+    /// Bout en bout : fichiers écrits, `SliceTiming` entrelacé relu, centre des piles ramené sur le cerveau, cerveau couvert, poses vraies identiques à celles
+    /// que `mouvement_vrai` redonne sur les piles écrites, identité sans mouvement, résultats identiques d'une exécution à l'autre.
+    #[test]
+    fn simulating_a_series_writes_consistent_stacks_and_true_poses() {
+        let t = Temp::new("serie");
+        let (source, masque, gabarits) = source_et_gabarits(&t);
+        let cfg = ConfigSimulation {
+            mouvement: "lisse".into(),
+            amplitude: 3.0,
+            entrelace: true,
+            bruit_pct: 2.0,
+            biais_pct: 5.0,
+            echelle_coupe_pct: 2.0,
+            graine: 7,
+            moteur: Moteur::Independant,
+        };
+        let r = simuler(&source, Some(&masque), &gabarits, &t.0.join("a"), "sim", &cfg).unwrap();
+        assert_eq!(r.piles.len(), 3);
+        let piles = read_stacks(&r.piles).unwrap();
+        for (chemin, (p, c)) in r.piles.iter().zip(piles.iter().zip(&r.couverture_du_cerveau)) {
+            assert_eq!(
+                crate::read_slice_timing(chemin).unwrap(),
+                instants_entrelaces(NZ),
+                "SliceTiming écrit"
+            );
+            assert!(*c > 0.99, "couverture {c}");
+            assert!(p.data().iter().any(|&v| v > 100.0), "la boule doit être dans la pile");
+        }
+        // centre moyen des piles = barycentre de la boule (5, −3, 2)
+        let centre = piles
+            .iter()
+            .map(|p| (p.affine() * Vector3::new(19.5, 19.5, (NZ as f64 - 1.0) / 2.0).push(1.0)).xyz())
+            .sum::<Vector3<f64>>()
+            / 3.0;
+        assert!(
+            (centre - Vector3::new(5.0, -3.0, 2.0)).norm() < 0.2,
+            "centre {centre:?}"
+        );
+        // poses vraies : celles de mouvement_vrai sur les piles écrites (mêmes bits après aller-retour texte)
+        let ecrites = lire_poses(&r.poses_vraies, 3, NZ);
+        let mut avec_instants = read_stacks(&r.piles).unwrap();
+        for p in &mut avec_instants {
+            p.set_slice_times(instants_entrelaces(NZ));
+        }
+        let attendues = mouvement_vrai(&avec_instants, "lisse", 3.0, melange(7) | 1);
+        // lisse dans le TEMPS d'acquisition : deux coupes consécutives dans le temps ont des poses plus proches que deux coupes consécutives par indice
+        let ecart = |i: usize, j: usize, s: usize| (ecrites[s * NZ + i] - ecrites[s * NZ + j]).norm();
+        let ordre = instants_entrelaces(NZ);
+        let mut par_instant: Vec<usize> = (0..NZ).collect();
+        par_instant.sort_by(|&a, &b| ordre[a].total_cmp(&ordre[b]));
+        let (mut temps, mut indice) = (0.0, 0.0);
+        for s in 0..3 {
+            for w in par_instant.windows(2) {
+                temps += ecart(w[0], w[1], s);
+            }
+            for i in 0..NZ - 1 {
+                indice += ecart(i, i + 1, s);
+            }
+        }
+        assert!(temps < 0.8 * indice, "temps {temps} contre indice {indice}");
+        for s in 0..3 {
+            for k in 0..NZ {
+                assert_eq!(ecrites[s * NZ + k], *attendues.get(s, k), "pile {s}, coupe {k}");
+            }
+        }
+        assert!(ecrites.iter().any(|m| *m != Matrix4::identity()));
+        // identité sans mouvement
+        let sans = simuler(
+            &source,
+            Some(&masque),
+            &gabarits,
+            &t.0.join("b"),
+            "sim",
+            &ConfigSimulation::default(),
+        )
+        .unwrap();
+        assert!(lire_poses(&sans.poses_vraies, 3, NZ)
+            .iter()
+            .all(|m| *m == Matrix4::identity()));
+        // reproductibilité
+        let bis = simuler(&source, Some(&masque), &gabarits, &t.0.join("c"), "sim", &cfg).unwrap();
+        for (x, y) in r.piles.iter().zip(&bis.piles) {
+            let (a, b) = (Stack::read(x).unwrap(), Stack::read(y).unwrap());
+            assert!(a
+                .data()
+                .iter()
+                .zip(b.data().iter())
+                .all(|(u, v)| u.to_bits() == v.to_bits()));
+        }
+    }
+
+    /// Les deux moteurs, sur une source lisse, sans mouvement ni bruit, donnent des images très corrélées (ils décrivent la même acquisition avec
+    /// d'autres noyaux), mais pas identiques : sans cela le critère (iv) comparerait un moteur à lui-même.
+    #[test]
+    fn the_two_engines_agree_on_smooth_data_but_are_not_identical() {
+        let t = Temp::new("moteurs");
+        let (source, masque, gabarits) = source_et_gabarits(&t);
+        let un = |moteur, dossier: &str| {
+            let cfg = ConfigSimulation {
+                moteur,
+                ..ConfigSimulation::default()
+            };
+            let r = simuler(&source, Some(&masque), &gabarits, &t.0.join(dossier), "sim", &cfg).unwrap();
+            Stack::read(&r.piles[0]).unwrap().data().mapv(f64::from)
+        };
+        let (a, b) = (un(Moteur::Independant, "i"), un(Moteur::ModeleDirect, "d"));
+        let (ma, mb) = (a.mean().unwrap(), b.mean().unwrap());
+        let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+        for (x, y) in a.iter().zip(b.iter()) {
+            ab += (x - ma) * (y - mb);
+            aa += (x - ma).powi(2);
+            bb += (y - mb).powi(2);
+        }
+        let ncc = ab / (aa * bb).sqrt();
+        assert!(ncc > 0.95, "NCC {ncc}");
+        assert!(
+            a.iter().zip(b.iter()).any(|(x, y)| (x - y).abs() > 1e-3),
+            "les moteurs ne doivent pas être identiques"
+        );
     }
 }
