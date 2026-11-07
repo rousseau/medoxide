@@ -260,6 +260,31 @@ ne partagent pas un repère (écart de plus de 18 mm entre barycentres de masque
 ./target/release/medx svr info --input stack_ax.nii.gz stack_cor.nii.gz --mask masque_ax.nii.gz masque_cor.nii.gz
 ```
 
+## Simuler des piles avec une vérité connue : `medx svr simulate`
+
+Pour juger une reconstruction contre une vérité, il faut des piles dont on connaît le contenu et le mouvement. `medx svr simulate` en fabrique à partir d'un volume source (une reconstruction de haute qualité) :
+
+```
+medx svr simulate --source V.nii.gz --source-mask M.nii.gz \
+    --template pile1.nii.gz pile2.nii.gz pile3.nii.gz --output-dir sortie/ \
+    --motion smooth --amplitude 6 --interleaved --noise-pct 5 --bias-pct 5 --seed 7
+```
+
+Les piles gabarits ne donnent que leur géométrie (orientation, pas, épaisseur, nombre de coupes) ; elles sont translatées pour que leur centre moyen tombe sur le centre du cerveau de la source, et la commande rapporte la part du cerveau que chacune couvre (alerte sous 99 %). Sont écrits dans `--output-dir` : `<nom>_acq-<n>_T2w.nii.gz` et son masque `<nom>_acq-<n>_mask.nii.gz`, `<nom>_acq-<n>_T2w.json` (`SliceTiming`) avec `--interleaved`, et `<nom>_poses_vraies.tsv`, au même format que `medx svr recon --poses` (le mouvement est composé après l'affine d'en-tête), donc comparable aux poses estimées.
+
+| Option | Rôle |
+|---|---|
+| `--motion` | `none` (défaut), `independent`, `smooth` (marche autorégressive, ρ = 0,9), `jumps` (lisse avec sauts de probabilité 0,08) ou `per-stack` |
+| `--amplitude` | borne des tirages, en degrés et en mm (défaut 3) |
+| `--interleaved` | coupes paires puis impaires : le mouvement lisse l'est dans le temps d'acquisition |
+| `--noise-pct` | écart type du bruit de Rice, en % de l'intensité moyenne du tissu (défaut 0) |
+| `--bias-pct` | amplitude du biais multiplicatif lisse (défaut 0) |
+| `--slice-scale-pct` | écart type, en %, du logarithme du facteur d'échelle de chaque coupe (défaut 0) |
+| `--seed` | graine de tout le tirage ; même graine, mêmes fichiers (défaut 1) |
+| `--forward-model` | `independent` (défaut) : B-spline cubique, profil de coupe et noyau dans le plan en sinc fenêtré de Hann, indépendants du modèle direct de la reconstruction ; `reconstruction` : le modèle direct de la reconstruction lui-même (PSF gaussienne, interpolation trilinéaire), pour mesurer ce que le « crime inverse » lui fait gagner |
+
+Rien n'est modifié par défaut : sans option, les piles sont à leur pose d'en-tête, sans bruit ni biais.
+
 ## Limites
 
 - **Un masque par stack est obligatoire** et sa qualité compte : le recalage et la reconstruction ne

@@ -121,6 +121,65 @@ enum SliceTimingArg {
     Auto,
 }
 
+/// Modèle de mouvement vrai de `medx svr simulate` (`--motion`).
+#[derive(Clone, Copy, ValueEnum)]
+enum MouvementSimule {
+    /// Aucun mouvement : les piles sont à leur pose d'en-tête
+    None,
+    /// Une pose tirée au hasard, indépendamment, pour chaque coupe
+    Independent,
+    /// Marche autorégressive le long de chaque pile (coupes voisines dans le temps : poses proches)
+    Smooth,
+    /// Marche lisse avec des sauts (probabilité 0,08 par coupe)
+    Jumps,
+    /// Un seul décalage rigide par pile
+    PerStack,
+}
+
+/// Moteur des valeurs sans bruit de `medx svr simulate` (`--forward-model`).
+#[derive(Clone, Copy, ValueEnum)]
+enum MoteurSimule {
+    /// B-spline cubique, profil de coupe et noyau dans le plan en sinc fenêtré : indépendant de la reconstruction
+    Independent,
+    /// Modèle direct de la reconstruction (PSF gaussienne, trilinéaire) : pour mesurer le « crime inverse »
+    Reconstruction,
+}
+
+/// Réglages du simulateur d'après les arguments de `medx svr simulate`.
+#[allow(clippy::too_many_arguments)]
+fn config_simulation(
+    motion: MouvementSimule,
+    amplitude: f64,
+    interleaved: bool,
+    noise_pct: f64,
+    bias_pct: f64,
+    slice_scale_pct: f64,
+    seed: u64,
+    forward_model: MoteurSimule,
+) -> medoxide_svr::simulation::ConfigSimulation {
+    use medoxide_svr::simulation::{ConfigSimulation, Moteur};
+    ConfigSimulation {
+        mouvement: match motion {
+            MouvementSimule::None => "aucun",
+            MouvementSimule::Independent => "independante",
+            MouvementSimule::Smooth => "lisse",
+            MouvementSimule::Jumps => "sauts",
+            MouvementSimule::PerStack => "stack",
+        }
+        .into(),
+        amplitude,
+        entrelace: interleaved,
+        bruit_pct: noise_pct,
+        biais_pct: bias_pct,
+        echelle_coupe_pct: slice_scale_pct,
+        graine: seed,
+        moteur: match forward_model {
+            MoteurSimule::Independent => Moteur::Independant,
+            MoteurSimule::Reconstruction => Moteur::ModeleDirect,
+        },
+    }
+}
+
 /// Où se font les calculs, tel qu'écrit sur la ligne de commande (`--device`).
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceArg {
@@ -345,6 +404,48 @@ enum SvrAction {
         /// Écart maximal entre barycentres de masques, en mm, pour que deux stacks soient dans le même groupe
         #[arg(long, default_value_t = medoxide_svr::DEFAULT_GROUP_GAP_MM)]
         group_gap_mm: f64,
+    },
+    /// Simule des piles 2D depuis un volume source (banc de vérité terrain) : mouvement vrai, biais, échelle de coupe et bruit de Rice connus ; écrit les piles, leurs masques et les poses vraies
+    Simulate {
+        /// Volume source NIfTI (reconstruction de haute qualité), dont le contenu est la vérité
+        #[arg(long)]
+        source: PathBuf,
+        /// Masque du cerveau de la source : sert à centrer les piles et à vérifier qu'elles le couvrent (sinon, voxels de plus de 3 % du maximum)
+        #[arg(long)]
+        source_mask: Option<PathBuf>,
+        /// Piles gabarits (NIfTI, par exemple trois piles réelles) : seuls leur en-tête et leurs dimensions servent (orientation, pas, épaisseur, nombre de coupes)
+        #[arg(long, num_args = 1.., required = true)]
+        template: Vec<PathBuf>,
+        /// Dossier de sortie (créé si besoin)
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Préfixe des fichiers écrits
+        #[arg(long, default_value = "sim")]
+        name: String,
+        /// Modèle de mouvement vrai
+        #[arg(long, value_enum, default_value = "none")]
+        motion: MouvementSimule,
+        /// Amplitude du mouvement, en degrés et en mm (tirages bornés par ± amplitude)
+        #[arg(long, default_value_t = 3.0)]
+        amplitude: f64,
+        /// Acquisition entrelacée (coupes paires puis impaires) ; écrit aussi un `SliceTiming` par pile
+        #[arg(long)]
+        interleaved: bool,
+        /// Écart type du bruit de Rice, en % de l'intensité moyenne du tissu
+        #[arg(long, default_value_t = 0.0)]
+        noise_pct: f64,
+        /// Amplitude du biais multiplicatif lisse, en %
+        #[arg(long, default_value_t = 0.0)]
+        bias_pct: f64,
+        /// Écart type, en %, du logarithme du facteur d'échelle de chaque coupe
+        #[arg(long, default_value_t = 0.0)]
+        slice_scale_pct: f64,
+        /// Graine de tout le tirage (poses, bruit, biais, échelles)
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Moteur des valeurs sans bruit
+        #[arg(long, value_enum, default_value = "independent")]
+        forward_model: MoteurSimule,
     },
 }
 
@@ -611,6 +712,36 @@ fn svr_qc(
 
 /// Affiche la géométrie de chaque stack, puis la boîte de l'ensemble (repère monde RAS+, mm).
 /// Avec des masques cérébraux, repère aussi les groupes de stacks qui partagent un repère.
+/// `medx svr simulate` : simule les piles, écrit les fichiers et rapporte la couverture du cerveau de chacune.
+fn svr_simulate(
+    source: &std::path::Path,
+    masque_source: Option<&std::path::Path>,
+    gabarits: &[PathBuf],
+    dossier: &std::path::Path,
+    nom: &str,
+    config: &medoxide_svr::simulation::ConfigSimulation,
+) -> ExitCode {
+    match medoxide_svr::simulation::simuler(source, masque_source, gabarits, dossier, nom, config) {
+        Ok(rapport) => {
+            for (pile, couverture) in rapport.piles.iter().zip(&rapport.couverture_du_cerveau) {
+                println!("{} : {:.1} % du cerveau couvert", pile.display(), 100.0 * couverture);
+                if *couverture < 0.99 {
+                    eprintln!(
+                        "medx svr simulate : attention, {} ne couvre pas tout le cerveau de la source",
+                        pile.display()
+                    );
+                }
+            }
+            println!("poses vraies : {}", rapport.poses_vraies.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("medx svr simulate : {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn svr_info(chemins: &[PathBuf], masques: &[PathBuf], ecart_mm: f64) -> ExitCode {
     if !masques.is_empty() && masques.len() != chemins.len() {
         eprintln!(
@@ -938,6 +1069,36 @@ fn main() -> ExitCode {
         } => svr_info(&input, &mask, group_gap_mm),
         Command::Svr {
             action:
+                SvrAction::Simulate {
+                    source,
+                    source_mask,
+                    template,
+                    output_dir,
+                    name,
+                    motion,
+                    amplitude,
+                    interleaved,
+                    noise_pct,
+                    bias_pct,
+                    slice_scale_pct,
+                    seed,
+                    forward_model,
+                },
+        } => {
+            let config = config_simulation(
+                motion,
+                amplitude,
+                interleaved,
+                noise_pct,
+                bias_pct,
+                slice_scale_pct,
+                seed,
+                forward_model,
+            );
+            svr_simulate(&source, source_mask.as_deref(), &template, &output_dir, &name, &config)
+        }
+        Command::Svr {
+            action:
                 SvrAction::Recon {
                     input,
                     mask,
@@ -1135,6 +1296,101 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{calcul_des_reseaux, Cli, DeviceArg};
+
+    /// `medx svr simulate` : les options de la ligne de commande arrivent, telles quelles, dans `ConfigSimulation` (câblage), et les défauts sont ceux d'un
+    /// simulateur sans mouvement ni bruit.
+    #[test]
+    fn the_simulate_options_reach_the_simulation_config() {
+        use medoxide_svr::simulation::Moteur;
+        let analyse = |args: &[&str]| {
+            let cli = Cli::try_parse_from(std::iter::once("medx").chain(args.iter().copied())).unwrap();
+            match cli.command {
+                super::Command::Svr {
+                    action:
+                        super::SvrAction::Simulate {
+                            motion,
+                            amplitude,
+                            interleaved,
+                            noise_pct,
+                            bias_pct,
+                            slice_scale_pct,
+                            seed,
+                            forward_model,
+                            ..
+                        },
+                } => super::config_simulation(
+                    motion,
+                    amplitude,
+                    interleaved,
+                    noise_pct,
+                    bias_pct,
+                    slice_scale_pct,
+                    seed,
+                    forward_model,
+                ),
+                _ => panic!("pas une simulation"),
+            }
+        };
+        let base = [
+            "svr",
+            "simulate",
+            "--source",
+            "s",
+            "--template",
+            "a",
+            "b",
+            "c",
+            "--output-dir",
+            "o",
+        ];
+        let defaut = analyse(&base);
+        assert_eq!(defaut.mouvement, "aucun");
+        assert!(
+            !defaut.entrelace && defaut.bruit_pct == 0.0 && defaut.biais_pct == 0.0 && defaut.echelle_coupe_pct == 0.0
+        );
+        assert_eq!((defaut.graine, defaut.moteur), (1, Moteur::Independant));
+        let tout: Vec<&str> = base
+            .iter()
+            .copied()
+            .chain([
+                "--motion",
+                "jumps",
+                "--amplitude",
+                "6.5",
+                "--interleaved",
+                "--noise-pct",
+                "5",
+                "--bias-pct",
+                "10",
+                "--slice-scale-pct",
+                "2",
+                "--seed",
+                "42",
+                "--forward-model",
+                "reconstruction",
+            ])
+            .collect();
+        let c = analyse(&tout);
+        assert_eq!(c.mouvement, "sauts");
+        assert_eq!(
+            (c.amplitude, c.entrelace, c.bruit_pct, c.biais_pct, c.echelle_coupe_pct),
+            (6.5, true, 5.0, 10.0, 2.0)
+        );
+        assert_eq!((c.graine, c.moteur), (42, Moteur::ModeleDirect));
+        for (arg, attendu) in [
+            ("none", "aucun"),
+            ("independent", "independante"),
+            ("smooth", "lisse"),
+            ("per-stack", "stack"),
+        ] {
+            let a: Vec<&str> = base.iter().copied().chain(["--motion", arg]).collect();
+            assert_eq!(analyse(&a).mouvement, attendu, "{arg}");
+        }
+        assert!(
+            Cli::try_parse_from(["medx", "svr", "simulate", "--source", "s", "--output-dir", "o"]).is_err(),
+            "--template requis"
+        );
+    }
 
     /// Les définitions d'arguments sont cohérentes (pas de doublon, valeurs par défaut valides) : clap le vérifie pour toutes les sous-commandes.
     #[test]
