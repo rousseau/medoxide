@@ -1641,6 +1641,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : chaque brique est testée contre une référence écrite à part (nœuds exacts, polynôme cubique, réponse en fréquence par une DFT directe, moments de Rice calculés à la main) puis soumise à des mutations (poids, pôle, gain, forme du profil, partie imaginaire, normalisation) qui doivent faire échouer au moins un test. Premier essai : une fenêtre de Hamming ne retombe qu'à 0,08 au bord du support, la coupure brutale rendait la variance du profil discret très sensible au pas (écart de 79 % à T/4) ; avec la fenêtre de Hann, qui s'annule, l'écart est de 0,3 %.
 - **Où** : `crates/medoxide-svr/src/simulation.rs` (`BSpline3`, `profil_de_coupe`, `noyau_dans_le_plan`, `bruit_de_rice`).
 
+## 2026-11-07 — Aléa reproductible en parallèle : une graine par (pile, coupe), jamais un générateur partagé
+
+- **Quoi (concept)** : avec `rayon`, l'ordre dans lequel les fils traitent les coupes change d'une exécution à l'autre ; un générateur aléatoire unique, consommé au fil de l'eau, donnerait un bruit différent à chaque fois. On donne donc à chaque coupe son propre générateur, initialisé par une graine dérivée de (graine du banc, étiquette, pile, coupe) par un mélange de bits (SplitMix64) : le bruit d'une coupe ne dépend plus de ce que font les autres.
+- **Quoi (méthode)** : un oracle linéaire valide l'assemblage entier : une source en rampe doit donner, à chaque pixel simulé, la rampe au centre du pixel (la B-spline reproduit les fonctions linéaires, les noyaux symétriques de somme 1 les laissent inchangées) ; avec un mouvement par coupe, le modèle direct de la reconstruction doit donner la même valeur, ce qui contrôle que les deux modèles partagent la convention de pose. Quatre mutations (mouvement ignoré, décimation décalée d'un sous-pixel, bruit doublé, échelles non appliquées) font échouer au moins un test chacune.
+- **Où** : `crates/medoxide-svr/src/simulation.rs` (`simuler_pile`, `ChampDeBiais`, `echelles_par_coupe`, `graine_de`, `ecrire_pile`).
+
 ---
 
 *(à compléter à la prochaine étape)*

@@ -6,7 +6,14 @@
 //! profil de coupe en sinc fenêtré et résolution dans le plan par un sinc fenêtré (au lieu de noyaux gaussiens), bruit de Rice, biais lisse,
 //! échelle par coupe. Il ne modifie aucun élément existant.
 
-use ndarray::Array3;
+use crate::mouvement::Alea;
+use crate::recon::SlicePoses;
+use crate::{Slice, Stack, SvrError, Volume};
+use nalgebra::{Matrix4, Vector3};
+use ndarray::{Array2, Array3};
+use nifti::{writer::WriterOptions, NiftiHeader};
+use rayon::prelude::*;
+use std::path::Path;
 
 /// Pôle du préfiltre de la B-spline cubique : `z = √3 − 2`.
 const POLE: f64 = -0.267_949_192_431_122_7;
@@ -196,6 +203,261 @@ pub(crate) fn bruit_de_rice(signal: f64, sigma: f64, alea: &mut crate::mouvement
     (a * a + b * b).sqrt()
 }
 
+/// Réglages de bruit, de biais et d'échelle du simulateur (tous en %, 0 : désactivé).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReglagesSimulation {
+    /// Écart type du bruit de Rice, en % de l'intensité moyenne du tissu de la source.
+    pub bruit_pct: f64,
+    /// Amplitude du biais multiplicatif lisse (gain global et quatre ondes planes de 100 à 200 mm), fixe par pile dans le repère du scanner.
+    pub biais_pct: f64,
+    /// Écart type, en %, du logarithme du facteur d'échelle de chaque coupe (log-normal) : effet d'histoire de spin ou de gain d'une coupe.
+    pub echelle_coupe_pct: f64,
+    /// Graine de tout le tirage aléatoire (bruit, biais, échelles).
+    pub graine: u64,
+}
+
+/// Mélange de bits (SplitMix64) : une graine par (réglage, pile, coupe), indépendante de l'ordre d'exécution des fils.
+fn melange(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// Graine non nulle d'un générateur `Alea` pour la coupe `coupe` de la pile `pile` (`etiquette` distingue bruit, biais, échelles).
+fn graine_de(graine: u64, etiquette: u64, pile: usize, coupe: usize) -> u64 {
+    melange(melange(melange(graine ^ etiquette.wrapping_mul(0x1234_5678_9ABC_DEF1)) ^ pile as u64) ^ coupe as u64) | 1
+}
+
+/// Biais multiplicatif lisse d'une pile : `gain · (1 + a · Σ cos(2π x·d / λ + φ))` sur quatre ondes planes de longueur d'onde 100 à 200 mm,
+/// avec `a = biais_pct / 200` ; `gain = 1 + biais_pct/100 · u`, `u ∈ [−1, 1]`. Fixe dans le repère du scanner (indépendant du mouvement de la coupe).
+pub(crate) struct ChampDeBiais {
+    gain: f64,
+    amplitude: f64,
+    ondes: Vec<(Vector3<f64>, f64, f64)>,
+}
+
+impl ChampDeBiais {
+    /// Champ de la pile `pile` ; `biais_pct ≤ 0` : champ identiquement égal à 1.
+    pub(crate) fn new(biais_pct: f64, graine: u64, pile: usize) -> ChampDeBiais {
+        if biais_pct <= 0.0 {
+            return ChampDeBiais {
+                gain: 1.0,
+                amplitude: 0.0,
+                ondes: vec![],
+            };
+        }
+        let mut a = Alea(graine_de(graine, 2, pile, 0));
+        let mut tire = |bas: f64, haut: f64| bas + (haut - bas) * a.suivant();
+        let ondes = (0..4)
+            .map(|_| {
+                let d = Vector3::new(tire(-1.0, 1.0), tire(-1.0, 1.0), tire(-1.0, 1.0)).normalize();
+                (d, tire(100.0, 200.0), tire(0.0, 2.0 * std::f64::consts::PI))
+            })
+            .collect();
+        ChampDeBiais {
+            gain: 1.0 + biais_pct / 100.0 * tire(-1.0, 1.0),
+            amplitude: biais_pct / 200.0,
+            ondes,
+        }
+    }
+
+    /// Valeur du champ au point `x` du monde (mm).
+    pub(crate) fn valeur(&self, x: &Vector3<f64>) -> f64 {
+        self.gain
+            * (1.0
+                + self
+                    .ondes
+                    .iter()
+                    .map(|(d, l, p)| self.amplitude * (2.0 * std::f64::consts::PI * x.dot(d) / l + p).cos())
+                    .sum::<f64>())
+    }
+}
+
+/// Facteurs d'échelle des `n` coupes d'une pile : `exp(σ · g)`, `g` gaussien centré réduit, `σ = echelle_coupe_pct / 100` (tous égaux à 1 si `σ = 0`).
+pub(crate) fn echelles_par_coupe(n: usize, r: &ReglagesSimulation, pile: usize) -> Vec<f64> {
+    let sigma = r.echelle_coupe_pct / 100.0;
+    (0..n)
+        .map(|k| {
+            if sigma <= 0.0 {
+                1.0
+            } else {
+                (sigma * gaussienne(&mut Alea(graine_de(r.graine, 3, pile, k)))).exp()
+            }
+        })
+        .collect()
+}
+
+/// Intensité moyenne du tissu de la source (voxels de plus de 3 % du maximum), référence du niveau de bruit (comme le banc E2).
+pub(crate) fn intensite_moyenne_du_tissu(source: &Volume) -> f64 {
+    let maximum = source.data().iter().copied().fold(0.0_f32, f32::max);
+    let (somme, n) = source
+        .data()
+        .iter()
+        .filter(|&&v| v > 0.03 * maximum)
+        .fold((0.0_f64, 0usize), |(s, n), &v| (s + f64::from(v), n + 1));
+    somme / n.max(1) as f64
+}
+
+/// Sur-échantillonnage dans le plan de la grille fine intermédiaire (deux sous-pixels par pixel, par axe).
+const SUR_ECHANTILLONNAGE: usize = 2;
+
+/// Valeurs SANS bruit, biais ni échelle de la coupe `coupe` (à sa pose, mouvement compris) : moyenne de la source (interpolée en B-spline cubique)
+/// sur le profil de coupe le long de la normale, puis sur le noyau dans le plan, évalué sur une grille fine de demi-pixels.
+fn coupe_propre(
+    source: &Volume,
+    spline: &BSpline3,
+    coupe: &Slice,
+    profil: &[(f64, f64)],
+    noyau_x: &[f64],
+    noyau_y: &[f64],
+) -> Array2<f64> {
+    let (nx, ny) = coupe.dim();
+    let demi = 3 * SUR_ECHANTILLONNAGE;
+    let (fx, fy) = (
+        SUR_ECHANTILLONNAGE * (nx - 1) + 2 * demi + 1,
+        SUR_ECHANTILLONNAGE * (ny - 1) + 2 * demi + 1,
+    );
+    let normale = coupe.normal();
+    let mut fine = Array2::<f64>::zeros((fx, fy));
+    for ((a, b), v) in fine.indexed_iter_mut() {
+        let centre = coupe.pixel_to_world(
+            (a as f64 - demi as f64) / SUR_ECHANTILLONNAGE as f64,
+            (b as f64 - demi as f64) / SUR_ECHANTILLONNAGE as f64,
+        );
+        *v = profil
+            .iter()
+            .map(|&(z, w)| {
+                let x = source.voxel_coordinates(&(centre + z * normale));
+                w * spline.echantillon([x.x, x.y, x.z])
+            })
+            .sum();
+    }
+    let mut milieu = Array2::<f64>::zeros((nx, fy));
+    for ((i, b), v) in milieu.indexed_iter_mut() {
+        *v = noyau_x
+            .iter()
+            .enumerate()
+            .map(|(m, w)| w * fine[[SUR_ECHANTILLONNAGE * i + m, b]])
+            .sum();
+    }
+    let mut sortie = Array2::<f64>::zeros((nx, ny));
+    for ((i, j), v) in sortie.indexed_iter_mut() {
+        *v = noyau_y
+            .iter()
+            .enumerate()
+            .map(|(m, w)| w * milieu[[i, SUR_ECHANTILLONNAGE * j + m]])
+            .sum();
+    }
+    sortie
+}
+
+/// **Simule une pile** : géométrie, résolution et épaisseur de `modele` ; mouvement vrai `poses` (pile numéro `pile`) ; biais, échelle de coupe
+/// et bruit de Rice selon `r`. Renvoie les valeurs et le masque (pixel dont la valeur sans bruit dépasse 3 % du maximum de la source). Déterministe :
+/// les graines dépendent de (réglage, pile, coupe), jamais de l'ordre d'exécution des fils.
+pub(crate) fn simuler_pile(
+    source: &Volume,
+    spline: &BSpline3,
+    modele: &Stack,
+    pile: usize,
+    poses: &SlicePoses,
+    r: &ReglagesSimulation,
+    intensite_moyenne: f64,
+) -> (Array3<f32>, Array3<u8>) {
+    let dim = modele.dim();
+    let s = modele.spacing();
+    let profil = profil_de_coupe(s[2], s[2] / 4.0);
+    let (noyau_x, noyau_y) = (
+        noyau_dans_le_plan(s[0], SUR_ECHANTILLONNAGE),
+        noyau_dans_le_plan(s[1], SUR_ECHANTILLONNAGE),
+    );
+    let maximum = f64::from(source.data().iter().copied().fold(0.0_f32, f32::max));
+    let champ = ChampDeBiais::new(r.biais_pct, r.graine, pile);
+    let echelles = echelles_par_coupe(dim.2, r, pile);
+    let sigma_bruit = r.bruit_pct / 100.0 * intensite_moyenne;
+    let coupes: Vec<(Array2<f32>, Array2<u8>)> = (0..dim.2)
+        .into_par_iter()
+        .map(|k| {
+            let nominale = modele.slice(k).expect("indice de coupe valide");
+            let posee = nominale.with_motion(*poses.get(pile, k));
+            let propre = coupe_propre(source, spline, &posee, &profil, &noyau_x, &noyau_y);
+            let mut alea = Alea(graine_de(r.graine, 1, pile, k));
+            let mut valeurs = Array2::<f32>::zeros((dim.0, dim.1));
+            let mut masque = Array2::<u8>::zeros((dim.0, dim.1));
+            for ((i, j), v) in valeurs.indexed_iter_mut() {
+                let propre_ij = propre[[i, j]];
+                masque[[i, j]] = u8::from(propre_ij > 0.03 * maximum);
+                let biais = champ.valeur(&nominale.pixel_to_world(i as f64, j as f64));
+                let signal = propre_ij * biais * echelles[k];
+                *v = if sigma_bruit > 0.0 {
+                    bruit_de_rice(signal, sigma_bruit, &mut alea)
+                } else {
+                    signal
+                } as f32;
+            }
+            (valeurs, masque)
+        })
+        .collect();
+    let (mut data, mut masque) = (Array3::<f32>::zeros(dim), Array3::<u8>::zeros(dim));
+    for (k, (v, m)) in coupes.into_iter().enumerate() {
+        data.index_axis_mut(ndarray::Axis(2), k).assign(&v);
+        masque.index_axis_mut(ndarray::Axis(2), k).assign(&m);
+    }
+    (data, masque)
+}
+
+/// En-tête NIfTI d'une pile : affine voxel → monde (sform) et pas des voxels.
+fn en_tete(affine: &Matrix4<f64>, pixdim: [f64; 3]) -> NiftiHeader {
+    let mut h = NiftiHeader::default();
+    h.sform_code = 1;
+    h.srow_x = std::array::from_fn(|c| affine[(0, c)] as f32);
+    h.srow_y = std::array::from_fn(|c| affine[(1, c)] as f32);
+    h.srow_z = std::array::from_fn(|c| affine[(2, c)] as f32);
+    h.pixdim = [
+        1.0,
+        pixdim[0] as f32,
+        pixdim[1] as f32,
+        pixdim[2] as f32,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    ];
+    h
+}
+
+/// Écrit une pile (image `f32`) et son masque (`u8`) en NIfTI, avec l'affine donnée ; relit la pile avec son masque attaché.
+///
+/// # Erreurs
+/// Erreur d'écriture ou de relecture, avec le chemin en cause.
+pub(crate) fn ecrire_pile(
+    image: &Path,
+    masque_chemin: &Path,
+    data: &Array3<f32>,
+    masque: &Array3<u8>,
+    affine: &Matrix4<f64>,
+    pixdim: [f64; 3],
+) -> Result<Stack, SvrError> {
+    let h = en_tete(affine, pixdim);
+    WriterOptions::new(image)
+        .reference_header(&h)
+        .write_nifti(data)
+        .map_err(|e| SvrError::Write {
+            path: image.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    WriterOptions::new(masque_chemin)
+        .reference_header(&h)
+        .write_nifti(masque)
+        .map_err(|e| SvrError::Write {
+            path: masque_chemin.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    let mut stack = Stack::read(image)?;
+    stack.set_brain_mask(masque_chemin)?;
+    Ok(stack)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +627,230 @@ mod tests {
         };
         assert_eq!(tirer(9), tirer(9));
         assert_ne!(tirer(9), tirer(10));
+    }
+
+    /// Dossier temporaire propre à un test (supprimé à la fin).
+    struct Temp(std::path::PathBuf);
+    impl Temp {
+        fn new(nom: &str) -> Temp {
+            let d = std::env::temp_dir().join(format!("medoxide_simulation_{nom}_{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            Temp(d)
+        }
+        fn fichier(&self, nom: &str) -> std::path::PathBuf {
+            self.0.join(nom)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const NUL: ReglagesSimulation = ReglagesSimulation {
+        bruit_pct: 0.0,
+        biais_pct: 0.0,
+        echelle_coupe_pct: 0.0,
+        graine: 5,
+    };
+
+    /// Source : rampe `100 + 0,5 x + 0,3 y + 0,2 z` (mm, monde) sur 80³ voxels de 1 mm, origine en (−40, −40, −40) ; la pile modèle : 16 × 16 × 8 pixels
+    /// de 1,5 × 1,5 × 3 mm, oblique, centrée à l'origine. Renvoie (source, pile, rampe).
+    fn rampe_et_pile(t: &Temp) -> (Volume, Stack, impl Fn(&Vector3<f64>) -> f64) {
+        let rampe = |x: &Vector3<f64>| 100.0 + 0.5 * x.x + 0.3 * x.y + 0.2 * x.z;
+        let mut a = Matrix4::identity();
+        a[(0, 3)] = -40.0;
+        a[(1, 3)] = -40.0;
+        a[(2, 3)] = -40.0;
+        let data = Array3::from_shape_fn((80, 80, 80), |(i, j, k)| {
+            rampe(&Vector3::new(i as f64 - 40.0, j as f64 - 40.0, k as f64 - 40.0)) as f32
+        });
+        let source = Volume::new(data, a).unwrap();
+        let r = nalgebra::Rotation3::from_euler_angles(0.2, -0.15, 0.1);
+        let lineaire = r.matrix() * nalgebra::Matrix3::from_diagonal(&Vector3::new(1.5, 1.5, 3.0));
+        let origine = -(lineaire * Vector3::new(7.5, 7.5, 3.5));
+        let mut affine = Matrix4::identity();
+        affine.fixed_view_mut::<3, 3>(0, 0).copy_from(&lineaire);
+        affine.fixed_view_mut::<3, 1>(0, 3).copy_from(&origine);
+        let pile = ecrire_pile(
+            &t.fichier("modele.nii.gz"),
+            &t.fichier("modele_mask.nii.gz"),
+            &Array3::zeros((16, 16, 8)),
+            &Array3::from_elem((16, 16, 8), 1u8),
+            &affine,
+            [1.5, 1.5, 3.0],
+        )
+        .unwrap();
+        (source, pile, rampe)
+    }
+
+    /// Sans mouvement ni bruit, chaque pixel simulé vaut la rampe au centre du pixel : la B-spline reproduit une fonction linéaire et les noyaux
+    /// symétriques de somme 1 la laissent inchangée au centre.
+    #[test]
+    fn a_simulated_stack_of_a_linear_ramp_gives_the_ramp_at_the_pixel_centres() {
+        let t = Temp::new("rampe");
+        let (source, pile, rampe) = rampe_et_pile(&t);
+        let spline = BSpline3::new(source.data());
+        let (data, masque) = simuler_pile(
+            &source,
+            &spline,
+            &pile,
+            0,
+            &SlicePoses::identity(std::slice::from_ref(&pile)),
+            &NUL,
+            100.0,
+        );
+        for &(i, j, k) in &[(0, 0, 0), (7, 8, 3), (15, 15, 7), (3, 12, 5)] {
+            let attendu = rampe(&pile.slice(k).unwrap().pixel_to_world(i as f64, j as f64));
+            assert!(
+                (f64::from(data[[i, j, k]]) - attendu).abs() < 1e-3,
+                "({i}, {j}, {k}) : {} contre {attendu}",
+                data[[i, j, k]]
+            );
+        }
+        assert!(masque.iter().all(|&m| m == 1));
+    }
+
+    /// Avec un mouvement par coupe, la valeur est la rampe à la position MOUVANTE du pixel (`pixel_to_world` de la coupe posée), et le modèle direct
+    /// de la reconstruction (`Volume::simulate_slice`) donne la même valeur sur cette fonction linéaire : les deux modèles partagent la convention de pose.
+    #[test]
+    fn the_motion_convention_agrees_with_the_reconstruction_forward_model() {
+        let t = Temp::new("pose");
+        let (source, pile, rampe) = rampe_et_pile(&t);
+        let spline = BSpline3::new(source.data());
+        let mut poses = SlicePoses::identity(std::slice::from_ref(&pile));
+        for k in 0..8 {
+            poses.set(
+                0,
+                k,
+                crate::mouvement::mouvement_rigide(
+                    &Vector3::new(0.03 * k as f64, -0.02, 0.04),
+                    &Vector3::new(1.0 - 0.3 * k as f64, 0.5, -0.7),
+                    &Vector3::new(0.0, 0.0, 0.0),
+                ),
+            );
+        }
+        let (data, _) = simuler_pile(&source, &spline, &pile, 0, &poses, &NUL, 100.0);
+        for k in [0, 3, 7] {
+            let posee = pile.slice(k).unwrap().with_motion(*poses.get(0, k));
+            let direct = source.simulate_slice(&posee, &posee.psf());
+            for &(i, j) in &[(2, 3), (8, 8), (13, 5)] {
+                let attendu = rampe(&posee.pixel_to_world(i as f64, j as f64));
+                assert!(
+                    (f64::from(data[[i, j, k]]) - attendu).abs() < 1e-3,
+                    "indépendant ({i}, {j}, {k})"
+                );
+                assert!(
+                    (f64::from(direct.values[[i, j]]) - attendu).abs() < 1e-2,
+                    "modèle direct ({i}, {j}, {k})"
+                );
+            }
+        }
+    }
+
+    /// Source constante : le bruit de Rice du simulateur a le niveau demandé (`bruit_pct` % de l'intensité moyenne) ; deux appels identiques donnent les mêmes bits.
+    #[test]
+    fn the_simulated_noise_has_the_requested_level_and_is_deterministic() {
+        let t = Temp::new("bruit");
+        let (source, pile, _) = rampe_et_pile(&t);
+        let constante = Volume::new(Array3::from_elem((80, 80, 80), 100.0_f32), *source.affine()).unwrap();
+        let spline = BSpline3::new(constante.data());
+        let poses = SlicePoses::identity(std::slice::from_ref(&pile));
+        let r = ReglagesSimulation { bruit_pct: 5.0, ..NUL };
+        let (a, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
+        let (b, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
+        assert!(a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits()));
+        let n = a.len() as f64;
+        let e2 = a.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / n;
+        assert!((e2 / (100.0 * 100.0 + 2.0 * 25.0) - 1.0).abs() < 0.01, "E[R²] = {e2}");
+        let moy = a.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
+        let var = a.iter().map(|&v| (f64::from(v) - moy).powi(2)).sum::<f64>() / n;
+        assert!((var / 25.0 - 1.0).abs() < 0.12, "variance {var}");
+        let (c, _) = simuler_pile(
+            &constante,
+            &spline,
+            &pile,
+            0,
+            &poses,
+            &ReglagesSimulation { graine: 6, ..r },
+            100.0,
+        );
+        assert!(a.iter().zip(c.iter()).any(|(x, y)| x.to_bits() != y.to_bits()));
+    }
+
+    /// Source constante, sans bruit : l'échelle de chaque coupe est constante dans la coupe et varie d'une coupe à l'autre ; le biais est borné et lisse.
+    #[test]
+    fn slice_scales_and_the_bias_field_act_as_declared() {
+        let t = Temp::new("echelles");
+        let (source, pile, _) = rampe_et_pile(&t);
+        let constante = Volume::new(Array3::from_elem((80, 80, 80), 100.0_f32), *source.affine()).unwrap();
+        let spline = BSpline3::new(constante.data());
+        let poses = SlicePoses::identity(std::slice::from_ref(&pile));
+        let r = ReglagesSimulation {
+            echelle_coupe_pct: 5.0,
+            ..NUL
+        };
+        let (data, _) = simuler_pile(&constante, &spline, &pile, 0, &poses, &r, 100.0);
+        let echelles = echelles_par_coupe(8, &r, 0);
+        for k in 0..8 {
+            for &(i, j) in &[(0, 0), (8, 8), (15, 3)] {
+                assert!((f64::from(data[[i, j, k]]) - 100.0 * echelles[k]).abs() < 1e-3);
+            }
+        }
+        assert!(echelles.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-4));
+        let moyenne_log = echelles_par_coupe(20_000, &r, 1).iter().map(|e| e.ln()).sum::<f64>() / 20_000.0;
+        assert!(moyenne_log.abs() < 2e-3, "moyenne du log {moyenne_log}");
+        assert!(echelles_par_coupe(5, &NUL, 0).iter().all(|&e| e == 1.0));
+
+        let champ = ChampDeBiais::new(10.0, 5, 0);
+        let (mut mini, mut maxi) = (f64::MAX, f64::MIN);
+        let mut a = Alea(77);
+        for _ in 0..2000 {
+            let x = Vector3::new(
+                100.0 * (a.suivant() - 0.5),
+                100.0 * (a.suivant() - 0.5),
+                100.0 * (a.suivant() - 0.5),
+            );
+            let v = champ.valeur(&x);
+            mini = mini.min(v);
+            maxi = maxi.max(v);
+            // lisse : un déplacement de 1 mm change le champ d'au plus 4 ondes × (a · 2π / 100 mm) en valeur relative
+            assert!(
+                (champ.valeur(&(x + Vector3::new(1.0, 0.0, 0.0))) - v).abs()
+                    < 4.0 * 0.05 * 2.0 * std::f64::consts::PI / 100.0 * 1.2
+            );
+        }
+        assert!(mini > 0.7 && maxi < 1.3 && maxi - mini > 0.01, "bornes {mini}, {maxi}");
+        assert_eq!(ChampDeBiais::new(0.0, 5, 0).valeur(&Vector3::new(3.0, 4.0, 5.0)), 1.0);
+        assert_ne!(
+            ChampDeBiais::new(10.0, 5, 0).valeur(&Vector3::zeros()),
+            ChampDeBiais::new(10.0, 5, 1).valeur(&Vector3::zeros())
+        );
+    }
+
+    /// L'écriture puis la relecture d'une pile redonne affine, pas des voxels, valeurs et masque.
+    #[test]
+    fn a_written_stack_is_read_back_unchanged() {
+        let t = Temp::new("ecriture");
+        let (_, pile, _) = rampe_et_pile(&t);
+        assert_eq!(pile.dim(), (16, 16, 8));
+        let s = pile.spacing();
+        assert!((s[0] - 1.5).abs() < 1e-5 && (s[1] - 1.5).abs() < 1e-5 && (s[2] - 3.0).abs() < 1e-5);
+        assert_eq!(pile.brain_mask().unwrap().voxel_count(), 16 * 16 * 8);
+    }
+
+    /// Intensité moyenne du tissu, calculée à la main : 10 voxels à 100 et 20 à 150 (tissu : plus de 3 % du maximum 150, soit 4,5), 70 voxels à 4 (sous le seuil) : (10·100 + 20·150) / 30.
+    #[test]
+    fn the_mean_tissue_intensity_ignores_the_background() {
+        let mut data = Array3::from_elem((10, 10, 1), 4.0_f32);
+        for (n, v) in data.iter_mut().enumerate() {
+            if n < 10 {
+                *v = 100.0;
+            } else if n < 30 {
+                *v = 150.0;
+            }
+        }
+        let source = Volume::new(data, Matrix4::identity()).unwrap();
+        assert!((intensite_moyenne_du_tissu(&source) - (10.0 * 100.0 + 20.0 * 150.0) / 30.0).abs() < 1e-9);
     }
 }
