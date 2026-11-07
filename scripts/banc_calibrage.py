@@ -7,6 +7,8 @@ SVRTK reconstruit SANS la pile K (`<résultats>/sub-X/svrtk_sansK.nii.gz`) et la
 Sous-commandes :
   calibrer  : sujets de calibrage, au bruit et au biais DÉJÀ figés (`--bruit`, `--biais`) -> flou dans le plan (grille), puis facteur de profil (grille) ;
               écrit les valeurs choisies (amendement 2, C).
+  dispersion: (v′), amendement 3 : sujets de référence (`--reference`, valeurs réelles) et sujets à tester (`--sujets`), aux réglages figés : nombre de valeurs
+              simulées dans [min ; max] du réel pour chaque grandeur, descriptif sur les sujets de référence (post hoc) puis verdict décisif sur les sujets à tester.
   verifier  : sujets de vérification, aux valeurs données -> quatre rapports simulé/réel par sujet et verdict contre [0,8 ; 1,25] (amendement 2, B et D).
 
 Aucun identifiant n'est écrit dans le code : sujets et chemins sont des arguments. Tout reste sous `--travail` (ignoré par Git).
@@ -147,7 +149,7 @@ def dans_les_bornes(rapport):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("action", choices=["calibrer", "verifier"])
+    p.add_argument("action", choices=["calibrer", "verifier", "dispersion"])
     p.add_argument("--racine", required=True, help="jeu réel (piles et masques de fetal-bet)")
     p.add_argument("--resultats", required=True, help="dossier des volumes `sub-X/svrtk_sansK.nii.gz`")
     p.add_argument("--sujets", nargs="+", required=True)
@@ -157,13 +159,15 @@ def main():
     p.add_argument("--bruit", type=float, help="bruit_pct figé (amendement 1)")
     p.add_argument("--biais", type=float, help="bias_pct figé (amendement 1)")
     p.add_argument("--profil", type=float, help="verifier : facteur de profil calibré")
+    p.add_argument("--reference", nargs="+", help="dispersion : sujets dont les piles réelles fixent l'intervalle [min ; max]")
     p.add_argument("--flou", type=float, help="verifier : flou dans le plan calibré, en mm")
     a = p.parse_args()
     os.makedirs(a.travail, exist_ok=True)
-    reel = {s: mesures_reelles(a.racine, s) for s in a.sujets}
-    masques = {s: piles_du_sujet(a.racine, s)[1] for s in a.sujets}
-    plages_reelles = {s: plage_de_biais(a.bin_test, *piles_du_sujet(a.racine, s)) for s in a.sujets}
-    for s in a.sujets:
+    tous = list(a.sujets) + [s for s in (a.reference or []) if s not in a.sujets]
+    reel = {s: mesures_reelles(a.racine, s) for s in tous}
+    masques = {s: piles_du_sujet(a.racine, s)[1] for s in tous}
+    plages_reelles = {s: plage_de_biais(a.bin_test, *piles_du_sujet(a.racine, s)) for s in tous}
+    for s in tous:
         print(f"{s} réel : bruit (sujet) {reel[s][0]['bruit_sujet']:.5f} ; largeur entre coupes {[round(r['largeur'], 2) for r in reel[s]]} mm ; dans le plan (x, y) {[[round(v, 2) for v in r['largeur_plan']] for r in reel[s]]} mm ; plage du biais {[round(x, 3) for x in plages_reelles[s]]}", flush=True)
 
     def evaluer(s, bruit, biais, profil, flou, etiquette, avec_plage=False):
@@ -194,6 +198,22 @@ def main():
         print("CALIBRAGE", json.dumps(res))
         with open(f"{a.travail}/calibrage.json", "w") as f:
             json.dump(res, f, indent=1)
+    elif a.action == "dispersion":
+        if None in (a.profil, a.flou) or not a.reference:
+            p.error("dispersion demande --reference, --profil et --flou")
+        sims = {}
+        for s in tous:
+            mes, pb = evaluer(s, a.bruit, a.biais, a.profil, a.flou, "dispersion", avec_plage=True)
+            sims[s] = bp.grandeurs_du_sujet(mes, pb)
+        reels = [bp.grandeurs_du_sujet(reel[s], plages_reelles[s]) for s in a.reference]
+        for titre, sujets in (("DESCRIPTIF post hoc (sujets de référence, intervalle construit avec eux)", a.reference), ("DÉCISIF (sujets à tester)", a.sujets)):
+            par, tenu = bp.verdict_dispersion([sims[s] for s in sujets], reels)
+            print(f"(v′) {titre} : sujets {sujets}")
+            for nom, v in par.items():
+                print(f"  {nom} : {v['dans']}/{v['n']} dans [{v['min']:.5g} ; {v['max']:.5g}] (seuil {v['seuil']}) -> {'tenu' if v['tenu'] else 'NON tenu'}")
+            print(f"  (v′) {'TENU' if tenu else 'NON TENU'}")
+        for s in tous:
+            print("VALEURS", s, json.dumps({"simule": sims[s], "reel": bp.grandeurs_du_sujet(reel[s], plages_reelles[s])}))
     else:
         if None in (a.profil, a.flou):
             p.error("verifier demande --profil et --flou")

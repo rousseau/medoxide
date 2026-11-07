@@ -141,6 +141,43 @@ class TestBordDansLePlan(unittest.TestCase):
         self.assertEqual(len(bp.emplacements_de_bord_axe(p, m, 500.0, 1)), 0)
 
 
+class TestDispersion(unittest.TestCase):
+    def sujet(self, bruit, largeurs, plages, plan):
+        return {"bruit": [bruit], "largeur": largeurs, "biais": plages, "plan": plan}
+
+    def test_seuil_80_pour_cent_arrondi_vers_le_haut(self):
+        # n : 2 -> 2 (1,6) ; 4 -> 4 (3,2) ; 5 -> 4 (4,0 exact) ; 6 -> 5 (4,8) ; 10 -> 8 (8,0 exact) ; 12 -> 10 (9,6)
+        self.assertEqual([bp.seuil_de_dispersion(n) for n in (1, 2, 4, 5, 6, 10, 12)], [1, 2, 4, 4, 5, 8, 10])
+
+    def test_intervalle_ferme_et_comptage(self):
+        reel = [self.sujet(1.0, [1.0, 2.0], [1.0, 2.0], [1.0, 2.0]), self.sujet(3.0, [3.0], [3.0], [3.0])]
+        # bornes incluses : 1,0 et 3,0 sont dans l'intervalle ; 0,99 et 3,01 non
+        sim = [self.sujet(1.0, [1.0, 3.0, 0.99], [3.0, 3.01, 2.0], [2.0] * 6)]
+        par, tenu = bp.verdict_dispersion(sim, reel)
+        self.assertEqual((par["bruit"]["dans"], par["bruit"]["n"]), (1, 1))
+        self.assertEqual((par["largeur"]["dans"], par["largeur"]["n"], par["largeur"]["seuil"]), (2, 3, 3))
+        self.assertFalse(par["largeur"]["tenu"])  # 2 sur 3 : sous les 80 %
+        self.assertEqual(par["biais"]["dans"], 2)
+        self.assertFalse(tenu)
+
+    def test_tenu_quand_chaque_grandeur_atteint_son_seuil(self):
+        reel = [self.sujet(0.01, [10.0, 12.0], [0.1, 0.2], [3.0, 3.2]), self.sujet(0.012, [10.5], [0.15], [3.1])]
+        sim = [self.sujet(0.011, [11.0] * 3, [0.15] * 3, [3.1] * 6)]
+        par, tenu = bp.verdict_dispersion(sim, reel)
+        self.assertTrue(tenu, par)
+        self.assertEqual(par["plan"]["n"], 6)
+
+    def test_grandeurs_du_sujet(self):
+        mes = [{"bruit_sujet": 0.01, "largeur": 1.0, "largeur_plan": [2.0, 3.0]},
+               {"bruit_sujet": 0.01, "largeur": 4.0, "largeur_plan": [5.0, 6.0]},
+               {"bruit_sujet": 0.01, "largeur": 7.0, "largeur_plan": [8.0, 9.0]}]
+        g = bp.grandeurs_du_sujet(mes, [0.1, 0.2, 0.3])
+        self.assertEqual(g["bruit"], [0.01])
+        self.assertEqual(g["largeur"], [1.0, 4.0, 7.0])
+        self.assertEqual(g["biais"], [0.1, 0.2, 0.3])
+        self.assertEqual(g["plan"], [2.0, 3.0, 5.0, 6.0, 8.0, 9.0])  # les deux directions comptées ensemble
+
+
 class TestDivers(unittest.TestCase):
     def test_lecture_de_la_plage_du_biais(self):
         texte = "bruit\nBIAIS 0 -0.1000 0.2000 0.3000 0.0500\nBIAIS 1 -0.2 0.4 0.6 0.1\nautre\n"

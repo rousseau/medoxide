@@ -17,6 +17,7 @@ SEUIL_AIR = 0.05
 N_EMPLACEMENTS = 500
 CONTRASTE_MIN = 0.2
 MIN_CARRES = 20
+PART_DANS_LA_DISPERSION = 0.8  # (v′), amendement 3 : au moins 80 % des valeurs simulées dans [min ; max] du réel
 
 
 def moyenne_tissu(pile, masque):
@@ -147,3 +148,35 @@ def meilleur_parametre(grille, mesures, cible):
     """Valeur de `grille` dont la mesure (même ordre dans `mesures`) minimise `|ln(mesure / cible)|`."""
     ecarts = [abs(np.log(m / cible)) for m in mesures]
     return grille[int(np.argmin(ecarts))]
+
+
+def seuil_de_dispersion(n):
+    """Nombre minimal de valeurs simulées dans l'intervalle réel pour `n` valeurs : 80 % arrondis VERS LE HAUT (calcul entier : `⌈4n/5⌉`)."""
+    return -(-4 * n // 5)
+
+
+def grandeurs_du_sujet(mesures, plages):
+    """Valeurs des quatre grandeurs de (v′) pour un sujet, à partir des trois piles (`mesures[k]` : `bruit_sujet`, `largeur`, `largeur_plan` [lignes, colonnes])
+    et des plages du biais estimé par pile : bruit (une valeur par sujet), largeur entre coupes (par pile), plage du biais (par pile), largeur dans le plan
+    (par pile et par direction, les deux directions comptées ensemble)."""
+    return {
+        "bruit": [float(mesures[0]["bruit_sujet"])],
+        "largeur": [float(m["largeur"]) for m in mesures],
+        "biais": [float(x) for x in plages],
+        "plan": [float(v) for m in mesures for v in m["largeur_plan"]],
+    }
+
+
+def verdict_dispersion(simules, reels):
+    """(v′) : `simules` et `reels` sont des listes de `grandeurs_du_sujet` (un élément par sujet). Pour chaque grandeur, compte les valeurs simulées dans
+    l'intervalle fermé [min ; max] des valeurs RÉELLES (tous sujets de `reels` réunis) ; tenu si ce nombre atteint `seuil_de_dispersion(n)`.
+    Renvoie `(par_grandeur, tenu)`, `par_grandeur[nom] = dict(dans, n, seuil, min, max, tenu)`."""
+    sortie = {}
+    for nom in ("bruit", "largeur", "biais", "plan"):
+        sim = [v for g in simules for v in g[nom]]
+        ref = [v for g in reels for v in g[nom]]
+        bas, haut = min(ref), max(ref)
+        dans = sum(1 for v in sim if bas <= v <= haut)
+        seuil = seuil_de_dispersion(len(sim))
+        sortie[nom] = {"dans": dans, "n": len(sim), "seuil": seuil, "min": bas, "max": haut, "tenu": dans >= seuil}
+    return sortie, all(v["tenu"] for v in sortie.values())
