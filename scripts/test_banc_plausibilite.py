@@ -94,5 +94,23 @@ class TestDivers(unittest.TestCase):
         self.assertEqual(bp.meilleur_parametre([1, 2], [0.9, 1.3], 1.0), 1)
 
 
+class TestCalibrage(unittest.TestCase):
+    def test_bornes_du_critere(self):
+        import banc_calibrage as bc
+
+        self.assertTrue(bc.dans_les_bornes(0.8) and bc.dans_les_bornes(1.25) and bc.dans_les_bornes(1.0))
+        self.assertFalse(bc.dans_les_bornes(0.79) or bc.dans_les_bornes(1.26))
+
+    def test_rapports_mediane_sur_les_trois_piles(self):
+        import banc_calibrage as bc
+
+        reel = [{"bruit": 0.01, "largeur": 10.0}] * 3
+        mes = [{"bruit": 0.02, "largeur": 5.0}, {"bruit": 0.01, "largeur": 10.0}, {"bruit": 0.03, "largeur": 20.0}]
+        r = bc.rapports(reel, mes, [0.2, 0.2, 0.2], [0.1, 0.3, 0.4])
+        self.assertAlmostEqual(r["bruit"], 2.0)  # médiane de (2, 1, 3)
+        self.assertAlmostEqual(r["largeur"], 1.0)  # médiane de (0,5 ; 1 ; 2)
+        self.assertAlmostEqual(r["biais"], 0.3 / 0.2)
+
+
 if __name__ == "__main__":
     unittest.main()
