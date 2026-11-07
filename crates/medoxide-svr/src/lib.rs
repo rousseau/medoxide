@@ -36,6 +36,9 @@ pub mod pipeline;
 pub mod qc;
 pub mod recon;
 pub mod s2s;
+// Simulateur d'acquisition indépendant du modèle direct (F4.0.1) ; inutilisé hors tests jusqu'à `medx svr simulate`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod simulation;
 pub mod sortie;
 
 use std::path::{Path, PathBuf};
