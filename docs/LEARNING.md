@@ -1635,6 +1635,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : avant de déplacer les générateurs de mouvement vrai d'E2, un test d'empreinte (repliement XOR des bits de toutes les poses de quatre modèles, graine fixée) est écrit sur l'ancien code, ses valeurs sont figées, puis il est relancé après le déplacement : le texte des fonctions est extrait par script, pas retapé, et l'identité est vérifiée bit à bit.
 - **Où** : `crates/medoxide-svr/src/mouvement.rs`, `crates/medoxide-svr/src/lib.rs` (déclaration du module), `crates/medoxide-svr/src/recon.rs` (`the_true_motion_models_keep_their_recorded_fingerprints`).
 
+## 2026-11-07 — Simulateur indépendant : B-spline cubique, sinc fenêtré, bruit de Rice, et une fenêtre qui ne s'annule pas
+
+- **Quoi (concept)** : une B-spline cubique interpole une image par des polynômes de degré 3 par morceaux. Pour qu'elle passe exactement par les échantillons, on calcule d'abord des coefficients par un préfiltre récursif de pôle `z = √3 − 2` (un passage causal, un anticausal), puis on combine 4 coefficients par axe avec les poids `(1−t)³/6, (3t³−6t²+4)/6, …` ; ces poids sont positifs et de somme 1. Un noyau « sinc fenêtré » est un sinc (passe-bas idéal) multiplié par une fenêtre pour borner son support ; le bruit de Rice est le module d'un signal complexe à bruit gaussien : `√((s + σn₁)² + (σn₂)²)`, avec `E[R²] = s² + 2σ²`.
+- **Quoi (méthode)** : chaque brique est testée contre une référence écrite à part (nœuds exacts, polynôme cubique, réponse en fréquence par une DFT directe, moments de Rice calculés à la main) puis soumise à des mutations (poids, pôle, gain, forme du profil, partie imaginaire, normalisation) qui doivent faire échouer au moins un test. Premier essai : une fenêtre de Hamming ne retombe qu'à 0,08 au bord du support, la coupure brutale rendait la variance du profil discret très sensible au pas (écart de 79 % à T/4) ; avec la fenêtre de Hann, qui s'annule, l'écart est de 0,3 %.
+- **Où** : `crates/medoxide-svr/src/simulation.rs` (`BSpline3`, `profil_de_coupe`, `noyau_dans_le_plan`, `bruit_de_rice`).
+
 ---
 
 *(à compléter à la prochaine étape)*

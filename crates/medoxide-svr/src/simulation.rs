@@ -110,6 +110,92 @@ impl BSpline3 {
     }
 }
 
+/// Produit `sinc(z / w) · Hann(z ; demi-largeur h)` (fenêtre de Hann : continue, nulle en `±h`, sans coupure brutale du support) : forme des noyaux du simulateur. `sinc(x) = sin(πx) / (πx)`.
+fn sinc_fenetre(z: f64, w: f64, h: f64) -> f64 {
+    if z.abs() >= h {
+        return 0.0;
+    }
+    let x = z / w;
+    let sinc = if x.abs() < 1e-12 {
+        1.0
+    } else {
+        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+    };
+    sinc * (0.5 + 0.5 * (std::f64::consts::PI * z / h).cos())
+}
+
+/// Largeur à mi-hauteur du produit [`sinc_fenetre`] : le profil décroît de 1 à 0 sur `[0, w]` (premier zéro du sinc, `w < h`), bissection du point à 1/2.
+fn largeur_a_mi_hauteur(w: f64, h: f64) -> f64 {
+    let (mut a, mut b) = (0.0, w);
+    for _ in 0..100 {
+        let m = 0.5 * (a + b);
+        if sinc_fenetre(m, w, h) > 0.5 {
+            a = m;
+        } else {
+            b = m;
+        }
+    }
+    a + b
+}
+
+/// Profil de coupe : décalages `z` (mm, de `−2·épaisseur` à `+2·épaisseur` par pas `pas`) le long de la normale, et poids de somme 1.
+/// Forme : sinc fenêtré (Hann sur ± 2 épaisseurs) dont la largeur est ajustée (bissection) pour que la largeur à mi-hauteur vaille
+/// `epaisseur` ; ce n'est PAS la gaussienne du modèle direct de la reconstruction (lobes secondaires négatifs, support fini).
+pub(crate) fn profil_de_coupe(epaisseur: f64, pas: f64) -> Vec<(f64, f64)> {
+    let h = 2.0 * epaisseur;
+    let (mut bas, mut haut) = (0.1 * epaisseur, 1.9 * epaisseur);
+    for _ in 0..100 {
+        let w = 0.5 * (bas + haut);
+        if largeur_a_mi_hauteur(w, h) < epaisseur {
+            bas = w;
+        } else {
+            haut = w;
+        }
+    }
+    let w = 0.5 * (bas + haut);
+    let n = (h / pas).floor() as i64;
+    let mut profil: Vec<(f64, f64)> = (-n..=n)
+        .map(|m| {
+            let z = m as f64 * pas;
+            (z, sinc_fenetre(z, w, h))
+        })
+        .collect();
+    let somme: f64 = profil.iter().map(|&(_, p)| p).sum();
+    for (_, p) in &mut profil {
+        *p /= somme;
+    }
+    profil
+}
+
+/// Noyau 1D de résolution dans le plan, sur une grille `sur_echantillonnage` fois plus fine que le pixel de `pixel` mm : `sinc(u / pixel)`
+/// (passe-bas idéal de bande 1 / (2·pixel), équivalent en espace réel de la troncature de l'espace de Fourier de l'acquisition) fenêtré
+/// par Hann sur ± 3 pixels, de somme 1. Renvoie `6 · sur_echantillonnage + 1` poids, pour les décalages `m · pixel / sur_echantillonnage`.
+pub(crate) fn noyau_dans_le_plan(pixel: f64, sur_echantillonnage: usize) -> Vec<f64> {
+    let n = 3 * sur_echantillonnage as i64;
+    let mut noyau: Vec<f64> = (-n..=n)
+        .map(|m| sinc_fenetre(m as f64 * pixel / sur_echantillonnage as f64, pixel, 3.0 * pixel + 1e-9))
+        .collect();
+    let somme: f64 = noyau.iter().sum();
+    for v in &mut noyau {
+        *v /= somme;
+    }
+    noyau
+}
+
+/// Tirage gaussien centré réduit (Box–Muller) à partir du générateur `Alea` du banc.
+pub(crate) fn gaussienne(alea: &mut crate::mouvement::Alea) -> f64 {
+    let (u, v) = (alea.suivant().max(1e-12), alea.suivant());
+    (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
+}
+
+/// Bruit de Rice : le module d'un signal complexe `s` dont les parties réelle et imaginaire portent chacune un bruit gaussien d'écart type
+/// `sigma`, `√((s + σ n₁)² + (σ n₂)²)`. Biaise vers le haut les faibles intensités (pas un bruit additif gaussien).
+pub(crate) fn bruit_de_rice(signal: f64, sigma: f64, alea: &mut crate::mouvement::Alea) -> f64 {
+    let a = signal + sigma * gaussienne(alea);
+    let b = sigma * gaussienne(alea);
+    (a * a + b * b).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +267,103 @@ mod tests {
             assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-14);
             assert!(w.iter().all(|&v| v >= 0.0));
         }
+    }
+
+    /// Largeur à mi-hauteur d'un profil échantillonné, par interpolation linéaire des deux points qui encadrent 1/2 du maximum.
+    fn fwhm_echantillonnee(profil: &[(f64, f64)]) -> f64 {
+        let max = profil.iter().map(|&(_, p)| p).fold(f64::MIN, f64::max);
+        let centre = profil.iter().position(|&(_, p)| p == max).unwrap();
+        let croisement = |sens: i64| {
+            let mut i = centre as i64;
+            while profil[(i + sens) as usize].1 > 0.5 * max {
+                i += sens;
+            }
+            let (z0, p0) = profil[i as usize];
+            let (z1, p1) = profil[(i + sens) as usize];
+            z0 + (0.5 * max - p0) / (p1 - p0) * (z1 - z0)
+        };
+        croisement(1) - croisement(-1)
+    }
+
+    /// Le profil de coupe est normalisé, symétrique, de largeur à mi-hauteur égale à l'épaisseur, et à lobes négatifs (ce n'est pas une gaussienne).
+    #[test]
+    fn the_slice_profile_is_normalised_symmetric_with_the_requested_fwhm() {
+        for &epaisseur in &[2.0, 3.0, 3.5] {
+            let fin = profil_de_coupe(epaisseur, epaisseur / 64.0);
+            assert!((fin.iter().map(|&(_, p)| p).sum::<f64>() - 1.0).abs() < 1e-12);
+            for i in 0..fin.len() {
+                assert!((fin[i].1 - fin[fin.len() - 1 - i].1).abs() < 1e-14, "symétrie");
+            }
+            let l = fwhm_echantillonnee(&fin);
+            assert!(
+                (l / epaisseur - 1.0).abs() < 0.01,
+                "épaisseur {epaisseur} : largeur {l}"
+            );
+            let min = fin.iter().map(|&(_, p)| p).fold(f64::MAX, f64::min);
+            let max = fin.iter().map(|&(_, p)| p).fold(f64::MIN, f64::max);
+            assert!(min < -0.005 * max, "lobes secondaires négatifs attendus : {min}");
+        }
+    }
+
+    /// Le pas utilisé en production (épaisseur / 4) donne la même variance que le pas fin (épaisseur / 64) à 2 % près.
+    #[test]
+    fn the_production_step_of_the_slice_profile_is_fine_enough() {
+        let variance = |p: &[(f64, f64)]| p.iter().map(|&(z, w)| w * z * z).sum::<f64>();
+        let (grossier, fin) = (profil_de_coupe(3.0, 0.75), profil_de_coupe(3.0, 3.0 / 64.0));
+        assert!((variance(&grossier) / variance(&fin) - 1.0).abs() < 0.02);
+    }
+
+    /// Réponse en fréquence du noyau dans le plan (DFT écrite à part) : gain ≈ 1 en bande passante, ≈ 0 au-delà de la fréquence de Nyquist du pixel.
+    #[test]
+    fn the_in_plane_kernel_is_a_low_pass_at_the_pixel_nyquist_frequency() {
+        let (pixel, os) = (0.8, 2);
+        let noyau = noyau_dans_le_plan(pixel, os);
+        assert_eq!(noyau.len(), 6 * os + 1);
+        assert!((noyau.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        let gain = |f: f64| {
+            // f en cycles par mm ; décalages m · pixel / os
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, w) in noyau.iter().enumerate() {
+                let u = (i as f64 - 3.0 * os as f64) * pixel / os as f64;
+                re += w * (2.0 * std::f64::consts::PI * f * u).cos();
+                im += w * (2.0 * std::f64::consts::PI * f * u).sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        assert!(gain(0.0) > 0.999999);
+        assert!(gain(0.15 / pixel) > 0.97, "bande passante : {}", gain(0.15 / pixel));
+        assert!(gain(0.85 / pixel) < 0.03, "bande coupée : {}", gain(0.85 / pixel));
+    }
+
+    /// Bruit de Rice : sans signal, `E[R] = σ √(π/2)` et `E[R²] = 2σ²` ; avec un signal fort, `E[R²] = s² + 2σ²` (valeurs calculées à la main).
+    #[test]
+    fn rician_noise_has_the_analytic_moments() {
+        let n = 200_000;
+        let mut alea = crate::mouvement::Alea(12345);
+        let sigma = 2.0;
+        let r0: Vec<f64> = (0..n).map(|_| bruit_de_rice(0.0, sigma, &mut alea)).collect();
+        let moyenne = r0.iter().sum::<f64>() / n as f64;
+        let e2 = r0.iter().map(|r| r * r).sum::<f64>() / n as f64;
+        assert!(
+            (moyenne / (sigma * (std::f64::consts::PI / 2.0).sqrt()) - 1.0).abs() < 0.01,
+            "{moyenne}"
+        );
+        assert!((e2 / (2.0 * sigma * sigma) - 1.0).abs() < 0.01, "{e2}");
+        let s = 10.0 * sigma;
+        let e2s = (0..n).map(|_| bruit_de_rice(s, sigma, &mut alea).powi(2)).sum::<f64>() / n as f64;
+        assert!((e2s / (s * s + 2.0 * sigma * sigma) - 1.0).abs() < 0.005, "{e2s}");
+    }
+
+    /// Même graine, même bruit, bit à bit.
+    #[test]
+    fn rician_noise_is_deterministic() {
+        let tirer = |g| {
+            let mut a = crate::mouvement::Alea(g);
+            (0..10)
+                .map(|_| bruit_de_rice(5.0, 1.0, &mut a).to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(tirer(9), tirer(9));
+        assert_ne!(tirer(9), tirer(10));
     }
 }
