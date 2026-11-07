@@ -12275,4 +12275,47 @@ mod tests {
             );
         }
     }
+
+    /// Empreinte (repliement XOR des bits de tous les coefficients) des poses d'un modèle de mouvement, dans l'ordre des stacks puis des coupes.
+    fn empreinte_des_poses(poses: &SlicePoses, stacks: &[Stack]) -> u64 {
+        let mut e = 0xCBF2_9CE4_8422_2325_u64;
+        for (s, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                for v in poses.get(s, k).iter() {
+                    e = (e ^ v.to_bits()).wrapping_mul(0x0000_0100_0000_01B3);
+                }
+            }
+        }
+        e
+    }
+
+    /// Les quatre modèles de mouvement vrai du banc E2 (`independante`, `lisse`, `sauts`, `stack`) produisent, pour une graine fixée, EXACTEMENT les poses enregistrées avant leur déplacement hors du module de tests (`crate::mouvement`) : l'empreinte porte sur les bits de tous les coefficients. Deux piles obliques, dont la seconde est entrelacée (ordre d'acquisition ≠ ordre des indices).
+    #[test]
+    fn the_true_motion_models_keep_their_recorded_fingerprints() {
+        let t = Temp::new("empreintes_mouvement");
+        let mut stacks: Vec<Stack> = [(0.1, "a"), (1.3, "b")]
+            .iter()
+            .map(|&(angle, nom)| {
+                let r = Rotation3::from_euler_angles(angle, 0.2, -0.1);
+                let affine = affine_centree(&r, [3.0, 3.0, 4.0], [4.5, 4.5, 5.5], [10.0, -5.0, 20.0]);
+                stack_avec_masque(
+                    &t,
+                    nom,
+                    &Array3::from_elem((10, 10, 12), 1.0),
+                    &Array3::from_elem((10, 10, 12), 1u8),
+                    &affine,
+                    [3.0, 3.0, 4.0],
+                )
+            })
+            .collect();
+        stacks[1].set_slice_times(instants_entrelaces(12));
+        let empreintes: Vec<(String, u64)> = ["independante", "lisse", "sauts", "stack"]
+            .iter()
+            .map(|m| (m.to_string(), empreinte_des_poses(&mouvement_vrai(&stacks, m, 3.0, 7), &stacks)))
+            .collect();
+        let attendues: [u64; 4] = [6979914938435424673, 5240878286591737327, 17756321101287233842, 14471395011525650189];
+        for ((m, e), a) in empreintes.iter().zip(attendues) {
+            assert_eq!(*e, a, "modèle {m}");
+        }
+    }
 }
