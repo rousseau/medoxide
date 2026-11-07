@@ -12194,4 +12194,35 @@ mod tests {
             assert_eq!(*e, a, "modèle {m}");
         }
     }
+
+    /// DIAGNOSTIC (sans critère) : plage du logarithme du champ de biais estimé par stack (`BiasFields::log_field_range`, poses d'en-tête, configuration par
+    /// défaut), pour calibrer l'amplitude du biais du simulateur sur des piles réelles (docs/ROADMAP.md, F4.0.1, amendement 1). Variables : `MEDOXIDE_PILES` et
+    /// `MEDOXIDE_MASQUES` (chemins séparés par des virgules, dans le même ordre). Écrit `BIAIS pile min max etendue reduction_incoherence` par pile.
+    #[test]
+    #[ignore = "diagnostic sur piles locales ; échoue sans MEDOXIDE_PILES et MEDOXIDE_MASQUES (voir la documentation du test)"]
+    fn diagnose_the_estimated_bias_range() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        let liste = |nom: &str| -> Vec<PathBuf> {
+            std::env::var(nom)
+                .unwrap_or_else(|_| panic!("{nom} : chemins séparés par des virgules"))
+                .split(',')
+                .map(PathBuf::from)
+                .collect()
+        };
+        let (piles, masques) = (liste("MEDOXIDE_PILES"), liste("MEDOXIDE_MASQUES"));
+        assert_eq!(piles.len(), masques.len(), "une masque par pile");
+        let mut stacks: Vec<Stack> = piles.iter().map(|p| Stack::read(p).unwrap()).collect();
+        for (s, m) in stacks.iter_mut().zip(&masques) {
+            s.set_brain_mask(m).unwrap();
+        }
+        let champs = estimate_bias_fields(&stacks, &SlicePoses::identity(&stacks), &BiasConfig::default()).unwrap();
+        for s in 0..stacks.len() {
+            let (bas, haut) = champs.log_field_range(s);
+            println!(
+                "BIAIS {s} {bas:.4} {haut:.4} {:.4} {:.4}",
+                haut - bas,
+                champs.inconsistency_reduction()
+            );
+        }
+    }
 }

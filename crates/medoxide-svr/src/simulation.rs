@@ -214,6 +214,8 @@ pub(crate) struct ReglagesSimulation {
     pub echelle_coupe_pct: f64,
     /// Graine de tout le tirage aléatoire (bruit, biais, échelles).
     pub graine: u64,
+    /// Facteur appliqué à la largeur (à mi-hauteur) du profil de coupe : 1 = l'épaisseur nominale. Sert au calibrage du simulateur sur des piles réelles.
+    pub facteur_profil: f64,
 }
 
 /// Mélange de bits (SplitMix64) : une graine par (réglage, pile, coupe), indépendante de l'ordre d'exécution des fils.
@@ -377,7 +379,8 @@ pub(crate) fn simuler_pile(
 ) -> (Array3<f32>, Array3<u8>) {
     let dim = modele.dim();
     let s = modele.spacing();
-    let profil = profil_de_coupe(s[2], s[2] / 4.0);
+    let largeur = s[2] * r.facteur_profil;
+    let profil = profil_de_coupe(largeur, largeur / 4.0);
     let (noyau_x, noyau_y) = (
         noyau_dans_le_plan(s[0], SUR_ECHANTILLONNAGE),
         noyau_dans_le_plan(s[1], SUR_ECHANTILLONNAGE),
@@ -501,6 +504,10 @@ pub struct ConfigSimulation {
     pub graine: u64,
     /// Moteur des valeurs sans bruit.
     pub moteur: Moteur,
+    /// Facteur appliqué à la largeur du profil de coupe (1 : l'épaisseur nominale).
+    pub facteur_profil: f64,
+    /// Recentre les gabarits sur le centre du cerveau de la source (défaut) ; `false` : ils gardent leur position, pour comparer à des piles réelles au même emplacement.
+    pub recentrer: bool,
 }
 
 impl Default for ConfigSimulation {
@@ -515,6 +522,8 @@ impl Default for ConfigSimulation {
             echelle_coupe_pct: 0.0,
             graine: 1,
             moteur: Moteur::Independant,
+            facteur_profil: 1.0,
+            recentrer: true,
         }
     }
 }
@@ -619,7 +628,11 @@ pub fn simuler(
             .xyz()
         })
         .collect();
-    let decalage = centre_source - centres.iter().sum::<Vector3<f64>>() / centres.len().max(1) as f64;
+    let decalage = if cfg.recentrer {
+        centre_source - centres.iter().sum::<Vector3<f64>>() / centres.len().max(1) as f64
+    } else {
+        Vector3::zeros()
+    };
 
     let (mut piles, mut chemins, mut masques) = (vec![], vec![], vec![]);
     for (n, g) in lus.iter().enumerate() {
@@ -664,6 +677,7 @@ pub fn simuler(
         biais_pct: cfg.biais_pct,
         echelle_coupe_pct: cfg.echelle_coupe_pct,
         graine: cfg.graine,
+        facteur_profil: cfg.facteur_profil,
     };
     let intensite = intensite_moyenne_du_tissu(&source);
     for (n, modele) in piles.iter().enumerate() {
@@ -899,6 +913,7 @@ mod tests {
         biais_pct: 0.0,
         echelle_coupe_pct: 0.0,
         graine: 5,
+        facteur_profil: 1.0,
     };
 
     /// Source : rampe `100 + 0,5 x + 0,3 y + 0,2 z` (mm, monde) sur 80³ voxels de 1 mm, origine en (−40, −40, −40) ; la pile modèle : 16 × 16 × 8 pixels
@@ -1182,6 +1197,8 @@ mod tests {
             echelle_coupe_pct: 2.0,
             graine: 7,
             moteur: Moteur::Independant,
+            facteur_profil: 1.0,
+            recentrer: true,
         };
         let r = simuler(&source, Some(&masque), &gabarits, &t.0.join("a"), "sim", &cfg).unwrap();
         assert_eq!(r.piles.len(), 3);
@@ -1285,6 +1302,135 @@ mod tests {
         assert!(
             a.iter().zip(b.iter()).any(|(x, y)| (x - y).abs() > 1e-3),
             "les moteurs ne doivent pas être identiques"
+        );
+    }
+
+    /// Le facteur de profil élargit la transition d'un bord net le long de la coupe dans la proportion demandée : source en marche d'escalier en `z`, pile
+    /// alignée de coupes de 1 mm ; largeur 10–90 % de la transition mesurée sur la colonne centrale, facteurs 2 et 4 : rapport 2 à 10 % près.
+    #[test]
+    fn the_profile_factor_widens_a_sharp_edge_as_requested() {
+        let t = Temp::new("profil");
+        let mut a = Matrix4::identity();
+        for r in 0..3 {
+            a[(r, 3)] = -40.0;
+        }
+        let marche = Array3::from_shape_fn((80, 80, 80), |(_, _, k)| if k >= 40 { 1000.0_f32 } else { 0.0 });
+        let source = t.fichier("marche.nii.gz");
+        ecrire_pile(
+            &source,
+            &t.fichier("marche_mask.nii.gz"),
+            &marche,
+            &Array3::from_elem((80, 80, 80), 1u8),
+            &a,
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let mut g = Matrix4::identity();
+        g[(0, 3)] = -8.0;
+        g[(1, 3)] = -8.0;
+        g[(2, 3)] = -19.5;
+        let gabarit = t.fichier("g.nii.gz");
+        ecrire_pile(
+            &gabarit,
+            &t.fichier("g_mask.nii.gz"),
+            &Array3::zeros((16, 16, 40)),
+            &Array3::from_elem((16, 16, 40), 1u8),
+            &g,
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let largeur = |facteur: f64| {
+            let cfg = ConfigSimulation {
+                facteur_profil: facteur,
+                recentrer: false,
+                ..ConfigSimulation::default()
+            };
+            let r = simuler(
+                &source,
+                None,
+                std::slice::from_ref(&gabarit),
+                &t.0.join(format!("f{facteur}")),
+                "s",
+                &cfg,
+            )
+            .unwrap();
+            let pile = Stack::read(&r.piles[0]).unwrap();
+            let p: Vec<f64> = (0..40).map(|k| f64::from(pile.data()[[8, 8, k]]) / 1000.0).collect();
+            // position (en coupes) où la colonne franchit `niveau`, par interpolation linéaire, en montant
+            let franchit = |niveau: f64| {
+                let i = p.iter().position(|&v| v >= niveau).unwrap();
+                (i as f64 - 1.0) + (niveau - p[i - 1]) / (p[i] - p[i - 1])
+            };
+            franchit(0.9) - franchit(0.1)
+        };
+        let (l2, l4) = (largeur(2.0), largeur(4.0));
+        assert!((l4 / l2 - 2.0).abs() < 0.2, "largeurs {l2} et {l4}");
+        assert!(l2 > 1.5, "la transition doit s'étendre sur plusieurs coupes : {l2}");
+    }
+
+    /// Sans recentrage, les piles écrites ont exactement l'affine des gabarits (qui doivent recouper la source : sinon le masque est vide et `simuler` s'arrête
+    /// avec `EmptyMask`) ; avec recentrage, des gabarits lointains sont ramenés sur la source.
+    #[test]
+    fn without_recentring_the_stacks_keep_the_template_geometry() {
+        let t = Temp::new("recentrage");
+        let (source, masque, lointains) = source_et_gabarits(&t);
+        let loin = read_stacks(&lointains).unwrap();
+        // avec recentrage : les piles sont ramenées sur la source, donc ailleurs que les gabarits lointains
+        let proches = simuler(
+            &source,
+            Some(&masque),
+            &lointains,
+            &t.0.join("centre"),
+            "s",
+            &ConfigSimulation::default(),
+        )
+        .unwrap();
+        assert_ne!(Stack::read(&proches.piles[0]).unwrap().affine(), loin[0].affine());
+        // sans recentrage : un gabarit qui recoupe la source garde son affine
+        let modeles = read_stacks(&proches.piles).unwrap();
+        let cfg = ConfigSimulation {
+            recentrer: false,
+            ..ConfigSimulation::default()
+        };
+        let r = simuler(&source, Some(&masque), &proches.piles, &t.0.join("fixe"), "s", &cfg).unwrap();
+        for (chemin, modele) in r.piles.iter().zip(&modeles) {
+            assert_eq!(Stack::read(chemin).unwrap().affine(), modele.affine());
+        }
+        // des gabarits qui ne recoupent pas la source : erreur explicite
+        assert!(matches!(
+            simuler(&source, Some(&masque), &lointains, &t.0.join("vide"), "s", &cfg),
+            Err(SvrError::EmptyMask(_))
+        ));
+    }
+
+    /// Le bouton de biais du simulateur se voit dans l'estimateur de la reconstruction (celui qui sert à calibrer sur des piles réelles) : la plage du
+    /// logarithme du champ estimé est plus grande avec 20 % de biais qu'avec 0 %.
+    #[test]
+    fn the_simulated_bias_shows_in_the_estimated_bias_range() {
+        use crate::bias::{estimate_bias_fields, BiasConfig};
+        let t = Temp::new("biais");
+        let (source, masque, gabarits) = source_et_gabarits(&t);
+        let etendue = |biais_pct: f64, dossier: &str| {
+            let cfg = ConfigSimulation {
+                biais_pct,
+                graine: 3,
+                ..ConfigSimulation::default()
+            };
+            let r = simuler(&source, Some(&masque), &gabarits, &t.0.join(dossier), "s", &cfg).unwrap();
+            let mut piles = read_stacks(&r.piles).unwrap();
+            for (p, m) in piles.iter_mut().zip(&r.masques) {
+                p.set_brain_mask(m).unwrap();
+            }
+            let champs = estimate_bias_fields(&piles, &SlicePoses::identity(&piles), &BiasConfig::default()).unwrap();
+            (0..3)
+                .map(|s| champs.log_field_range(s))
+                .map(|(a, b)| b - a)
+                .fold(0.0_f64, f64::max)
+        };
+        let (sans, avec) = (etendue(0.0, "b0"), etendue(20.0, "b20"));
+        assert!(
+            avec > 3.0 * sans && avec > 0.05,
+            "plages : {sans} sans biais, {avec} avec 20 %"
         );
     }
 }
