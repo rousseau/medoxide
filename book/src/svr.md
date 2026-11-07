@@ -282,6 +282,7 @@ Les piles gabarits ne donnent que leur géométrie (orientation, pas, épaisseur
 | `--slice-scale-pct` | écart type, en %, du logarithme du facteur d'échelle de chaque coupe (défaut 0) |
 | `--seed` | graine de tout le tirage ; même graine, mêmes fichiers (défaut 1) |
 | `--slice-profile-factor` | facteur appliqué à la largeur à mi-hauteur du profil de coupe (1 : l'épaisseur nominale ; défaut 1) : calibrage sur des piles réelles |
+| `--inplane-blur-mm` | écart type, en mm, d'un flou gaussien isotrope ajouté dans le plan de la coupe (défaut 0 : aucun, résultat identique bit à bit) ; refusé avec `--forward-model reconstruction`. Les piles réelles sont plus floues que le noyau nominal : ce flou est une **compensation calibrée** (F4.0.1, amendement 2), non un modèle de l'acquisition, dont la cause reste inconnue |
 | `--no-recenter` | garde les gabarits à leur position au lieu de les recentrer sur le cerveau de la source (comparaison à de vraies piles au même emplacement) ; un gabarit qui ne recoupe pas la source donne l'erreur `EmptyMask` |
 | `--forward-model` | `independent` (défaut) : B-spline cubique, profil de coupe et noyau dans le plan en sinc fenêtré de Hann, indépendants du modèle direct de la reconstruction ; `reconstruction` : le modèle direct de la reconstruction lui-même (PSF gaussienne, interpolation trilinéaire), pour mesurer ce que le « crime inverse » lui fait gagner |
 

@@ -1647,6 +1647,12 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode)** : un oracle linéaire valide l'assemblage entier : une source en rampe doit donner, à chaque pixel simulé, la rampe au centre du pixel (la B-spline reproduit les fonctions linéaires, les noyaux symétriques de somme 1 les laissent inchangées) ; avec un mouvement par coupe, le modèle direct de la reconstruction doit donner la même valeur, ce qui contrôle que les deux modèles partagent la convention de pose. Quatre mutations (mouvement ignoré, décimation décalée d'un sous-pixel, bruit doublé, échelles non appliquées) font échouer au moins un test chacune.
 - **Où** : `crates/medoxide-svr/src/simulation.rs` (`simuler_pile`, `ChampDeBiais`, `echelles_par_coupe`, `graine_de`, `ecrire_pile`).
 
+## 2026-11-07 — Flou gaussien dans le plan : convoluer deux noyaux ajoute leurs variances
+
+- **Quoi (concept)** : convoluer deux noyaux revient à enchaîner leurs deux flous, et les **variances s'additionnent** (σ² total = σ₁² + σ₂²), pas les écarts types. Un noyau de résolution (sinc fenêtré) convolué par une gaussienne d'écart type σ donne donc un noyau de variance « celle du sinc + σ² ». Pour la largeur de bord 10–90 % d'une marche, la gaussienne seule donne 2,563 σ ; avec un autre flou de largeur `l₀` on obtient `√(l₀² + (2,563 σ)²)` (somme en quadrature).
+- **Quoi (méthode)** : le noyau s'allonge avec σ (± 3σ en plus), donc la grille fine intermédiaire de `coupe_propre` ne peut plus avoir une marge fixe de 3 pixels : sa marge se déduit de la longueur du noyau. Deux oracles analytiques (variance du noyau, largeur de bord d'une marche) et une mutation sur chaque maillon de la chaîne (noyau, transmission du réglage, option de la CLI) font échouer au moins un test.
+- **Où** : `crates/medoxide-svr/src/simulation.rs` (`noyau_dans_le_plan`, `coupe_propre`) ; option `--inplane-blur-mm` de `medx svr simulate` (`crates/medx/src/main.rs`).
+
 ---
 
 *(à compléter à la prochaine étape)*

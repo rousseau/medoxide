@@ -177,16 +177,42 @@ pub(crate) fn profil_de_coupe(epaisseur: f64, pas: f64) -> Vec<(f64, f64)> {
 /// Noyau 1D de résolution dans le plan, sur une grille `sur_echantillonnage` fois plus fine que le pixel de `pixel` mm : `sinc(u / pixel)`
 /// (passe-bas idéal de bande 1 / (2·pixel), équivalent en espace réel de la troncature de l'espace de Fourier de l'acquisition) fenêtré
 /// par Hann sur ± 3 pixels, de somme 1. Renvoie `6 · sur_echantillonnage + 1` poids, pour les décalages `m · pixel / sur_echantillonnage`.
-pub(crate) fn noyau_dans_le_plan(pixel: f64, sur_echantillonnage: usize) -> Vec<f64> {
+///
+/// `flou_mm > 0` : le noyau est ensuite convolué par une gaussienne d'écart type `flou_mm` (en mm), tronquée à ± 3 écarts types, puis
+/// renormalisé à 1 ; il s'allonge de `2 · ⌈3 · flou_mm / (pixel / sur_echantillonnage)⌉` poids. Avec `flou_mm = 0` : le noyau sans flou, identique bit à bit.
+/// Le nombre de poids est toujours impair, centré sur le décalage 0.
+pub(crate) fn noyau_dans_le_plan(pixel: f64, sur_echantillonnage: usize, flou_mm: f64) -> Vec<f64> {
     let n = 3 * sur_echantillonnage as i64;
+    let pas = pixel / sur_echantillonnage as f64;
     let mut noyau: Vec<f64> = (-n..=n)
-        .map(|m| sinc_fenetre(m as f64 * pixel / sur_echantillonnage as f64, pixel, 3.0 * pixel + 1e-9))
+        .map(|m| sinc_fenetre(m as f64 * pas, pixel, 3.0 * pixel + 1e-9))
         .collect();
     let somme: f64 = noyau.iter().sum();
     for v in &mut noyau {
         *v /= somme;
     }
-    noyau
+    if flou_mm <= 0.0 {
+        return noyau;
+    }
+    let g = (3.0 * flou_mm / pas).ceil() as i64;
+    let mut gauss: Vec<f64> = (-g..=g)
+        .map(|m| (-0.5 * (m as f64 * pas / flou_mm).powi(2)).exp())
+        .collect();
+    let somme_g: f64 = gauss.iter().sum();
+    for v in &mut gauss {
+        *v /= somme_g;
+    }
+    let mut sortie = vec![0.0; noyau.len() + gauss.len() - 1];
+    for (i, a) in noyau.iter().enumerate() {
+        for (j, b) in gauss.iter().enumerate() {
+            sortie[i + j] += a * b;
+        }
+    }
+    let total: f64 = sortie.iter().sum();
+    for v in &mut sortie {
+        *v /= total;
+    }
+    sortie
 }
 
 /// Tirage gaussien centré réduit (Box–Muller) à partir du générateur `Alea` du banc.
@@ -216,6 +242,8 @@ pub(crate) struct ReglagesSimulation {
     pub graine: u64,
     /// Facteur appliqué à la largeur (à mi-hauteur) du profil de coupe : 1 = l'épaisseur nominale. Sert au calibrage du simulateur sur des piles réelles.
     pub facteur_profil: f64,
+    /// Écart type, en mm, d'un flou gaussien isotrope ajouté dans le plan de la coupe (0 : aucun). Compensation phénoménologique du calibrage de (v).
+    pub flou_plan_mm: f64,
 }
 
 /// Mélange de bits (SplitMix64) : une graine par (réglage, pile, coupe), indépendante de l'ordre d'exécution des fils.
@@ -315,17 +343,18 @@ fn coupe_propre(
     noyau_y: &[f64],
 ) -> Array2<f64> {
     let (nx, ny) = coupe.dim();
-    let demi = 3 * SUR_ECHANTILLONNAGE;
+    // Demi-longueur de chaque noyau, en sous-pixels : 3 pixels sans flou, davantage avec (les noyaux sont de longueur impaire).
+    let (demi_x, demi_y) = ((noyau_x.len() - 1) / 2, (noyau_y.len() - 1) / 2);
     let (fx, fy) = (
-        SUR_ECHANTILLONNAGE * (nx - 1) + 2 * demi + 1,
-        SUR_ECHANTILLONNAGE * (ny - 1) + 2 * demi + 1,
+        SUR_ECHANTILLONNAGE * (nx - 1) + 2 * demi_x + 1,
+        SUR_ECHANTILLONNAGE * (ny - 1) + 2 * demi_y + 1,
     );
     let normale = coupe.normal();
     let mut fine = Array2::<f64>::zeros((fx, fy));
     for ((a, b), v) in fine.indexed_iter_mut() {
         let centre = coupe.pixel_to_world(
-            (a as f64 - demi as f64) / SUR_ECHANTILLONNAGE as f64,
-            (b as f64 - demi as f64) / SUR_ECHANTILLONNAGE as f64,
+            (a as f64 - demi_x as f64) / SUR_ECHANTILLONNAGE as f64,
+            (b as f64 - demi_y as f64) / SUR_ECHANTILLONNAGE as f64,
         );
         *v = profil
             .iter()
@@ -382,8 +411,8 @@ pub(crate) fn simuler_pile(
     let largeur = s[2] * r.facteur_profil;
     let profil = profil_de_coupe(largeur, largeur / 4.0);
     let (noyau_x, noyau_y) = (
-        noyau_dans_le_plan(s[0], SUR_ECHANTILLONNAGE),
-        noyau_dans_le_plan(s[1], SUR_ECHANTILLONNAGE),
+        noyau_dans_le_plan(s[0], SUR_ECHANTILLONNAGE, r.flou_plan_mm),
+        noyau_dans_le_plan(s[1], SUR_ECHANTILLONNAGE, r.flou_plan_mm),
     );
     let maximum = f64::from(source.data().iter().copied().fold(0.0_f32, f32::max));
     let champ = ChampDeBiais::new(r.biais_pct, r.graine, pile);
@@ -506,6 +535,9 @@ pub struct ConfigSimulation {
     pub moteur: Moteur,
     /// Facteur appliqué à la largeur du profil de coupe (1 : l'épaisseur nominale).
     pub facteur_profil: f64,
+    /// Écart type, en mm, d'un flou gaussien isotrope ajouté DANS le plan de la coupe (0 : aucun, défaut). Réservé au moteur indépendant.
+    /// Compensation phénoménologique, calibrée sur des piles réelles, non un modèle de l'acquisition.
+    pub flou_plan_mm: f64,
     /// Recentre les gabarits sur le centre du cerveau de la source (défaut) ; `false` : ils gardent leur position, pour comparer à des piles réelles au même emplacement.
     pub recentrer: bool,
 }
@@ -523,6 +555,7 @@ impl Default for ConfigSimulation {
             graine: 1,
             moteur: Moteur::Independant,
             facteur_profil: 1.0,
+            flou_plan_mm: 0.0,
             recentrer: true,
         }
     }
@@ -600,7 +633,8 @@ fn ecrire_poses_vraies(chemin: &Path, piles: &[Stack], poses: &SlicePoses) -> Re
 /// bruit de `cfg`. Écrit dans `dossier` les piles, leurs masques, les poses vraies et, si `cfg.entrelace`, un `SliceTiming` par pile.
 ///
 /// # Erreurs
-/// Lecture de la source, du masque ou d'un gabarit ; écriture d'un fichier (avec son chemin).
+/// Lecture de la source, du masque ou d'un gabarit ; écriture d'un fichier (avec son chemin) ; [`SvrError::InvalidBlur`] si `flou_plan_mm` est
+/// négatif ou non fini, ou strictement positif avec le moteur `ModeleDirect` (qui ne le prend pas en compte : on refuse plutôt que d'ignorer).
 pub fn simuler(
     source_chemin: &Path,
     masque_source: Option<&Path>,
@@ -609,6 +643,12 @@ pub fn simuler(
     nom: &str,
     cfg: &ConfigSimulation,
 ) -> Result<RapportSimulation, SvrError> {
+    if !cfg.flou_plan_mm.is_finite()
+        || cfg.flou_plan_mm < 0.0
+        || (cfg.flou_plan_mm > 0.0 && cfg.moteur == Moteur::ModeleDirect)
+    {
+        return Err(SvrError::InvalidBlur);
+    }
     std::fs::create_dir_all(dossier).map_err(|e| erreur_ecriture(dossier, e))?;
     let source_stack = Stack::read(source_chemin)?;
     let source = Volume::from_stack(&source_stack);
@@ -678,6 +718,7 @@ pub fn simuler(
         echelle_coupe_pct: cfg.echelle_coupe_pct,
         graine: cfg.graine,
         facteur_profil: cfg.facteur_profil,
+        flou_plan_mm: cfg.flou_plan_mm,
     };
     let intensite = intensite_moyenne_du_tissu(&source);
     for (n, modele) in piles.iter().enumerate() {
@@ -840,7 +881,7 @@ mod tests {
     #[test]
     fn the_in_plane_kernel_is_a_low_pass_at_the_pixel_nyquist_frequency() {
         let (pixel, os) = (0.8, 2);
-        let noyau = noyau_dans_le_plan(pixel, os);
+        let noyau = noyau_dans_le_plan(pixel, os, 0.0);
         assert_eq!(noyau.len(), 6 * os + 1);
         assert!((noyau.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         let gain = |f: f64| {
@@ -914,6 +955,7 @@ mod tests {
         echelle_coupe_pct: 0.0,
         graine: 5,
         facteur_profil: 1.0,
+        flou_plan_mm: 0.0,
     };
 
     /// Source : rampe `100 + 0,5 x + 0,3 y + 0,2 z` (mm, monde) sur 80³ voxels de 1 mm, origine en (−40, −40, −40) ; la pile modèle : 16 × 16 × 8 pixels
@@ -1198,6 +1240,7 @@ mod tests {
             graine: 7,
             moteur: Moteur::Independant,
             facteur_profil: 1.0,
+            flou_plan_mm: 0.0,
             recentrer: true,
         };
         let r = simuler(&source, Some(&masque), &gabarits, &t.0.join("a"), "sim", &cfg).unwrap();
@@ -1303,6 +1346,137 @@ mod tests {
             a.iter().zip(b.iter()).any(|(x, y)| (x - y).abs() > 1e-3),
             "les moteurs ne doivent pas être identiques"
         );
+    }
+
+    /// Variance (en mm²) d'un noyau 1D de somme 1 centré, pour des poids aux décalages `m · pas`.
+    fn variance_du_noyau(noyau: &[f64], pas: f64) -> f64 {
+        let c = (noyau.len() - 1) as f64 / 2.0;
+        noyau
+            .iter()
+            .enumerate()
+            .map(|(i, w)| w * ((i as f64 - c) * pas).powi(2))
+            .sum()
+    }
+
+    /// Oracle : convoluer par une gaussienne d'écart type σ ajoute σ² à la variance du noyau (variances additives), la somme reste 1 et la longueur
+    /// reste impaire ; avec σ = 0 le noyau est celui sans flou, poids pour poids. La troncature à ± 3σ retire 3 % de σ² au plus : tolérance 4 %.
+    #[test]
+    fn the_in_plane_blur_adds_its_variance_to_the_kernel() {
+        let (pixel, os) = (0.8, 2);
+        let pas = pixel / os as f64;
+        let base = noyau_dans_le_plan(pixel, os, 0.0);
+        for sigma in [0.6, 1.2, 2.5] {
+            let flou = noyau_dans_le_plan(pixel, os, sigma);
+            assert_eq!(flou.len() % 2, 1);
+            assert!(flou.len() > base.len());
+            assert!((flou.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            let attendu = variance_du_noyau(&base, pas) + sigma * sigma;
+            let mesure = variance_du_noyau(&flou, pas);
+            assert!(
+                (mesure / attendu - 1.0).abs() < 0.04,
+                "σ {sigma} : {mesure} contre {attendu}"
+            );
+        }
+        assert_eq!(noyau_dans_le_plan(pixel, os, 0.0), base);
+    }
+
+    /// Un flou négatif, non fini, ou positif avec le moteur `ModeleDirect` (qui l'ignorerait) est refusé avant toute lecture de fichier.
+    #[test]
+    fn an_invalid_in_plane_blur_is_refused() {
+        for (flou, moteur) in [
+            (-0.1, Moteur::Independant),
+            (f64::NAN, Moteur::Independant),
+            (f64::INFINITY, Moteur::Independant),
+            (1.0, Moteur::ModeleDirect),
+        ] {
+            let cfg = ConfigSimulation {
+                flou_plan_mm: flou,
+                moteur,
+                ..ConfigSimulation::default()
+            };
+            let r = simuler(Path::new("absent.nii.gz"), None, &[], Path::new("absent"), "s", &cfg);
+            assert!(matches!(r, Err(SvrError::InvalidBlur)), "flou {flou} : {r:?}");
+        }
+    }
+
+    /// Le flou dans le plan élargit un bord net DANS le plan comme prévu : source en marche d'escalier en `x`, pile de pixels de 1 mm ; largeur 10–90 %
+    /// mesurée sur une ligne. Les largeurs s'ajoutent en quadrature (σ = 3 mm : 7,7 mm de gaussienne contre ≈ 1 mm sans flou) à 10 % près, et la largeur
+    /// ne bouge pas le long de la coupe (le flou est dans le plan seulement).
+    #[test]
+    fn the_in_plane_blur_widens_a_sharp_edge_in_the_plane_only() {
+        let t = Temp::new("flou_plan");
+        let mut a = Matrix4::identity();
+        for r in 0..3 {
+            a[(r, 3)] = -40.0;
+        }
+        let marche = Array3::from_shape_fn((80, 80, 80), |(i, _, _)| if i >= 40 { 1000.0_f32 } else { 0.0 });
+        let source = t.fichier("marche.nii.gz");
+        ecrire_pile(
+            &source,
+            &t.fichier("marche_mask.nii.gz"),
+            &marche,
+            &Array3::from_elem((80, 80, 80), 1u8),
+            &a,
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let mut g = Matrix4::identity();
+        g[(0, 3)] = -20.0;
+        g[(1, 3)] = -8.0;
+        g[(2, 3)] = -1.5;
+        let gabarit = t.fichier("g.nii.gz");
+        ecrire_pile(
+            &gabarit,
+            &t.fichier("g_mask.nii.gz"),
+            &Array3::zeros((40, 16, 4)),
+            &Array3::from_elem((40, 16, 4), 1u8),
+            &g,
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let pile = |flou: f64| {
+            let cfg = ConfigSimulation {
+                flou_plan_mm: flou,
+                recentrer: false,
+                ..ConfigSimulation::default()
+            };
+            let r = simuler(
+                &source,
+                None,
+                std::slice::from_ref(&gabarit),
+                &t.0.join(format!("f{flou}")),
+                "s",
+                &cfg,
+            )
+            .unwrap();
+            Stack::read(&r.piles[0]).unwrap()
+        };
+        let largeur = |p: &[f64]| {
+            let franchit = |niveau: f64| {
+                let i = p.iter().position(|&v| v >= niveau).unwrap();
+                (i as f64 - 1.0) + (niveau - p[i - 1]) / (p[i] - p[i - 1])
+            };
+            franchit(0.9) - franchit(0.1)
+        };
+        let ligne_x = |s: &Stack| {
+            (0..40)
+                .map(|i| f64::from(s.data()[[i, 8, 1]]) / 1000.0)
+                .collect::<Vec<_>>()
+        };
+        let (sans, avec) = (pile(0.0), pile(3.0));
+        let (l0, l3) = (largeur(&ligne_x(&sans)), largeur(&ligne_x(&avec)));
+        let attendu = (l0 * l0 + (2.563_f64 * 3.0).powi(2)).sqrt();
+        assert!(
+            (l3 / attendu - 1.0).abs() < 0.1,
+            "largeur {l3} contre {attendu} (sans flou : {l0})"
+        );
+        // le profil est le même sur une autre ligne et une autre coupe : le flou n'agit pas hors du plan, et le bord est invariant en y et en z
+        for s in [&sans, &avec] {
+            for i in 0..40 {
+                let (u, v) = (f64::from(s.data()[[i, 8, 1]]), f64::from(s.data()[[i, 3, 2]]));
+                assert!((u - v).abs() < 1.0, "pixel {i} : {u} contre {v}");
+            }
+        }
     }
 
     /// Le facteur de profil élargit la transition d'un bord net le long de la coupe dans la proportion demandée : source en marche d'escalier en `z`, pile

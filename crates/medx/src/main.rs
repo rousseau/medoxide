@@ -157,6 +157,7 @@ fn config_simulation(
     seed: u64,
     forward_model: MoteurSimule,
     slice_profile_factor: f64,
+    inplane_blur_mm: f64,
     no_recenter: bool,
 ) -> medoxide_svr::simulation::ConfigSimulation {
     use medoxide_svr::simulation::{ConfigSimulation, Moteur};
@@ -180,6 +181,7 @@ fn config_simulation(
             MoteurSimule::Reconstruction => Moteur::ModeleDirect,
         },
         facteur_profil: slice_profile_factor,
+        flou_plan_mm: inplane_blur_mm,
         recentrer: !no_recenter,
     }
 }
@@ -453,6 +455,9 @@ enum SvrAction {
         /// Facteur appliqué à la largeur à mi-hauteur du profil de coupe (1 : l'épaisseur nominale ; calibrage sur des piles réelles)
         #[arg(long, default_value_t = 1.0)]
         slice_profile_factor: f64,
+        /// Écart type, en mm, d'un flou gaussien isotrope ajouté dans le plan de la coupe (0 : aucun ; compensation calibrée sur des piles réelles ; moteur independent seulement)
+        #[arg(long, default_value_t = 0.0)]
+        inplane_blur_mm: f64,
         /// Garde les piles gabarits à leur position au lieu de les recentrer sur le cerveau de la source (comparaison à des piles réelles au même emplacement)
         #[arg(long)]
         no_recenter: bool,
@@ -1094,6 +1099,7 @@ fn main() -> ExitCode {
                     seed,
                     forward_model,
                     slice_profile_factor,
+                    inplane_blur_mm,
                     no_recenter,
                 },
         } => {
@@ -1107,6 +1113,7 @@ fn main() -> ExitCode {
                 seed,
                 forward_model,
                 slice_profile_factor,
+                inplane_blur_mm,
                 no_recenter,
             );
             svr_simulate(&source, source_mask.as_deref(), &template, &output_dir, &name, &config)
@@ -1331,6 +1338,7 @@ mod tests {
                             seed,
                             forward_model,
                             slice_profile_factor,
+                            inplane_blur_mm,
                             no_recenter,
                             ..
                         },
@@ -1344,6 +1352,7 @@ mod tests {
                     seed,
                     forward_model,
                     slice_profile_factor,
+                    inplane_blur_mm,
                     no_recenter,
                 ),
                 _ => panic!("pas une simulation"),
@@ -1367,7 +1376,10 @@ mod tests {
             !defaut.entrelace && defaut.bruit_pct == 0.0 && defaut.biais_pct == 0.0 && defaut.echelle_coupe_pct == 0.0
         );
         assert_eq!((defaut.graine, defaut.moteur), (1, Moteur::Independant));
-        assert_eq!((defaut.facteur_profil, defaut.recentrer), (1.0, true));
+        assert_eq!(
+            (defaut.facteur_profil, defaut.flou_plan_mm, defaut.recentrer),
+            (1.0, 0.0, true)
+        );
         let tout: Vec<&str> = base
             .iter()
             .copied()
@@ -1389,6 +1401,8 @@ mod tests {
                 "reconstruction",
                 "--slice-profile-factor",
                 "0.7",
+                "--inplane-blur-mm",
+                "1.4",
                 "--no-recenter",
             ])
             .collect();
@@ -1399,7 +1413,7 @@ mod tests {
             (6.5, true, 5.0, 10.0, 2.0)
         );
         assert_eq!((c.graine, c.moteur), (42, Moteur::ModeleDirect));
-        assert_eq!((c.facteur_profil, c.recentrer), (0.7, false));
+        assert_eq!((c.facteur_profil, c.flou_plan_mm, c.recentrer), (0.7, 1.4, false));
         for (arg, attendu) in [
             ("none", "aucun"),
             ("independent", "independante"),
