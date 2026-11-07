@@ -162,5 +162,60 @@ class TestDice(unittest.TestCase):
             self.assertTrue(v == 1.0 or math.isnan(v), nom)
 
 
+def pose(rx=0.0, ry=0.0, rz=0.0, t=(0.0, 0.0, 0.0)):
+    """Matrice 4×4 : rotation (rad, axes x puis y puis z) et translation t."""
+    cx, sx, cy, sy, cz, sz = np.cos(rx), np.sin(rx), np.cos(ry), np.sin(ry), np.cos(rz), np.sin(rz)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    M = np.eye(4)
+    M[:3, :3] = Rz @ Ry @ Rx
+    M[:3, 3] = t
+    return M
+
+
+class TestErreurDePose(unittest.TestCase):
+    def points(self):
+        rng = np.random.default_rng(10)
+        return {(s, k): rng.normal(size=(30, 3)) * 30 + [s * 5, k, 0] for s in range(2) for k in range(12)}
+
+    def poses_aleatoires(self, graine):
+        rng = np.random.default_rng(graine)
+        return {(s, k): pose(*rng.normal(size=3) * 0.05, t=rng.normal(size=3) * 2) for s in range(2) for k in range(12)}
+
+    def test_poses_identiques_donnent_zero(self):
+        v = self.poses_aleatoires(1)
+        e = bm.erreur_de_pose(self.points(), v, v)
+        self.assertEqual(len(e), 24)
+        self.assertLess(max(e.values()), 1e-9)
+
+    def test_un_mouvement_commun_est_retire(self):
+        v = self.poses_aleatoires(2)
+        G = pose(0.3, -0.2, 0.5, t=(10.0, -4.0, 7.0))
+        estimees = {k: G @ m for k, m in v.items()}
+        self.assertLess(max(bm.erreur_de_pose(self.points(), v, estimees).values()), 1e-9)
+
+    def test_une_coupe_decalee_de_2_mm_est_mesuree(self):
+        v = self.poses_aleatoires(3)
+        estimees = dict(v)
+        estimees[(1, 5)] = pose(t=(2.0, 0.0, 0.0)) @ v[(1, 5)]
+        e = bm.erreur_de_pose(self.points(), v, estimees)
+        self.assertAlmostEqual(e[(1, 5)], 2.0, delta=0.15)
+        self.assertLess(np.median([x for k, x in e.items() if k != (1, 5)]), 0.15)
+
+    def test_lecture_du_format_de_medx(self):
+        import tempfile
+
+        entete = "stack\tslice\t" + "\t".join(f"m{l}{c}" for c in range(4) for l in range(4))
+        M = pose(0.1, 0.2, 0.3, t=(1.0, 2.0, 3.0))
+        lignes = [entete] + [f"{nom}\t{k}\t" + "\t".join(repr(float(v)) for v in M.reshape(-1, order="F")) for nom in ("a", "b") for k in range(3)]
+        with tempfile.NamedTemporaryFile("w", suffix=".tsv") as f:
+            f.write("\n".join(lignes) + "\n")
+            f.flush()
+            poses = bm.lire_poses(f.name)
+        self.assertEqual(sorted(poses), [(s, k) for s in range(2) for k in range(3)])
+        self.assertTrue(np.array_equal(poses[(1, 2)], M))
+
+
 if __name__ == "__main__":
     unittest.main()

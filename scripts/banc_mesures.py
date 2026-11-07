@@ -111,3 +111,44 @@ def mesures_volume(x, ref, masque):
         "ncc": ncc(x, ref, masque),
         "nettete": nettete(x),
     }
+
+
+def lire_poses(chemin):
+    """Poses d'un TSV de `medx svr recon --poses` ou `medx svr simulate` : dict `(indice de pile, coupe) -> matrice 4×4`.
+
+    Le fichier donne 16 valeurs en ordre colonne ; la pile est désignée par son nom, numérotée dans l'ordre d'apparition."""
+    noms, poses = {}, {}
+    with open(chemin) as f:
+        for ligne in f.read().strip().split("\n"):
+            c = ligne.split("\t")
+            if c[0] == "stack":
+                continue
+            s = noms.setdefault(c[0], len(noms))
+            poses[(s, int(c[1]))] = np.array([float(v) for v in c[2:]]).reshape(4, 4, order="F")
+    return poses
+
+
+def kabsch(P, Q):
+    """Rotation `R` et translation `t` minimisant `|R P + t − Q|²` (points en lignes), sans réflexion."""
+    mp, mq = P.mean(0), Q.mean(0)
+    U, _, Vt = np.linalg.svd((P - mp).T @ (Q - mq))
+    R = Vt.T @ np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))]) @ U.T
+    return R, mq - R @ mp
+
+
+def _poser(M, X):
+    return (M[:3, :3] @ X.T).T + M[:3, 3]
+
+
+def erreur_de_pose(points, poses_vraies, poses_estimees):
+    """Erreur de pose par coupe, en mm, après retrait du mouvement COMMUN.
+
+    `points[(pile, coupe)]` : points (n × 3, monde) de la coupe à sa pose d'en-tête. Les poses vraies et estimées sont composées après l'affine
+    d'en-tête ; une reconstruction est définie à un mouvement rigide d'ensemble près : on ajuste (Kabsch) le déplacement `G` qui amène au mieux les points
+    posés par les poses vraies sur ceux posés par les poses estimées, sur TOUTES les coupes, puis l'erreur d'une coupe est l'écart quadratique moyen
+    de ses points `|G·(Mv X) − Me X|`. Renvoie `dict (pile, coupe) -> erreur_mm`."""
+    cles = [k for k in points if k in poses_vraies and k in poses_estimees]
+    vrais = {k: _poser(poses_vraies[k], points[k]) for k in cles}
+    estimes = {k: _poser(poses_estimees[k], points[k]) for k in cles}
+    R, t = kabsch(np.vstack([vrais[k] for k in cles]), np.vstack([estimes[k] for k in cles]))
+    return {k: float(np.sqrt((((R @ vrais[k].T).T + t - estimes[k]) ** 2).sum(1).mean())) for k in cles}
