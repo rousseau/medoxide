@@ -117,13 +117,13 @@ def lancer(commande):
     return r.stdout
 
 
-def preparer_trufi(a, sujet, session):
-    """Télécharge les trois piles TRUFI (images et JSON) sous `<racine>/<sujet>/<session>/anat/` avec l'entité `_run-1` ; renvoie la racine."""
+def preparer(a, sujet, session, contraste):
+    """Télécharge les trois piles d'un contraste (images et JSON) sous `<racine>/<sujet>/<session>/anat/` avec l'entité `_run-1`."""
     noms = [n for n, _ in lire_jsons(f"{a.json}/{sujet}/{session}")]
     dossier = f"{a.racine}/{sujet}/{session}/anat"
     os.makedirs(dossier, exist_ok=True)
     for plan in PLANS:
-        acq = pile_a_telecharger(noms, "trufi", plan)
+        acq = pile_a_telecharger(noms, contraste, plan)
         sources = [n for n in noms if re.match(rf"^{sujet}_{session}_acq-{acq}(_run-1)?_T2w\.json$", n)]
         if len(sources) != 1:
             sys.exit(f"{sujet} : {len(sources)} fichier(s) pour {acq} (run 1)")
@@ -136,12 +136,30 @@ def preparer_trufi(a, sujet, session):
 
 def classer(a, sujet, session):
     """Télécharge, masque, calcule la concordance TRUFI d'un sujet ; renvoie la concordance."""
-    preparer_trufi(a, sujet, session)
+    preparer(a, sujet, session, "trufi")
     lancer([a.medx, "fetalbet", "--bids", a.racine, "--participant", sujet[4:], "--session", session[4:], "--output-dir", a.racine])
     entrees, masques = ac.piles(a.racine, sujet, "trufi")
     sortie = f"{a.travail}/{sujet}_trufi.tsv"
     lancer([a.medx, "svr", "qc", "--input", *entrees, "--mask", *masques, "--output", sortie])
     return ac.concordance_moyenne(sortie)
+
+
+def cmd_completer(a):
+    """0.4e : télécharge les piles HASTE de chaque sujet affecté (test 2 ou développement) et les masque pile par pile
+    (`fetalbet --input/--output`, pour ne pas réécrire les masques TRUFI) ; reprenable."""
+    with open(f"{a.travail}/tirage.tsv", newline="") as f:
+        sujets = [r for r in csv.DictReader(f, delimiter="\t") if r["jeu"] in ("test2", "dev")]
+    for r in sujets:
+        sujet, session = r["sujet"], r["session"]
+        preparer(a, sujet, session, "haste")
+        entrees, masques = ac.piles(a.racine, sujet, "haste")
+        for entree, masque in zip(entrees, masques):
+            if os.path.exists(masque):
+                continue
+            os.makedirs(os.path.dirname(masque), exist_ok=True)
+            lancer([a.medx, "fetalbet", "--input", entree, "--output", masque])
+        print(f"{sujet} : HASTE téléchargé et masqué", flush=True)
+    print("COMPLETER FINI")
 
 
 def cmd_liste(a):
@@ -188,7 +206,7 @@ def cmd_tirer(a):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     s = p.add_subparsers(dest="cmd", required=True)
-    for nom, f in (("liste", cmd_liste), ("tirer", cmd_tirer)):
+    for nom, f in (("liste", cmd_liste), ("tirer", cmd_tirer), ("completer", cmd_completer)):
         q = s.add_parser(nom)
         q.add_argument("--travail", required=True)
         q.add_argument("--json", help="dossier des `*_T2w.json` du bucket (copie locale)")
@@ -196,7 +214,8 @@ def main():
         if nom == "liste":
             q.add_argument("--utilisees", required=True, help="dossier des JSON des piles déjà utilisées")
         else:
-            q.add_argument("--graine", type=int, required=True)
+            if nom == "tirer":
+                q.add_argument("--graine", type=int, required=True)
             q.add_argument("--racine", required=True, help="racine BIDS locale des piles téléchargées")
             q.add_argument("--remote", required=True, help="remote rclone du bucket, par exemple `garage:<bucket>`")
             q.add_argument("--medx", required=True)
