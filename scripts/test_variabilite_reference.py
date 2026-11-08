@@ -50,6 +50,20 @@ class TestRangement(unittest.TestCase):
         self.assertAlmostEqual(r[("calme 1", "toutes")]["moyenne"], 0.85)
         self.assertAlmostEqual(r[("calme 1", "hors_stack_0")]["etendue"], 0.06)
 
+    def test_resume_q2_compte_chaque_sujet(self):
+        d = tempfile.mkdtemp()
+        sorties = []
+        for i, (sujet, etiquette, ecart) in enumerate((("a", "calme", 0.02), ("b", "calme", 0.04), ("c", "agité", 0.10))):
+            chemin = f"{d}/q{i}.tsv"
+            with open(chemin, "w") as f:
+                f.write("sujet\tmesure\ts2s_g1\ts2s_g2\ts2s_g3\n")
+                f.write(f"{etiquette} 1\ttoutes\t0.5\t{0.5 + ecart}\t0.5\n")
+            sorties.append((sujet, etiquette, chemin))
+        moyenne, maximum, n = vr.resumer_q2(vr.collecter_q2(sorties, [1, 2, 3]))["toutes"]
+        self.assertEqual(n, 3)  # trois sujets, deux étiquettes : aucun n'est écrasé
+        self.assertAlmostEqual(moyenne, (0.02 + 0.04 + 0.10) / 3)
+        self.assertAlmostEqual(maximum, 0.10)
+
 
 class TestCablage(unittest.TestCase):
     def test_complets_s2s_a_chaque_graine_s2v_une_seule_fois(self):

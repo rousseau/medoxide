@@ -103,15 +103,31 @@ def cmd_q2(a):
             print(f"{sujet} : ÉCHEC de la concordance :\n{r.stderr[-400:]}")
             continue
         sorties.append((sujet, etiquette, sortie))
+    toutes = collecter_q2(sorties, graines)
+    for (sujet, mesure), ag in toutes.items():
+        etiquette = next(e for s, e, _ in sorties if s == sujet)
+        print(f"{sujet} {etiquette} {mesure} : moyenne {ag['moyenne']:.4f} min {ag['minimum']:.4f} max {ag['maximum']:.4f} étendue {ag['etendue']:.4f}")
+    for mesure, (moyenne, maximum, n) in resumer_q2(toutes).items():
+        print(f"Q2 {mesure} : étendue moyenne {moyenne:.4f} ; maximale {maximum:.4f} ({n} sujets)")
+
+
+def collecter_q2(sorties, graines):
+    """`{(sujet, mesure): agrégat}` pour tous les sujets de `sorties` (liste de `(sujet, étiquette, TSV)`) : la clé porte le sujet, pas l'étiquette, sinon les sujets de même étiquette s'écrasent."""
     toutes = {}
-    for sujet, etiquette, sortie in sorties:
-        for (s, mesure), ag in etendues_q2(sortie, graines).items():
-            toutes[(etiquette, mesure)] = ag
-            print(f"{etiquette} {mesure} : moyenne {ag['moyenne']:.4f} min {ag['minimum']:.4f} max {ag['maximum']:.4f} étendue {ag['etendue']:.4f}")
+    for sujet, _, sortie in sorties:
+        for (_, mesure), ag in etendues_q2(sortie, graines).items():
+            toutes[(sujet, mesure)] = ag
+    return toutes
+
+
+def resumer_q2(toutes):
+    """`{mesure: (étendue moyenne, étendue maximale, nombre de sujets)}` d'après `{(sujet, mesure): agrégat}` : un sujet compte une fois par mesure."""
+    sortie = {}
     for mesure in ("toutes", "hors_stack_0"):
-        e = [ag["etendue"] for (et, m), ag in toutes.items() if m == mesure]
+        e = [ag["etendue"] for (_, m), ag in toutes.items() if m == mesure]
         if e:
-            print(f"Q2 {mesure} : étendue moyenne {sum(e) / len(e):.4f} ; maximale {max(e):.4f} ({len(e)} sujets)")
+            sortie[mesure] = (sum(e) / len(e), max(e), len(e))
+    return sortie
 
 
 def main():
