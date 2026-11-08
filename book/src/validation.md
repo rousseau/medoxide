@@ -43,6 +43,24 @@ assemblée.
 
 Les écarts d'intensité sont relatifs au maximum de la valeur de référence.
 
+## Bruit de graine : de combien deux exécutions peuvent différer (F4.0.3)
+
+Quand on compare deux variantes de la reconstruction, un écart de score ne veut rien dire s'il est plus petit que ce qu'on obtient en relançant la **même** méthode avec une autre graine. Cette section mesure cette variabilité, pour pouvoir la citer ensuite : *un écart plus petit que l'étendue entre graines n'est pas un gain*.
+
+**Qui dépend de la graine.** L'option `--s2s-seed` ne sert qu'à l'ordre aléatoire des coupes dans les balayages Gauss–Seidel du recalage coupe-à-coupe et aux départs multiples. Mesuré sur un sujet calme (volume et poses, voxel à voxel) : `s2s` est **déterministe à graine fixe** (même graine deux fois : écart nul) et **dépend de la graine** ; `s2v` **n'en dépend pas** (écart nul entre graines). La variabilité de `s2v` est donc nulle par construction, mais vérifiée sur un seul sujet, calme.
+
+**Mesure de référence.** Six sujets de développement (trois calmes, trois agités, jeu TRUFI et HASTE réel), `s2s` aux défauts, graines 1, 2 et 3, un repliement par stack mis de côté. Pour chaque sujet et chaque mesure, l'**étendue** est le maximum moins le minimum sur les trois graines ; le sujet est l'unité statistique, on ne moyenne jamais sur plus de six sujets. Les scripts : `benchmark_variantes_s2s.py --graines`, `evaluation_finale.py --graines`, puis `variabilite_graines.py` (agrégation) et `variabilite_reference.py` (pilotage).
+
+| Mesure (`s2s`, défauts) | Étendue moyenne sur les 6 sujets | Étendue maximale (sujet le plus variable) |
+|---|---|---|
+| Juge (NCC moyenne hors échantillon) | 0,0041 | 0,0134 |
+| Netteté `S` | 0,00039 | 0,00067 |
+| Concordance aux intersections (toutes les paires) | 0,0166 | 0,0525 |
+| Concordance aux intersections (sans le stack 0) | 0,0160 | 0,0653 |
+| Dice BOUNTI entre graines au même repli (une valeur par sujet, pas une étendue) | moyenne 0,925 | minimum 0,800 |
+
+**Lecture.** Pour `s2s`, un écart entre deux variantes plus petit que ces étendues moyennes n'est pas un gain ; plus petit que l'étendue maximale, ce n'est pas un gain pour le sujet le plus variable. Les trois sujets calmes varient peu (juge ≤ 0,0015, concordance ≤ 0,0016, Dice ≥ 0,976) ; la variabilité vient des sujets agités, et c'est l'étendue maximale qu'il faut citer pour eux. L'étendue de chaque sujet ne vient que de trois graines : c'est une étendue observée, pas un intervalle de confiance. La base ne vaut que pour ce binaire et ces défauts ; elle est à refaire si un défaut change.
+
 ## Limites
 
 - Les 8 volumes viennent d'un seul jeu de données, et les mesures d'un seul Mac.
