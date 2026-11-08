@@ -25,17 +25,23 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from variabilite_graines import dossier_de_graine, options_avec_graine, valider_graines  # noqa: E402
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--racine", required=True)
 parser.add_argument("--sujet", required=True)
 parser.add_argument("--methode", required=True, choices=["ours", "ours_s2v", "nesvor", "svrtk", "niftymic"])
 parser.add_argument("--sortie", default="data/svr/eval")
 parser.add_argument("--bin", default="data/svr/eval/bin")
+parser.add_argument("--graines", nargs="+", type=int, default=None, help="graines `--s2s-seed` de nos méthodes (sorties dans <sortie>/graine-<g>/<sujet>/) ; sans l'option : comportement inchangé")
 parser.add_argument("--delai-niftymic-h", type=float, default=4.0, help="durée maximale (heures) d'un volume NiftyMIC")
 args = parser.parse_args()
 
 racine = os.path.abspath(args.racine)
-sortie = os.path.abspath(f"{args.sortie}/{args.sujet}")
+sortie_base = os.path.abspath(args.sortie)
+sortie = os.path.abspath(f"{sortie_base}/{args.sujet}")
+graine_courante = None  # graine de la passe en cours (`None` : sans `--graines`)
 dossier_bin = os.path.abspath(args.bin)
 medx = f"{dossier_bin}/medx"
 binaire_test = os.environ.get("MEDOXIDE_TEST_BIN", f"{dossier_bin}/medoxide_svr_test")
@@ -58,6 +64,18 @@ stack = lambda i: f"{dossier}/{noms[i]}_T2w.nii.gz"
 masque = lambda i: f"{masques}/{noms[i]}_desc-brain_mask.nii.gz"
 tous = list(range(N))
 repli = lambda h: [i for i in tous if i != h]
+
+
+def options_de_graine():
+    """`["--s2s-seed", g]` pour la passe en cours, liste vide sans `--graines`."""
+    return [] if graine_courante is None else ["--s2s-seed", str(graine_courante)]
+
+
+def avec_graine(variantes):
+    """Variantes `nom=options` du script de variantes, graine de la passe en cours ajoutée à chacune."""
+    if graine_courante is None:
+        return variantes
+    return [f"{v.split('=', 1)[0]}={options_avec_graine(v.split('=', 1)[1], graine_courante)}" for v in variantes]
 
 
 def lancer(commande, journal, delai=None):
@@ -97,11 +115,11 @@ def ours():
     entrees = ["--input", *[stack(i) for i in tous], "--mask", *[masque(i) for i in tous]]
     for nom, options in (("full_s2s", []), ("full_s2s_ancre0", ["--s2s-anchor-stack", "0"]), ("full_entete", ENTETE), ("full_grossier", GROSSIER)):
         if not os.path.exists(f"{d}/{nom}.nii.gz"):
-            etape(nom, lambda: lancer([medx, "svr", "recon", "--motion", "s2s", "--device", "cpu", *entrees, "--output", f"{d}/{nom}.nii.gz", "--poses", f"{d}/poses_{nom}.tsv", *options], f"{d}/log_{nom}.txt"))
+            etape(nom, lambda: lancer([medx, "svr", "recon", "--motion", "s2s", "--device", "cpu", *entrees, "--output", f"{d}/{nom}.nii.gz", "--poses", f"{d}/poses_{nom}.tsv", *options, *options_de_graine()], f"{d}/log_{nom}.txt"))
     # repliements : la variante par défaut (d005) et celles de la frontière juge × netteté ; juge et netteté par le script de variantes
     e = {**env, "MEDOXIDE_TEST_BIN": binaire_test}
     commande = [sys.executable, "-I", f"{scripts}/benchmark_variantes_s2s.py", "--racine", racine, "--sujet", args.sujet, "--sortie", f"{d}/folds", "--medx", medx, "--variantes",
-                "d005=", "d003=--alpha 0.03", "d01=--alpha 0.1", f"en=--alpha 0.05 {' '.join(ENTETE)}", f"gr=--alpha 0.05 {' '.join(GROSSIER)}"]
+                *avec_graine(["d005=", "d003=--alpha 0.03", "d01=--alpha 0.1", f"en=--alpha 0.05 {' '.join(ENTETE)}", f"gr=--alpha 0.05 {' '.join(GROSSIER)}"])]
     os.makedirs(f"{d}/folds", exist_ok=True)
     with open(f"{d}/log_folds.txt", "w") as j:
         r = subprocess.run(commande, stdout=j, stderr=subprocess.STDOUT, env=e)
@@ -113,10 +131,10 @@ def ours_s2v():
     os.makedirs(d, exist_ok=True)
     entrees = ["--input", *[stack(i) for i in tous], "--mask", *[masque(i) for i in tous]]
     if not os.path.exists(f"{d}/full_s2v.nii.gz"):
-        etape("full_s2v", lambda: lancer([medx, "svr", "recon", "--motion", "s2v", "--device", "cpu", *entrees, "--output", f"{d}/full_s2v.nii.gz", "--poses", f"{d}/poses_full_s2v.tsv"], f"{d}/log_full_s2v.txt"))
+        etape("full_s2v", lambda: lancer([medx, "svr", "recon", "--motion", "s2v", "--device", "cpu", *entrees, "--output", f"{d}/full_s2v.nii.gz", "--poses", f"{d}/poses_full_s2v.tsv", *options_de_graine()], f"{d}/log_full_s2v.txt"))
     e = {**env, "MEDOXIDE_TEST_BIN": binaire_test}
     commande = [sys.executable, "-I", f"{scripts}/benchmark_variantes_s2s.py", "--racine", racine, "--sujet", args.sujet, "--sortie", f"{d}/folds", "--medx", medx, "--variantes",
-                "v005=--motion s2v", "v003=--motion s2v --alpha 0.03", "v01=--motion s2v --alpha 0.1"]
+                *avec_graine(["v005=--motion s2v", "v003=--motion s2v --alpha 0.03", "v01=--motion s2v --alpha 0.1"])]
     os.makedirs(f"{d}/folds", exist_ok=True)
     with open(f"{d}/log_folds.txt", "w") as j:
         r = subprocess.run(commande, stdout=j, stderr=subprocess.STDOUT, env=e)
@@ -161,5 +179,10 @@ def niftymic():
     etape("full", lambda: lancer(commande, f"{d}/niftymic.log", delai=args.delai_niftymic_h * 3600))
 
 
-{"ours": ours, "ours_s2v": ours_s2v, "nesvor": nesvor, "svrtk": svrtk, "niftymic": niftymic}[args.methode]()
-print(f"{args.sujet} {args.methode} : terminé", flush=True)
+METHODES = {"ours": ours, "ours_s2v": ours_s2v, "nesvor": nesvor, "svrtk": svrtk, "niftymic": niftymic}
+if args.graines is not None and args.methode not in ("ours", "ours_s2v"):
+    sys.exit(f"--graines n'a de sens que pour ours et ours_s2v, pas pour {args.methode}")
+for graine_courante in [None] if args.graines is None else valider_graines(args.graines):
+    sortie = os.path.abspath(f"{dossier_de_graine(sortie_base, graine_courante)}/{args.sujet}")
+    METHODES[args.methode]()
+    print(f"{args.sujet} {args.methode}{'' if graine_courante is None else f' graine {graine_courante}'} : terminé", flush=True)
