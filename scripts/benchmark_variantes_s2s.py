@@ -19,10 +19,14 @@ import re
 import resource
 import shlex
 import subprocess
+import sys
 
 import nibabel as nib
 import numpy as np
 from scipy.ndimage import binary_erosion, gaussian_filter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from variabilite_graines import dossier_de_graine, options_avec_graine, valider_graines  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--racine", required=True)
@@ -31,11 +35,13 @@ parser.add_argument("--sortie", required=True)
 parser.add_argument("--variantes", nargs="+", required=True)
 parser.add_argument("--medx", default="target/release/medx")
 parser.add_argument("--replis", nargs="+", type=int, default=None, help="indices des stacks mis de côté à traiter (défaut : tous)")
+parser.add_argument("--graines", nargs="+", type=int, default=None, help="graines `--s2s-seed` (sorties dans <sortie>/graine-<g>/) ; sans l'option : comportement inchangé")
 args = parser.parse_args()
 
 racine = os.path.abspath(args.racine)
-sortie = os.path.abspath(args.sortie)
-os.makedirs(sortie, exist_ok=True)
+sortie_base = os.path.abspath(args.sortie)
+sortie = sortie_base
+graine_courante = None
 binaire = os.environ["MEDOXIDE_TEST_BIN"]
 VARIANTES = [tuple(v.split("=", 1)) for v in args.variantes]
 session = sorted(d for d in os.listdir(f"{racine}/{args.sujet}") if d.startswith("ses-"))[0]
@@ -78,7 +84,7 @@ def reconstruire(nom, options, h, gardes):
     if os.path.exists(volume):
         return volume, ""
     avant = resource.getrusage(resource.RUSAGE_CHILDREN)
-    opts = shlex.split(options)
+    opts = shlex.split(options if graine_courante is None else options_avec_graine(options, graine_courante))
     mouvement = [] if "--motion" in opts else ["--motion", "s2s"]  # coupe-coupe par défaut ; `--motion s2v` dans les options pour le coupe-volume
     subprocess.run([args.medx, "svr", "recon", *mouvement, "--device", "cpu", "--min-stack-coverage", "1", "--input", *[chemin_stack(i) for i in gardes], "--mask", *[chemin_masque(i) for i in gardes],
                     "--output", volume, *opts], check=True, capture_output=True)
@@ -86,14 +92,21 @@ def reconstruire(nom, options, h, gardes):
     return volume, f"{apres.ru_utime + apres.ru_stime - avant.ru_utime - avant.ru_stime:.0f}"
 
 
-lignes = ["variante\tstack_teste\tncc_moyenne\tnettete\ttemps_cpu_s"]
-for h in (range(N) if args.replis is None else args.replis):
-    gardes = [i for i in range(N) if i != h]
-    ordre = VARIANTES if h % 2 == 0 else VARIANTES[::-1]  # comparaison alternée
-    print(f"=== stack {h} mis de côté ; reconstruction avec {gardes}", flush=True)
-    for nom, options in ordre:
-        volume, temps = reconstruire(nom, options, h, gardes)
-        lignes.append(f"{nom}\t{h}\t{juge(h, volume):.4f}\t{nettete(volume):.4f}\t{temps}")
-        print(lignes[-1], flush=True)
-        open(f"{sortie}/resultats.tsv", "w").write("\n".join(lignes) + "\n")
-open(f"{sortie}/done", "w").write("ok")
+def executer():
+    os.makedirs(sortie, exist_ok=True)
+    lignes = ["variante\tstack_teste\tncc_moyenne\tnettete\ttemps_cpu_s"]
+    for h in (range(N) if args.replis is None else args.replis):
+        gardes = [i for i in range(N) if i != h]
+        ordre = VARIANTES if h % 2 == 0 else VARIANTES[::-1]  # comparaison alternée
+        print(f"=== stack {h} mis de côté ; reconstruction avec {gardes}", flush=True)
+        for nom, options in ordre:
+            volume, temps = reconstruire(nom, options, h, gardes)
+            lignes.append(f"{nom}\t{h}\t{juge(h, volume):.4f}\t{nettete(volume):.4f}\t{temps}")
+            print(lignes[-1], flush=True)
+            open(f"{sortie}/resultats.tsv", "w").write("\n".join(lignes) + "\n")
+    open(f"{sortie}/done", "w").write("ok")
+
+
+for graine_courante in [None] if args.graines is None else valider_graines(args.graines):
+    sortie = dossier_de_graine(sortie_base, graine_courante)
+    executer()
