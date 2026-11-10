@@ -30,6 +30,10 @@ class TestPermutation(unittest.TestCase):
         self.assertEqual(len(set(i1)), 29)
         self.assertTrue(all(1000 <= i <= 9999 for i in i1))
 
+    def test_identifiants_sans_remise_meme_pour_beaucoup_de_tirages(self):
+        _, ids = k.permutation_et_identifiants(3000)  # avec remise, une collision serait quasi certaine (anniversaire)
+        self.assertEqual(len(set(ids)), 3000)
+
     def test_pas_l_identite_et_depend_de_la_graine(self):
         p1, _ = k.permutation_et_identifiants(29)
         self.assertNotEqual(p1, list(range(29)))
