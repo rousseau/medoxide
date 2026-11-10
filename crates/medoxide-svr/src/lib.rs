@@ -27,6 +27,8 @@
 
 pub mod align;
 pub mod bias;
+#[cfg(test)]
+mod diagnostic_pose;
 pub mod diff;
 pub mod optimizers;
 pub mod pipeline;

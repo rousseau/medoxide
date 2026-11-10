@@ -847,7 +847,7 @@ pub struct RobustResult {
 
 /// `n` poses de départ déterministes : chaque paramètre tiré uniformément dans `±amplitude_mm` par un générateur xorshift64 (le même
 /// que celui des tests, pour que la graine redonne les mêmes poses).
-fn departs_deterministes(n: usize, amplitude_mm: f64, graine: u64) -> Vec<[f64; 6]> {
+pub(crate) fn departs_deterministes(n: usize, amplitude_mm: f64, graine: u64) -> Vec<[f64; 6]> {
     let mut etat = graine;
     let mut suivant = || {
         etat ^= etat << 13;
