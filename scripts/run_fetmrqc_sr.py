@@ -74,7 +74,7 @@ def preparer(liste, dossier):
         n = numero(i)
         c = chemins(dossier, n)
         os.makedirs(c["anat"], exist_ok=True)
-        source = os.path.abspath(ligne["chemin"])
+        source = os.path.realpath(ligne["chemin"])
         if not os.path.exists(source):
             raise FileNotFoundError(source)
         if os.path.lexists(c["im"]):
@@ -108,7 +108,7 @@ def flouter(liste, dossier, sigmas, methode, graine):
             nom = f"{ligne['sujet']}_{methode}_flou{sigma:g}.nii.gz"
             chemin = os.path.join(dossier, nom)
             if sigma == 0:
-                chemin = os.path.abspath(ligne["chemin"])
+                chemin = os.path.realpath(ligne["chemin"])
             elif not os.path.exists(chemin):
                 nib.save(nib.Nifti1Image(gaussian_filter(data, sigma).astype(np.float32), im.affine), chemin)
             sortie.append({"sujet": ligne["sujet"], "methode": f"{methode}_flou{sigma:g}", "graine": graine, "chemin": chemin})
@@ -272,6 +272,10 @@ def main(argv=None):
     a.add_argument("dossier")
     a.add_argument("--valider", action="store_true")
     args = p.parse_args(argv)
+    # chemins réels : les dossiers de travail peuvent être des liens vers un autre clone (worktree), qui peut disparaître
+    for k in ("dossier", "liste"):
+        if hasattr(args, k):
+            setattr(args, k, os.path.realpath(getattr(args, k)))
     if args.cmd == "preparer":
         print(f"{len(preparer(args.liste, args.dossier))} volumes")
     elif args.cmd == "segmenter":

@@ -96,7 +96,7 @@ class TestFlouter(Base):
         r.ecrire_tsv(self.liste, r.COLONNES_LISTE, [dict(zip(r.COLONNES_LISTE, ("A", "s2s", "1", p))), dict(zip(r.COLONNES_LISTE, ("A", "s2s", "2", p))), dict(zip(r.COLONNES_LISTE, ("B", "autre", "1", p)))])
         sortie = r.flouter(self.liste, os.path.join(self.d, "flou"), [0.0, 0.5, 1.0, 2.0], "s2s", "1")
         self.assertEqual([s["methode"] for s in sortie], ["s2s_flou0", "s2s_flou0.5", "s2s_flou1", "s2s_flou2"])  # une seule ligne source retenue
-        self.assertEqual(sortie[0]["chemin"], os.path.abspath(p))
+        self.assertEqual(sortie[0]["chemin"], os.path.realpath(p))
         variances = [float(np.var(np.asarray(nib.load(s["chemin"]).dataobj))) for s in sortie]
         self.assertTrue(all(a > b for a, b in zip(variances, variances[1:])), variances)
         # oracle : un Dirac flouté par σ = 1 garde une somme de 1 et son maximum vaut (2π)^(-3/2) ≈ 0,0635 (à la troncature près)
