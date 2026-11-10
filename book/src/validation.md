@@ -61,6 +61,23 @@ Quand on compare deux variantes de la reconstruction, un écart de score ne veut
 
 **Lecture.** Pour `s2s`, un écart entre deux variantes plus petit que ces étendues moyennes n'est pas un gain ; plus petit que l'étendue maximale, ce n'est pas un gain pour le sujet le plus variable. Les trois sujets calmes varient peu (juge ≤ 0,0015, concordance ≤ 0,0016, Dice ≥ 0,976) ; la variabilité vient des sujets agités, et c'est l'étendue maximale qu'il faut citer pour eux. L'étendue de chaque sujet ne vient que de trois graines : c'est une étendue observée, pas un intervalle de confiance. La base ne vaut que pour ce binaire et ces défauts ; elle est à refaire si un défaut change.
 
+## Gradient de pose analytique : équivalence avec l'autodiff
+
+L'option `--pose-gradient analytic` remplace le gradient du recalage par coupe (autodiff de Burn) par un gradient écrit à la main, sans changer l'estimateur (voir [`svr.md`](svr.md)). Critères fixés avant la mesure, contre la variante `autodiff` du même binaire : (c)(1) au plus 5 % des coupes à plus de 0,1 mm et 0,5 % à plus de 1 mm entre les deux poses ; (c)(2) netteté à ±3 % ; (c)(3) concordance Q2 : aucune perte de plus de 0,01 ; (c)(4) Dice BOUNTI entre les deux volumes ≥ 0,975.
+
+Mesure : six sujets de développement (`--motion s2v`, CPU, aux défauts). Les sujets sont numérotés ici dans l'ordre du tableau, sans code.
+
+| Sujet | (c)(1) coupes > 0,1 mm | (c)(1) coupes > 1 mm | (c)(2) netteté | (c)(3) perte de Q2 la plus grande | (c)(4) Dice moyen | critères tenus |
+|---|---|---|---|---|---|---|
+| 1 | 0,0 % | 0,0 % | 0,00 % | 0,0001 | 0,9996 | tous |
+| 2 | 0,0 % | 0,0 % | 0,00 % | 0,0000 | 0,9996 | tous |
+| 3 | 7,2 % | 2,4 % | −0,12 % | 0,0012 | 0,9943 | (c)(1) non tenu |
+| 4 | 5,0 % | 0,0 % | 0,00 % | 0,0006 | 0,9967 | tous (à la limite) |
+| 5 | 10,1 % | 4,3 % | −0,29 % | 0,0057 | 0,8794 | (c)(1) et (c)(4) non tenus |
+| 6 | 8,2 % | 0,0 % | 0,00 % | 0,0004 | 0,9589 | (c)(1) et (c)(4) non tenus |
+
+La règle écrite avant la mesure est : un seul des critères (c)(1) à (c)(4) non tenu rejette la variante. Elle est donc rejetée en l'état : sur trois sujets sur six, quelques coupes ont une pose qui diverge de plusieurs dixièmes de millimètre à plusieurs millimètres entre les deux optimisations (non convexes, en `f32`), ce qui change localement le volume. Les poses qui coïncident le font à moins de 0,05 mm près (médiane 0,002 à 0,02 mm). Le temps mural du `s2v` complet est 2 à 4 fois plus court avec `analytic` sur ces exécutions (machine partagée, une exécution par variante : indication, pas une mesure de temps). Le défaut reste `autodiff`, inchangé au bit près.
+
 ## Limites
 
 - Les 8 volumes viennent d'un seul jeu de données, et les mesures d'un seul Mac.
