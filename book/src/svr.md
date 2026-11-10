@@ -96,6 +96,21 @@ L'affine d'un stack (et de son masque) suit la règle de nibabel et de guioxide 
 Les deux méthodes produisent les mêmes sorties (une transformation rigide par coupe),
 et la reconstruction du volume est la même.
 
+### `--pose-gradient` : le gradient du recalage coupe par coupe (option, désactivée par défaut)
+
+Le recalage de chaque coupe minimise `−NCC + λ · pénalité temporelle` par Adam. Par défaut (`--pose-gradient autodiff`), le gradient vient
+de la différentiation automatique de Burn : c'est le comportement historique, **identique au bit près** (poses et volume) à celui des versions
+sans l'option. `--pose-gradient analytic` calcule le même gradient **à la main** (règle de la chaîne : jacobienne de la pose, dérivée de
+l'interpolation trilinéaire et de la NCC, `f64`, sans tenseurs ni copie du volume de référence), avec le même Adam et les mêmes relances.
+
+- Périmètre : le recalage coupe par coupe du coupe-volume (`--motion s2v`, ou `--motion s2s` avec `--s2v-refine-cycles` > 0), sur CPU.
+- **Refusé avec un message clair** (jamais de repli silencieux) : un device GPU (`--device wgpu` ou `cuda`), `--s2v-similarity lncc`, et
+  `--motion s2s` sans `--s2v-refine-cycles`.
+- Une ligne `recalage par coupe : … s (gradient de pose : …)` est écrite sur `stderr` à la fin : le temps mural cumulé des phases de recalage
+  (aucun fichier de sortie n'en dépend).
+- Précision, mesurée contre l'autodiff de Burn et contre des différences finies en `f64` : voir [Validation](validation.md) (F4.0.6). Le défaut
+  ne change pas ; passer à `analytic` par défaut serait une décision séparée.
+
 ## Gauss–Seidel ou Jacobi
 
 Le recalage coupe-coupe fait plusieurs balayages de toutes les coupes. Par défaut (`--s2s-update gauss-seidel`) il les recale **une à une** : la phase est séquentielle (un seul cœur) et ses résultats sont ceux de toutes les mesures de cette page. `--s2s-update jacobi` recale toutes les coupes d'un balayage **en parallèle**, contre les poses figées au début du balayage, puis les met à jour ensemble. Le résultat ne dépend ni de l'ordre des coupes ni du nombre de threads (poses identiques au bit près avec 1, 3 ou 8 threads).

@@ -13,6 +13,24 @@ use crate::Volume;
 
 pub mod analytique;
 
+/// Temps mural cumulé du recalage par coupe (nanosecondes) : somme des durées des phases de recalage de [`crate::align`] (une phase = toutes les
+/// coupes d'un cycle, recalées en parallèle). Sert au chronomètre de `medx svr recon` (une ligne sur `stderr`, F4.0.6) ; aucune sortie de fichier
+/// n'en dépend.
+static TEMPS_RECALAGE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Durée cumulée, en secondes, des phases de recalage par coupe mesurées jusqu'ici dans ce processus.
+pub fn temps_recalage_secondes() -> f64 {
+    TEMPS_RECALAGE_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
+}
+
+/// Exécute `f` et ajoute sa durée au chronomètre du recalage par coupe.
+pub(crate) fn chronometrer_recalage<T>(f: impl FnOnce() -> T) -> T {
+    let debut = std::time::Instant::now();
+    let r = f();
+    TEMPS_RECALAGE_NS.fetch_add(debut.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    r
+}
+
 /// Résultat de [`trilinear_sample`] : une valeur et un indicateur « dans la grille » par point.
 #[derive(Debug, Clone)]
 pub struct TrilinearSample {
@@ -776,6 +794,17 @@ pub enum Similarity {
 /// Écart type (mm) du flou de la normalisation locale de [`Similarity::Lncc`] : 9 pixels de 0,62 mm. Fixé a priori (F3.1), non réglé sur une mesure.
 pub const SIGMA_SIMILARITE_LOCALE_MM: f64 = 5.6;
 
+/// D'où vient le gradient de pose du recalage d'une coupe (option `--pose-gradient`, F4.0.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoseGradient {
+    /// Différentiation automatique de Burn (`f32`) : le comportement historique, **inchangé au bit près**.
+    #[default]
+    Autodiff,
+    /// Gradient écrit à la main ([`analytique`]), en `f64` sur CPU : même perte, même Adam, sans tenseurs. Refusé avec `lncc`, avec le
+    /// recalage par lots et sur GPU (voir [`crate::pipeline::verifier_pose_gradient`]).
+    Analytic,
+}
+
 /// Réglages de [`register_slice_robust`].
 #[derive(Debug, Clone, Copy)]
 pub struct RobustConfig {
@@ -798,6 +827,9 @@ pub struct RobustConfig {
     pub temporal_weight: f64,
     /// Mesure de similarité : prise en compte par [`crate::align::register_slices_leave_window_out`] (les images comparées sont normalisées localement avec [`Similarity::Lncc`]) ; ignorée ailleurs. Avec `Lncc`, `suspect_ncc` s'applique à la corrélation des images normalisées (seuil non recalibré).
     pub similarity: Similarity,
+    /// Gradient de pose du recalage de chaque coupe : l'autodiff de Burn (défaut, historique) ou le gradient analytique de
+    /// [`analytique`] (F4.0.6) ; pris en compte par [`crate::align::register_slices_leave_window_out`] (CPU, [`Similarity::Ncc`], sans `batched`).
+    pub pose_gradient: PoseGradient,
 }
 
 /// Résultat de [`register_slice_robust`].
@@ -963,6 +995,7 @@ impl RobustConfig {
             batched: false,
             temporal_weight: 0.0,
             similarity: Similarity::Ncc,
+            pose_gradient: PoseGradient::Autodiff,
         }
     }
 }
@@ -2132,6 +2165,7 @@ mod tests {
             batched: false,
             temporal_weight: 0.0,
             similarity: Similarity::Ncc,
+            pose_gradient: PoseGradient::Autodiff,
         };
         let args = || {
             (
@@ -2604,6 +2638,7 @@ mod tests {
         batched: false,
         temporal_weight: 0.0,
         similarity: Similarity::Ncc,
+        pose_gradient: PoseGradient::Autodiff,
     };
 
     /// Une coupe bien recalée n'est relancée qu'une fois ; un seuil impossible force les départs multiples et la NCC rendue n'est

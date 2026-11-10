@@ -112,6 +112,33 @@ impl From<S2vSimilarityArg> for medoxide_svr::diff::Similarity {
     }
 }
 
+/// Gradient de pose du recalage coupe-volume, tel qu'écrit sur la ligne de commande (`--pose-gradient`).
+#[derive(Clone, Copy, ValueEnum)]
+enum PoseGradientArg {
+    /// Différentiation automatique de Burn (défaut, inchangé)
+    Autodiff,
+    /// Gradient écrit à la main, `f64`, CPU : refusé avec `--device` GPU, `--s2v-similarity lncc` et `--motion s2s` sans `--s2v-refine-cycles`
+    Analytic,
+}
+
+impl From<medoxide_svr::diff::PoseGradient> for PoseGradientArg {
+    fn from(i: medoxide_svr::diff::PoseGradient) -> Self {
+        match i {
+            medoxide_svr::diff::PoseGradient::Autodiff => Self::Autodiff,
+            medoxide_svr::diff::PoseGradient::Analytic => Self::Analytic,
+        }
+    }
+}
+
+impl From<PoseGradientArg> for medoxide_svr::diff::PoseGradient {
+    fn from(i: PoseGradientArg) -> Self {
+        match i {
+            PoseGradientArg::Autodiff => Self::Autodiff,
+            PoseGradientArg::Analytic => Self::Analytic,
+        }
+    }
+}
+
 /// Ordre d'acquisition des coupes pour l'a priori temporel, tel qu'écrit sur la ligne de commande (`--slice-timing`).
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum SliceTimingArg {
@@ -280,6 +307,9 @@ enum SvrAction {
         /// Avec `--motion s2v` : mesure de similarité du recalage de chaque coupe (`lncc` : images normalisées localement, option mesurée en F3.1)
         #[arg(long, value_enum, default_value_t = ReconstructionConfig::default().s2v_similarity.into())]
         s2v_similarity: S2vSimilarityArg,
+        /// Gradient de pose du recalage de chaque coupe du coupe-volume : `autodiff` (Burn, défaut) ou `analytic` (écrit à la main, CPU ; F4.0.6). Refusé avec un device GPU, `--s2v-similarity lncc`, ou `--motion s2s` sans `--s2v-refine-cycles`
+        #[arg(long, value_enum, default_value_t = ReconstructionConfig::default().pose_gradient.into())]
+        pose_gradient: PoseGradientArg,
         /// Rejet robuste après la reconstruction : tours « écarter les pixels et coupes incohérents avec le volume, reconstruire » (0 : aucun)
         #[arg(long, default_value_t = ReconstructionConfig::default().robust_rounds)]
         robust_rounds: usize,
@@ -477,6 +507,19 @@ fn svr_recon(
         );
         return ExitCode::FAILURE;
     }
+    // Refus de `--pose-gradient analytic` là où il n'existe pas de gradient analytique (F4.0.6), avant toute lecture de données.
+    let kind_demande = device.map_or_else(
+        || medoxide_svr::pipeline::default_device_kind(config.motion),
+        DeviceKind::from,
+    );
+    let par_lots = ReconstructionConfig {
+        s2v_batched: kind_demande != DeviceKind::Cpu,
+        ..config.clone()
+    };
+    if let Err(message) = medoxide_svr::pipeline::verifier_pose_gradient(&par_lots, kind_demande) {
+        eprintln!("medx svr recon : {message}");
+        return ExitCode::FAILURE;
+    }
     let debut = std::time::Instant::now();
     let resultat = (|| -> Result<PathBuf, medoxide_svr::SvrError> {
         let mut stacks = medoxide_svr::read_stacks(entrees)?;
@@ -518,6 +561,15 @@ fn svr_recon(
         );
         let sortie_reconstruction =
             medoxide_svr::pipeline::reconstruct(&stacks, config, &medoxide_svr::pipeline::autodiff_device(kind))?;
+        // chronomètre du recalage par coupe (F4.0.6) : une ligne sur stderr, aucune sortie de fichier
+        eprintln!(
+            "recalage par coupe : {:.1} s (gradient de pose : {})",
+            medoxide_svr::diff::temps_recalage_secondes(),
+            match config.pose_gradient {
+                medoxide_svr::diff::PoseGradient::Autodiff => "autodiff",
+                medoxide_svr::diff::PoseGradient::Analytic => "analytic",
+            }
+        );
         match destination {
             DestinationSvr::Libre { volume, poses, qualite } => {
                 sortie_reconstruction.write_volume(volume)?;
@@ -976,6 +1028,7 @@ fn main() -> ExitCode {
                     s2v_init,
                     s2v_temporal_weight,
                     s2v_similarity,
+                    pose_gradient,
                     robust_rounds,
                     robust_threshold,
                     slice_scale_rounds,
@@ -1012,6 +1065,7 @@ fn main() -> ExitCode {
                 s2v_init: s2v_init.into(),
                 s2v_temporal_weight,
                 s2v_similarity: s2v_similarity.into(),
+                pose_gradient: pose_gradient.into(),
                 robust_rounds,
                 robust_threshold,
                 slice_scale_rounds,
@@ -1291,6 +1345,10 @@ mod tests {
         assert_eq!(
             medoxide_svr::diff::Similarity::from(*recon.get_one::<super::S2vSimilarityArg>("s2v_similarity").unwrap()),
             config.s2v_similarity
+        );
+        assert_eq!(
+            medoxide_svr::diff::PoseGradient::from(*recon.get_one::<super::PoseGradientArg>("pose_gradient").unwrap()),
+            config.pose_gradient
         );
         assert_eq!(
             *recon.get_one::<usize>("slice_scale_rounds").unwrap(),

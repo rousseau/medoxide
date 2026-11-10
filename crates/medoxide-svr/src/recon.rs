@@ -5431,6 +5431,75 @@ mod tests {
         ));
     }
 
+    /// F4.0.6, 0.6b : câblage de `--pose-gradient` jusqu'au recalage de chaque coupe (jeu de blobs, 3 stacks, coupe-volume). (1) `Autodiff` (le
+    /// défaut) ne passe jamais par le chemin analytique ; (2) `Analytic` y passe pour chaque coupe recalée (compteur) ; (3) les poses des deux
+    /// variantes s'accordent à la tolérance de (c)(1) de F4.0.6 (au plus 5 % des coupes à plus de 0,1 mm, au plus 0,5 % à plus de 1 mm, déplacement
+    /// quadratique moyen des pixels de la coupe). Le chemin `Autodiff` reste celui du test de câblage de `reconstruct` ci-dessus (poses égales à l'appel
+    /// direct à 1e-6 mm) et la comparaison bit à bit au binaire précédent est faite par la somme SHA-256 des poses (F4.0.6).
+    #[test]
+    fn the_pose_gradient_option_is_wired_and_both_variants_agree() {
+        use crate::diff::PoseGradient;
+        use crate::pipeline::{reconstruct, Motion, ReconstructionConfig};
+        let t = Temp::new("pose_gradient");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let base = ReconstructionConfig {
+            motion: Motion::SliceToVolume,
+            resolution_mm: 2.0,
+            s2v_cycles: 1,
+            ..ReconstructionConfig::default()
+        };
+        // (1) défaut : aucun recalage analytique
+        let avant = align::recalages_analytiques();
+        let a = reconstruct(&stacks, &base, &device).unwrap();
+        assert_eq!(
+            align::recalages_analytiques(),
+            avant,
+            "l'autodiff ne doit pas prendre le chemin analytique"
+        );
+        // (2) analytique : chaque coupe recalée passe par le chemin analytique
+        let config_n = ReconstructionConfig {
+            pose_gradient: PoseGradient::Analytic,
+            ..base.clone()
+        };
+        let n = reconstruct(&stacks, &config_n, &device).unwrap();
+        let recalees = n.slices.iter().filter(|r| r.registered).count();
+        assert!(recalees > 0);
+        assert_eq!(
+            align::recalages_analytiques() - avant,
+            recalees,
+            "chaque coupe recalée passe par le gradient analytique"
+        );
+        // (3) accord des poses : déplacement quadratique moyen des pixels de chaque coupe
+        let mut ecarts = Vec::new();
+        for (si, stack) in stacks.iter().enumerate() {
+            for k in 0..stack.dim().2 {
+                let Some(p) = align::preparer_coupe(stack, k, nalgebra::Matrix4::identity()) else {
+                    continue;
+                };
+                let (pa, pn) = (a.poses.get(si, k), n.poses.get(si, k));
+                let somme: f64 = p
+                    .points
+                    .iter()
+                    .map(|x| ((pa * x.push(1.0)).xyz() - (pn * x.push(1.0)).xyz()).norm_squared())
+                    .sum();
+                ecarts.push((somme / p.points.len() as f64).sqrt());
+            }
+        }
+        let part = |seuil: f64| ecarts.iter().filter(|&&e| e > seuil).count() as f64 / ecarts.len() as f64;
+        let maximum = ecarts.iter().cloned().fold(0.0_f64, f64::max);
+        println!(
+            "{} coupes : écart de pose analytique/autodiff, > 0,1 mm : {:.1} %, > 1 mm : {:.1} %, maximum {maximum:.3} mm",
+            ecarts.len(),
+            100.0 * part(0.1),
+            100.0 * part(1.0)
+        );
+        assert!(
+            part(0.1) <= 0.05 && part(1.0) <= 0.005,
+            "poses analytique et autodiff trop différentes (voir la sortie)"
+        );
+    }
+
     /// SONDE du backend wgpu (critères fixés avant ; blobs, 3 stacks, coupe-coupe) : sur le device par défaut de Burn avec autodiff (Metal sur le Mac), (a) le nom du device est affiché ; (b) les critères du test sur
     /// `flex` tiennent (erreur médiane ≤ 1,0 mm sur les coupes recalées, ≥ 90 % à ≤ 2 mm) ; (c) les poses de wgpu et de `flex` diffèrent de moins de 0,2 mm en médiane (erreur de l'une à l'autre, sans mouvement
     /// commun) ; (d) les durées sont affichées (sans critère).

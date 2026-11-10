@@ -17,6 +17,35 @@ use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePo
 use crate::s2s::{phase, register_slices_s2s, S2sConfig};
 use crate::{Stack, SvrError};
 
+/// Refus de `--pose-gradient analytic` là où il n'existe pas de gradient analytique : un refus vaut mieux qu'un repli silencieux sur l'autodiff.
+///
+/// Périmètre de `Analytic` (F4.0.6) : le recalage coupe par coupe du coupe-volume (NCC et a priori temporel, relances comprises), sur CPU.
+/// Refusés : un device GPU (le recalage s'y fait par lots), la similarité `lncc`, et un mouvement `s2s` sans cycle de raffinement coupe-volume
+/// (aucun recalage coupe-volume : l'option n'aurait aucun effet). Sans `Analytic`, rien n'est refusé.
+///
+/// # Erreurs
+/// Le message à montrer à l'utilisateur.
+pub fn verifier_pose_gradient(config: &ReconstructionConfig, kind: DeviceKind) -> Result<(), String> {
+    if config.pose_gradient != crate::diff::PoseGradient::Analytic {
+        return Ok(());
+    }
+    if kind != DeviceKind::Cpu {
+        return Err("--pose-gradient analytic n'existe que sur CPU (--device cpu) : pas de gradient analytique pour le recalage par lots du GPU".into());
+    }
+    if config.s2v_similarity != crate::diff::Similarity::Ncc {
+        return Err(
+            "--pose-gradient analytic ne couvre que la similarité ncc : refusé avec --s2v-similarity lncc".into(),
+        );
+    }
+    if config.s2v_batched {
+        return Err("--pose-gradient analytic ne couvre pas le recalage par lots (s2v_batched)".into());
+    }
+    if config.motion != Motion::SliceToVolume && config.s2v_refine_cycles == 0 {
+        return Err("--pose-gradient analytic ne sert qu'au recalage coupe-volume : avec --motion s2s, il faut --s2v-refine-cycles > 0 (sinon l'option n'aurait aucun effet)".into());
+    }
+    Ok(())
+}
+
 /// Où se font les calculs de tenseurs (recalage et reconstruction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -173,6 +202,8 @@ pub struct ReconstructionConfig {
     pub s2v_temporal_weight: f64,
     /// Coupe-volume : mesure de similarité du recalage de chaque coupe, voir [`crate::diff::Similarity`]. Défaut `Ncc` (historique) ; `Lncc` est une option mesurée en F3.1 (`docs/ROADMAP.md`). Sans effet sans `s2v_leave_slice_out` ; avec `Lncc`, le seuil `s2v_suspect_ncc` s'applique à la corrélation des images normalisées (non recalibré).
     pub s2v_similarity: crate::diff::Similarity,
+    /// Gradient de pose du recalage de chaque coupe du coupe-volume : l'autodiff de Burn (défaut) ou le gradient analytique ([`crate::diff::PoseGradient`], F4.0.6). Voir [`verifier_pose_gradient`] pour ce que `Analytic` refuse.
+    pub pose_gradient: crate::diff::PoseGradient,
     /// Rejet robuste après la reconstruction finale (voir [`trim_outliers`]) : nombre de tours « écarter les pixels et les coupes incohérents avec le volume, reconstruire de nouveau » ; 0 : aucun (défaut, option).
     pub robust_rounds: usize,
     /// Rejet robuste : un pixel est écarté si son résidu dépasse ce nombre d'écarts types robustes (1,4826 × médiane des écarts absolus du stack).
@@ -224,6 +255,7 @@ impl Default for ReconstructionConfig {
             s2v_init: S2vInit::StacksBias,
             s2v_temporal_weight: 0.01,
             s2v_similarity: crate::diff::Similarity::Ncc,
+            pose_gradient: crate::diff::PoseGradient::Autodiff,
             robust_rounds: 0,
             robust_threshold: 3.0,
             slice_scale_rounds: 1,
@@ -792,6 +824,7 @@ pub(crate) fn loop_config(config: &ReconstructionConfig) -> LoopConfig {
             batched: config.s2v_batched,
             temporal_weight: config.s2v_temporal_weight,
             similarity: config.s2v_similarity,
+            pose_gradient: config.pose_gradient,
             ..RobustConfig::new(config.s2v_suspect_ncc)
         },
         leave_one_stack_out_cycles: if config.s2v_leave_slice_out { 0 } else { cycles },
@@ -854,5 +887,70 @@ pub(crate) fn s2s_config(config: &ReconstructionConfig) -> S2sConfig {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{PoseGradient, Similarity};
+
+    fn analytique(motion: Motion) -> ReconstructionConfig {
+        ReconstructionConfig {
+            motion,
+            pose_gradient: PoseGradient::Analytic,
+            ..ReconstructionConfig::default()
+        }
+    }
+
+    #[test]
+    fn le_defaut_est_l_autodiff_et_rien_n_est_refuse_sans_analytic() {
+        let defaut = ReconstructionConfig::default();
+        assert_eq!(defaut.pose_gradient, PoseGradient::Autodiff);
+        for kind in [DeviceKind::Cpu, DeviceKind::Wgpu, DeviceKind::Cuda] {
+            let config = ReconstructionConfig {
+                s2v_similarity: Similarity::Lncc,
+                s2v_batched: true,
+                ..defaut.clone()
+            };
+            assert_eq!(verifier_pose_gradient(&config, kind), Ok(()), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn analytic_est_accepte_en_coupe_volume_sur_cpu() {
+        assert_eq!(
+            verifier_pose_gradient(&analytique(Motion::SliceToVolume), DeviceKind::Cpu),
+            Ok(())
+        );
+        let s2s_raffine = ReconstructionConfig {
+            s2v_refine_cycles: 1,
+            ..analytique(Motion::SliceToSlice)
+        };
+        assert_eq!(verifier_pose_gradient(&s2s_raffine, DeviceKind::Cpu), Ok(()));
+    }
+
+    #[test]
+    fn analytic_est_refuse_sur_gpu_avec_lncc_par_lots_et_sans_recalage_coupe_volume() {
+        let v = analytique(Motion::SliceToVolume);
+        for kind in [DeviceKind::Wgpu, DeviceKind::Cuda] {
+            let e = verifier_pose_gradient(&v, kind).unwrap_err();
+            assert!(e.contains("CPU"), "{e}");
+        }
+        let lncc = ReconstructionConfig {
+            s2v_similarity: Similarity::Lncc,
+            ..v.clone()
+        };
+        assert!(verifier_pose_gradient(&lncc, DeviceKind::Cpu)
+            .unwrap_err()
+            .contains("lncc"));
+        let lots = ReconstructionConfig { s2v_batched: true, ..v };
+        assert!(verifier_pose_gradient(&lots, DeviceKind::Cpu)
+            .unwrap_err()
+            .contains("lots"));
+        let s2s = analytique(Motion::SliceToSlice);
+        assert!(verifier_pose_gradient(&s2s, DeviceKind::Cpu)
+            .unwrap_err()
+            .contains("s2v-refine-cycles"));
     }
 }

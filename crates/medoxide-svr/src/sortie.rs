@@ -141,6 +141,13 @@ fn reglages(c: &ReconstructionConfig) -> Json {
                 crate::diff::Similarity::Lncc => "lncc",
             }),
         ),
+        (
+            "pose_gradient",
+            Json::texte(match c.pose_gradient {
+                crate::diff::PoseGradient::Autodiff => "autodiff",
+                crate::diff::PoseGradient::Analytic => "analytic",
+            }),
+        ),
         ("robust_rounds", entier(c.robust_rounds)),
         ("robust_threshold", reel(c.robust_threshold)),
         ("slice_scale_rounds", entier(c.slice_scale_rounds)),
