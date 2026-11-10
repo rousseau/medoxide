@@ -11,6 +11,8 @@ use nalgebra::{Matrix4, Rotation3, Vector3};
 
 use crate::Volume;
 
+pub mod analytique;
+
 /// Résultat de [`trilinear_sample`] : une valeur et un indicateur « dans la grille » par point.
 #[derive(Debug, Clone)]
 pub struct TrilinearSample {
