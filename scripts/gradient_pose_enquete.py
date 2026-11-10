@@ -44,6 +44,20 @@ def main():
     print(f"## Trajectoires complètes : {n} coupes ; > {a.seuil} mm : {len(sup)} ({100*len(sup)/n:.1f} %) ; > 1 mm : "
           f"{sum(1 for _, d in sup if d > 1)} ({100*sum(1 for _, d in sup if d > 1)/n:.1f} %)\n")
 
+    if finale and "depl_final_P_mm" in finale[0]:
+        fp = [float(r["depl_final_P_mm"]) for r in finale]
+        print(f"## Contrôle de bruit : l'autodiff contre lui-même, données multipliées par 1 + 7e-7 (seul l'arrondi `f32` change)\n")
+        print("| comparaison | trajectoires complètes : > seuil | > 1 mm | médiane / max (mm) | recalages isolés : > seuil | > 1 mm |")
+        print("|---|---|---|---|---|---|")
+        for nom, cle_f, cle_c in (("analytique contre autodiff", "depl_final_mm", "depl_iso_mm"),
+                                  ("autodiff perturbé contre autodiff", "depl_final_P_mm", "depl_iso_P_mm")):
+            vf = [float(r[cle_f]) for r in finale]
+            vc = [float(r[cle_c]) for r in cycles]
+            print(f"| {nom} | {sum(v > a.seuil for v in vf)} / {len(vf)} ({100*sum(v > a.seuil for v in vf)/len(vf):.1f} %) | "
+                  f"{sum(v > 1 for v in vf)} ({100*sum(v > 1 for v in vf)/len(vf):.1f} %) | {statistics.median(vf):.4f} / {max(vf):.3f} | "
+                  f"{sum(v > a.seuil for v in vc)} / {len(vc)} ({100*sum(v > a.seuil for v in vc)/len(vc):.2f} %) | {sum(v > 1 for v in vc)} |")
+        print()
+
     iso = defaultdict(list)  # (stack, coupe) -> cycles où l'écart isolé dépasse le seuil
     seuil_flip = defaultdict(list)  # (stack, coupe) -> cycles où relancée d'un côté seulement (trajectoires complètes)
     for r in cycles:
@@ -53,8 +67,15 @@ def main():
             iso[k].append(c)
         if "relances_N" in r and int(r["relances_A"]) != int(r["relances_N"]):
             seuil_flip[k].append(c)
-    print("| stack/coupe | écart final (mm) | classe | cycles « propre » | cycles « seuil » |")
-    print("|---|---|---|---|---|")
+    par_coupe = defaultdict(list)
+    for r in cycles:
+        par_coupe[(int(r["stack"]), int(r["coupe"]))].append(r)
+
+    def relances(k, cle):
+        return sum(1 for r in par_coupe[k] if int(r[cle]) > 1)
+
+    print("| stack/coupe | pixels | écart final (mm) | classe | cycles « propre » | cycles « seuil » | cycles avec relances A / N | NCC du 1er recalage A (min–max) |")
+    print("|---|---|---|---|---|---|---|---|")
     classes = defaultdict(int)
     for (s, k), d in sup:
         if (s, k) in iso:
@@ -66,8 +87,18 @@ def main():
         else:
             cl = "référence"
         classes[cl] += 1
-        print(f"| {s}/{k} | {d:.3f} | {cl} | {iso.get((s, k), '')} | {seuil_flip.get((s, k), '')} |")
+        rows = par_coupe[(s, k)]
+        nccs = [float(r["ncc_first_A"]) for r in rows]
+        rel_n = relances((s, k), "relances_N") if rows and "relances_N" in rows[0] else "?"
+        print(f"| {s}/{k} | {rows[0]['pixels']} | {d:.3f} | {cl} | {iso.get((s, k), '')} | {seuil_flip.get((s, k), '')} | "
+              f"{relances((s, k), 'relances_A')} / {rel_n} sur {len(rows)} | {min(nccs):.3f}–{max(nccs):.3f} |")
     print(f"\nClasses : {dict(classes)}\n")
+    # les coupes divergentes sont-elles celles qui sont relancées ?
+    ens = {k for k in par_coupe}
+    div = {k for k, d in f.items() if d > a.seuil}
+    rel = {k for k in ens if relances(k, "relances_A") > 0}
+    print(f"Coupes relancées au moins une fois (autodiff) : {len(rel)} / {len(ens)} ; parmi les {len(div)} coupes divergentes : {len(div & rel)} ; "
+          f"parmi les {len(ens - div)} autres : {len(rel - div)}.\n")
 
     # recalages isolés : même état de départ pour les deux gradients
     total = len(cycles)

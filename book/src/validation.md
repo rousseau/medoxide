@@ -464,6 +464,17 @@ Sur les sujets très agités, les volumes montraient des « languettes » rectan
 
 Vérifié sur le sujet agité à trois stacks (`s2s` et `s2v`) : les poses sont **identiques**, aucun voxel du nouveau volume n'est couvert par un seul stack (contre 14 à 15 % avant), et le volume change **près du bord retiré seulement** (écart relatif 24 % à moins de 2 voxels, 0,8 % à 4-8 voxels, 0,08 % au-delà de 8 voxels). La règle est testée de façon indépendante (comptage par stack, coupe volontairement éloignée de 25 mm, 8 mutants sur 8 détectés). **Le juge hors échantillon ne peut pas arbitrer cette règle** : il lit le volume aux pixels des coupes testées, et un domaine réduit y met des zéros ; les évaluations du juge ci-dessus ont été faites avant la règle.
 
+### Enquête sur les poses divergentes de `--pose-gradient analytic` (F4.0.6, 0.6c)
+
+Pourquoi quelques coupes ont-elles une pose différente entre `analytic` et `autodiff` ? Le test ignoré `diagnostic_des_poses_divergentes` (`crates/medoxide-svr/src/diagnostic_pose.rs`, lecture par `scripts/gradient_pose_enquete.py`) rejoue la boucle `s2v` cycle par cycle, sur les trois sujets qui ne tenaient pas le critère d'équivalence des poses, en quatre trajectoires : autodiff, analytique, analytique « isolé » (un cycle, depuis les poses de l'autodiff) et un contrôle de bruit (l'autodiff contre lui-même sur des données multipliées par 1 + 7e-7, qui ne changent que l'arrondi `f32`). Résultats :
+
+- le gradient analytique est juste sur les coupes divergentes : au plus 5e-7 d'écart relatif aux différences finies `f64` (médiane 1e-8) ;
+- presque toutes les coupes sont relancées à presque tous les cycles (la NCC du premier recalage est le plus souvent sous 0,9) : le recalage d'une coupe est le meilleur de sept minimiseurs de 150 pas ; leurs pertes finales sont presque égales sur les coupes divergentes (plage médiane de 0,12 à 0,15) pour des poses distantes de 0,5 à 1,5 mm, et le meilleur des sept change avec le bruit ; aucun des deux gradients n'est systématiquement meilleur ;
+- un cycle isolé diverge peu (0 à 1,2 % des coupes à plus de 0,1 mm), les trajectoires complètes bien plus (9 à 12 %) : l'écart se propage par l'a priori temporel et les références, et s'amplifie sur les six cycles ;
+- **l'autodiff contre lui-même, sous un bruit d'arrondi, diverge autant ou plus** : 7 à 32 % des coupes à plus de 0,1 mm, contre 9 à 12 % pour l'analytique contre l'autodiff. Le seuil de 5 % du critère d'équivalence n'est donc pas tenu par l'autodiff lui-même : ce critère mesure aussi la sensibilité de l'estimateur.
+
+La variante reste rejetée par la lecture pré-déclarée (aucun critère n'a changé) ; des critères d'une évaluation contre le bruit sont proposés dans le ROADMAP, à valider.
+
 ## Régularisation préservant les contours
 
 L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tikhonov par celle de Huber (quadratique pour les petites différences entre voxels voisins, linéaire au-delà, résolue par moindres carrés repondérés itérés), pour lisser le bruit sans aplatir les contours. Les briques sont testées (poids égaux à 1 : identique à Tikhonov au bit près ; gradient égal aux différences finies ; poids de Huber exacts sur des cas calculés à la main ; κ immense : solution de Tikhonov).
