@@ -199,9 +199,20 @@ class TestScore(Base):
         self.assertIn("--bids_csv " + os.path.join(self.dossier, "bids.csv"), appels[0])
         self.assertIn("--nworkers 3", appels[0])
         self.assertIn("--model_path /modele.joblib", appels[1])
-        self.assertIn("--dataset " + ancien, appels[1])
+        self.assertIn("--dataset " + os.path.join(self.dossier, "iqms_finis.csv"), appels[1])
         self.assertNotEqual(open(ancien).read(), "vieux")
         self.assertEqual([float(s["score"]) for s in sortie], [0.9, 0.5, 0.1])
+
+    def test_assainir_remplace_les_infinis_seulement(self):
+        src, dst = os.path.join(self.d, "i.csv"), os.path.join(self.d, "f.csv")
+        open(src, "w").write("name,sub,a,b,c\nsub-001,001,1.5,inf,True\nsub-002,002,-inf,2.0,False\nsub-003,003,nan,0.0,True\n")
+        journal = os.path.join(self.d, "j.log")
+        remplaces = r.assainir(src, dst, journal)
+        self.assertEqual(remplaces, [("sub-001", "b"), ("sub-002", "a")])
+        lignes = list(csv.DictReader(open(dst)))
+        self.assertEqual([(l["a"], l["b"], l["c"]) for l in lignes], [("1.5", "0.0", "True"), ("0.0", "2.0", "False"), ("nan", "0.0", "True")])
+        self.assertEqual(open(journal).read().count("remplacée"), 2)
+        self.assertIn("inf", open(src).read())  # le fichier d'origine n'est pas touché
 
 
 if __name__ == "__main__":

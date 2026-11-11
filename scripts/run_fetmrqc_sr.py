@@ -183,6 +183,39 @@ def commande_inference(env, modele, iqms_csv, prediction_csv):
     ]
 
 
+def assainir(iqms_csv, finis_csv, journal=None):
+    """Copie `iqms_csv` en `finis_csv` en remplaçant chaque valeur infinie par 0.0 ; retourne la liste des `(nom, colonne)` remplacés.
+
+    Pourquoi : `nrmse` et `nmae` divisent par une norme de la référence, nulle si une coupe voisine l'est sur la fenêtre ; la moyenne vaut alors
+    `inf`, et la forêt aléatoire (scikit-learn) refuse l'entrée. FetMRQC_SR traite déjà un NaN ainsi (`metrics_sr.py` : valeur 0.0, colonne
+    `*_nan` à vrai) ; on étend cette convention à `inf` (précision 17 de F4.0.5). Le fichier d'IQMs d'origine n'est pas modifié ; les
+    remplacements sont écrits au journal.
+    """
+    with open(iqms_csv, newline="") as f:
+        lecteur = csv.DictReader(f)
+        champs = lecteur.fieldnames
+        lignes = list(lecteur)
+    remplaces = []
+    for ligne in lignes:
+        for c in champs:
+            try:
+                infini = np.isinf(float(ligne[c]))
+            except ValueError:
+                continue
+            if infini:
+                ligne[c] = "0.0"
+                remplaces.append((ligne["name"], c))
+    with open(finis_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=champs, lineterminator="\n")
+        w.writeheader()
+        w.writerows(lignes)
+    if journal and remplaces:
+        with open(journal, "a") as j:
+            for nom, c in remplaces:
+                j.write(f"valeur infinie remplacée par 0.0 : {nom} {c}\n")
+    return remplaces
+
+
 def convertir(dossier, prediction="prediction.csv", scores="scores.tsv"):
     """`prediction.csv` (sortie de `srqc_inference`) -> TSV `sujet, methode, graine, score`, dans l'ordre de `correspondance.tsv`.
 
@@ -212,7 +245,9 @@ def scorer(dossier, env, modele, nworkers, prediction="prediction.csv", iqms="iq
     if os.path.exists(iqms_csv):
         os.remove(iqms_csv)
     lancer(commande_iqms(env, os.path.join(dossier, "bids.csv"), iqms_csv, nworkers), journal)
-    lancer(commande_inference(env, modele, iqms_csv, os.path.join(dossier, prediction)), journal)
+    finis_csv = os.path.splitext(iqms_csv)[0] + "_finis.csv"
+    assainir(iqms_csv, finis_csv, journal)
+    lancer(commande_inference(env, modele, finis_csv, os.path.join(dossier, prediction)), journal)
     return convertir(dossier, prediction, scores)
 
 
