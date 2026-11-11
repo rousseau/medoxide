@@ -475,6 +475,23 @@ Pourquoi quelques coupes ont-elles une pose différente entre `analytic` et `aut
 
 La variante reste rejetée par la lecture pré-déclarée (aucun critère n'a changé) ; des critères d'une évaluation contre le bruit sont proposés dans le ROADMAP, à valider.
 
+#### Évaluation contre le bruit (F4.0.6, critères (c)(1′) et (c)(4′), validés avant la mesure)
+
+Trois exécutions de contrôle de l'autodiff par sujet (stacks réenregistrés en `float32` et multipliés par 1 + 7e-7, 1 + 1,4e-6, 1 + 2,1e-6 : 18 `s2v` complets), mesurées contre l'autodiff des stacks d'origine, comme l'analytique. (c)(1′) : la part de coupes à plus de 0,1 mm (resp. 1 mm) entre analytique et autodiff est au plus la plus grande part des contrôles, la médiane au plus 1,5 fois la plus grande médiane des contrôles ; (c)(4′) : le Dice moyen entre les deux volumes est au moins le plus petit Dice des contrôles, moins 0,01.
+
+| Sujet | analytique > 0,1 mm (contrôles, au plus) | analytique > 1 mm (au plus) | Dice analytique (plus petit contrôle) | (c)(1′) | (c)(4′) |
+|---|---|---|---|---|---|
+| 1 | 0,0 % (6,7 %) | 0,0 % (0,0 %) | 0,9996 (0,9966) | tenu | tenu |
+| 2 | 0,0 % (0,0 %) | 0,0 % (0,0 %) | 0,9996 (0,9992) | tenu | tenu |
+| 3 | 7,2 % (8,4 %) | 2,4 % (2,4 %) | 0,9943 (0,9088) | tenu | tenu |
+| 4 | 5,0 % (91,3 %) | 0,0 % (3,8 %) | 0,9967 (0,8130) | tenu | tenu |
+| 5 | 10,1 % (85,5 %) | 4,3 % (60,9 %) | 0,8794 (0,7729) | tenu | tenu |
+| 6 | 8,2 % (93,2 %) | 0,0 % (49,3 %) | 0,9589 (0,7119) | tenu | tenu |
+
+Lecture pré-déclarée : (c)(1′) à (c)(4′) tenus pour les six sujets, et (c)(2), (c)(3) tenus (E29) : l'option est conservée, le défaut reste `autodiff` (le changer est une décision séparée) ; la mesure du temps (c)(5) peut suivre.
+
+**Limite de ce contrôle, constatée.** Les contrôles ne sont pas seulement du bruit d'arrondi : pour le sujet 4, les trois contrôles s'écartent de l'autodiff d'origine comme de l'analytique (91 % des coupes à plus de 0,1 mm) alors qu'ils s'accordent presque entre eux (4 à 10 %), et l'analytique n'est qu'à 5 % de l'autodiff : le changement de type de l'entrée (entiers 16 bits d'origine, `float32` pour les contrôles) déplace l'estimateur d'une façon que 1 + ε n'explique pas seul. Le seuil de (c)(1′) est donc très large pour les sujets 4, 5 et 6 ; il est étroit pour le sujet 3 (7,2 % contre 8,4 %). Le verdict ci-dessus est celui de la règle écrite ; le contrôle n'est pas un étalon de bruit propre.
+
 ## Régularisation préservant les contours
 
 L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tikhonov par celle de Huber (quadratique pour les petites différences entre voxels voisins, linéaire au-delà, résolue par moindres carrés repondérés itérés), pour lisser le bruit sans aplatir les contours. Les briques sont testées (poids égaux à 1 : identique à Tikhonov au bit près ; gradient égal aux différences finies ; poids de Huber exacts sur des cas calculés à la main ; κ immense : solution de Tikhonov).
