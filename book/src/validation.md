@@ -61,6 +61,8 @@ Quand on compare deux variantes de la reconstruction, un écart de score ne veut
 
 **Lecture.** Pour `s2s`, un écart entre deux variantes plus petit que ces étendues moyennes n'est pas un gain ; plus petit que l'étendue maximale, ce n'est pas un gain pour le sujet le plus variable. Les trois sujets calmes varient peu (juge ≤ 0,0015, concordance ≤ 0,0016, Dice ≥ 0,976) ; la variabilité vient des sujets agités, et c'est l'étendue maximale qu'il faut citer pour eux. L'étendue de chaque sujet ne vient que de trois graines : c'est une étendue observée, pas un intervalle de confiance. La base ne vaut que pour ce binaire et ces défauts ; elle est à refaire si un défaut change.
 
+**(iv) Accord avec une notation humaine en aveugle.** Un seul noteur (la personne qui développe l'outil, qui connaît les méthodes : l'aveugle est imparfait) a noté la qualité globale de 1 à 4 de 29 volumes (cinq méthodes par sujet, quatre pour un sujet sans volume complet de NiftyMIC), présentés dans un ordre mélangé, sans nom de méthode ni de sujet. Corrélation de Spearman entre score et note, par sujet (`scripts/accord_notation.py`), puis moyenne des six sujets : **0,54**. Entre les deux seuils écrits avant la mesure (0,5 et 0,8) : le score **ne déciderait pas seul**. Les corrélations par sujet vont de −0,56 à 0,89, sur quatre ou cinq points aux notes très groupées (beaucoup d'égalités). Cette mesure ne rétablit pas le score : (ii) reste non tenu. Une image de la grille commune est restée noire pour une méthode sur un sujet, parce que son volume est placé loin des autres dans l'espace de l'image (vérifié sur les coordonnées) : la note de ce couple ne juge pas la reconstruction ; l'écarter donne 0,55.
+
 ## Limites
 
 - Les 8 volumes viennent d'un seul jeu de données, et les mesures d'un seul Mac.
@@ -455,6 +457,20 @@ L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tik
 - **Données réelles**, sujets de réglage (juge hors échantillon + indicateur de netteté `S` : gradient moyen du volume légèrement lissé, normalisé par l'intensité médiane du tissu ; `S` a été validé par dose-réponse sur des volumes floutés, après l'échec d'une première normalisation) : **aucun gain sur la frontière juge / netteté de Tikhonov**. Sujet calme : Tikhonov à α = 0,05 (juge 0,881, netteté 0,109) domine Huber à α = 0,1 et κ = 4 (0,878 ; 0,101). Sujet très agité : Huber à α = 0,3 et κ = 4 (0,714 ; 0,037) égale Tikhonov à la même netteté ; Huber à α = 0,1 est légèrement en dessous.
 
 L'option reste donc désactivée par défaut. Les deux mesures (juge et `S`) sont des substituts, et le juge favorise le lissage : un gain de netteté réel n'est pas exclu, mais il n'est pas démontré. Autre constat : l'optimum de Tikhonov sur l'atlas simulé (α = 0,01) est dix fois plus petit que sur données réelles (0,1), une nouvelle illustration du fait que les simulations ne prédisent pas le réel.
+
+## Un score automatique de qualité : FetMRQC_SR
+
+FetMRQC_SR (Sanchez et al. 2025, Apache-2.0) donne, pour un volume reconstruit, une probabilité (de forêt aléatoire, au centième) qu'il soit de bonne qualité. On l'a installé hors du dépôt (Python 3.9 isolé, sans TensorFlow, dont le score n'a pas besoin ; scikit-learn 1.1.3, la version qui a écrit le modèle ; modèle épinglé par son SHA-256 ; `gudhi` compilé), avec la segmentation de `medx bounti` à la place de l'image Docker d'origine (le modèle a été entraîné sur la BOUNTI d'origine, pas sur ce portage : écart non mesuré). `scripts/run_fetmrqc_sr.py` le lance et range les scores en TSV. La question posée est celle de l'**instrument**, pas d'une méthode : le score est-il reproductible, voit-il une dégradation connue, voit-il le mouvement ?
+
+Six sujets de développement, volumes tels que produits par chaque méthode (41 volumes distincts), critères fixés avant la mesure :
+
+| Critère | Résultat |
+|---|---|
+| (i) tous les volumes scorés, scores finis, deux exécutions identiques | **tenu** : 41 volumes, deux exécutions complètes identiques bit à bit |
+| (ii) score strictement décroissant avec un flou gaussien de σ = 0, 0,5, 1, 2 voxels, pour chacun des six sujets | **non tenu, six sujets sur six** : aucune suite strictement décroissante ; pour quatre sujets sur six le score à σ = 2 est supérieur au score sans flou |
+| (iii) mouvement : le volume de `s2s` a un score supérieur à celui d'une reconstruction « en-tête » (sans raffinement) pour au moins deux des trois sujets agités | **tenu** : trois sujets sur trois (écarts de 0,02, 0,03 et 0,17) |
+
+Par la règle écrite avant la mesure, un critère (ii) non tenu **retire le score des instruments** : il ne détecte pas un flou connu sur ces volumes (et semble même le récompenser, ce que ce test ne permet pas de séparer d'une baisse du bruit). Il n'entre donc dans aucune décision. Deux réserves : un volume avait deux indicateurs infinis (division par une norme de référence nulle), remplacés par 0, comme l'outil le fait pour une valeur manquante ; remplacés par la médiane des autres volumes, son score passe de 0,35 à 0,32, sans conséquence sur (i) à (iii) ; trois autres volumes ont les mêmes indicateurs aberrants (de l'ordre de 3 000), non remplacés. L'étendue du score entre les trois graines de `s2s` est de 0,04 en moyenne (au plus 0,06) : un écart de score plus petit n'est pas une différence entre méthodes. Les scores par méthode ne sont pas publiés ici (ils seront rapportés avec la notation en aveugle, qui reste à faire).
 
 ## Limites
 
