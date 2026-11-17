@@ -6414,8 +6414,117 @@ mod tests {
             .collect()
     }
 
+    /// Niveau du banc stratifié par mal-posé (F4.0.7, section du ROADMAP validée le 2026-11-17) : nombre de stacks conservés et artefacts injectés dans les coupes (mouvement vrai identique entre niveaux).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum NiveauMalPose {
+        Good,
+        Med,
+        Bad,
+        Single,
+    }
+
+    /// Facteur du creux de signal (la coupe est multipliée par lui) et écart type du flou dans le plan (pixels) : valeurs figées par F4.0.7.
+    const FACTEUR_CREUX: f32 = 0.3;
+    const SIGMA_FLOU_PLAN: f64 = 1.5;
+
+    impl NiveauMalPose {
+        /// `good`, `med`, `bad` ou `single` (sans casse) ; `None` sinon.
+        fn depuis_nom(nom: &str) -> Option<Self> {
+            match nom.to_ascii_lowercase().as_str() {
+                "good" => Some(Self::Good),
+                "med" => Some(Self::Med),
+                "bad" => Some(Self::Bad),
+                "single" => Some(Self::Single),
+                _ => None,
+            }
+        }
+
+        fn nom(self) -> &'static str {
+            match self {
+                Self::Good => "good",
+                Self::Med => "med",
+                Self::Bad => "bad",
+                Self::Single => "single",
+            }
+        }
+
+        /// Indices des stacks conservés (axial 0, coronal 1, sagittal 2) : toujours un préfixe, pour que les coupes et le bruit des stacks conservés soient ceux du niveau Good. Bad : axial et coronal ; Single : axial.
+        fn stacks(self) -> &'static [usize] {
+            match self {
+                Self::Good | Self::Med => &[0, 1, 2],
+                Self::Bad => &[0, 1],
+                Self::Single => &[0],
+            }
+        }
+
+        /// Fractions de coupes (creux de signal, manquantes, floues), tirées indépendamment sans remise.
+        fn fractions(self) -> (f64, f64, f64) {
+            match self {
+                Self::Good | Self::Single => (0.0, 0.0, 0.0),
+                Self::Med => (0.1, 0.1, 0.0),
+                Self::Bad => (0.3, 0.3, 0.1),
+            }
+        }
+    }
+
+    /// `round(fraction · n)` indices de `0..n`, tirés sans remise (mélange de Fisher-Yates), dans l'ordre croissant.
+    fn tirer_coupes_sans_remise(n: usize, fraction: f64, alea: &mut Alea) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = ((alea.suivant() * (i + 1) as f64) as usize).min(i);
+            indices.swap(i, j);
+        }
+        let mut choisies: Vec<usize> = indices
+            .into_iter()
+            .take((fraction * n as f64).round() as usize)
+            .collect();
+        choisies.sort_unstable();
+        choisies
+    }
+
+    /// Injecte dans un stack simulé (`data`, `masque`, coupes selon l'axe 2) les artefacts du niveau : creux de signal (coupe × [`FACTEUR_CREUX`]), flou dans le plan
+    /// (gaussienne de [`SIGMA_FLOU_PLAN`] pixels, dans le masque de la coupe), puis coupes manquantes (masque vidé). Les trois tirages sont indépendants, sans remise, de graine
+    /// `graine_artefacts` et du numéro de stack `n_stack` (les mêmes coupes pour un même niveau, une même graine et un même stack, quels que soient les autres stacks).
+    fn injecter_artefacts(
+        data: &mut Array3<f32>,
+        masque: &mut Array3<u8>,
+        niveau: NiveauMalPose,
+        graine_artefacts: u64,
+        n_stack: usize,
+    ) {
+        let (creux, manquantes, floues) = niveau.fractions();
+        let nb = data.dim().2;
+        let mut alea = Alea(
+            graine_artefacts.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (n_stack as u64 + 1).wrapping_mul(0xA24B_AED4_963E_E407)
+                | 1,
+        );
+        for _ in 0..8 {
+            alea.suivant();
+        }
+        let (c, m, f) = (
+            tirer_coupes_sans_remise(nb, creux, &mut alea),
+            tirer_coupes_sans_remise(nb, manquantes, &mut alea),
+            tirer_coupes_sans_remise(nb, floues, &mut alea),
+        );
+        for k in f {
+            let coupe = data.index_axis(Axis(2), k).to_owned();
+            let zone = masque.index_axis(Axis(2), k).mapv(|v| v > 0);
+            let floue = crate::s2s::blur_slice_in_mask(coupe.view(), zone.view(), SIGMA_FLOU_PLAN);
+            data.index_axis_mut(Axis(2), k).assign(&floue);
+        }
+        for k in c {
+            data.index_axis_mut(Axis(2), k).mapv_inplace(|v| v * FACTEUR_CREUX);
+        }
+        for k in m {
+            masque.index_axis_mut(Axis(2), k).fill(0);
+        }
+    }
+
     /// **Stacks semi-synthétiques à contenu réel** : simule, depuis un volume RÉEL reconstruit, les coupes des stacks `modeles` (géométrie, résolution et épaisseur des vrais stacks) avec le mouvement vrai `vraies`, avec un bruit gaussien de `bruit_pct` % de l'intensité moyenne et, si `biais_pct > 0`, un champ de biais multiplicatif lisse
     /// par stack fixe dans le repère du scanner (4 ondes planes de 100 à 200 mm, plus un gain global, comme `make_pyrecon_benchmark.py`). Le masque d'un pixel : couvert et d'intensité > 3 % du maximum. La vérité est exacte (`vraies`) et le contenu est celui d'images réelles.
+    /// `artefacts = Some((niveau, graine))` injecte ensuite les artefacts du niveau (F4.0.7, [`injecter_artefacts`]) ; `None` : aucun, sortie identique à l'historique.
+    #[allow(clippy::too_many_arguments)]
     fn simuler_reel(
         t: &Temp,
         volume: &Volume,
@@ -6424,6 +6533,7 @@ mod tests {
         bruit_pct: f64,
         biais_pct: f64,
         graine: u64,
+        artefacts: Option<(NiveauMalPose, u64)>,
     ) -> Vec<Stack> {
         let maximum = volume.data().iter().cloned().fold(0.0_f32, f32::max);
         let moyenne = {
@@ -6478,6 +6588,9 @@ mod tests {
                             ((f64::from(v) * champ(&nominale)) + bruit_pct / 100.0 * moyenne * gauss()) as f32;
                         masque[[i, j, coupe.index()]] = u8::from(sim.coverage[[i, j]] >= 0.99 && v > 0.03 * maximum);
                     }
+                }
+                if let Some((niveau, graine_artefacts)) = artefacts {
+                    injecter_artefacts(&mut data, &mut masque, niveau, graine_artefacts, n);
                 }
                 let e = modele.spacing();
                 stack_avec_masque(
@@ -6554,10 +6667,35 @@ mod tests {
         let detail = std::env::var("MEDOXIDE_DETAIL").is_ok_and(|v| v == "1");
         let device = burn::tensor::Device::flex().autodiff();
         let t = Temp::new("semi_synthetique");
+        // MEDOXIDE_NIVEAU=good|med|bad|single (F4.0.7 : banc stratifié par mal-posé ; défaut : absent, comportement historique) ; MEDOXIDE_GRAINE_ARTEFACTS : graine des artefacts (défaut : la graine du mouvement). Une colonne `niveau=<n>` est ajoutée aux lignes SEMISYN.
+        let niveau = std::env::var("MEDOXIDE_NIVEAU")
+            .ok()
+            .map(|v| NiveauMalPose::depuis_nom(v.trim()).expect("MEDOXIDE_NIVEAU : good, med, bad ou single"));
+        let graine_artefacts: Option<u64> = std::env::var("MEDOXIDE_GRAINE_ARTEFACTS")
+            .ok()
+            .map(|v| v.trim().parse().expect("MEDOXIDE_GRAINE_ARTEFACTS : entier"));
+        let suffixe = niveau.map_or_else(String::new, |n| format!(" niveau={}", n.nom()));
         for &a in &amplitudes {
             for &graine in &graines {
                 let vraies = mouvement_vrai(&modeles, &modele, a, graine);
-                let stacks = simuler_reel(&t, &volume, &modeles, &vraies, bruit, biais, graine);
+                let stacks = simuler_reel(
+                    &t,
+                    &volume,
+                    &modeles,
+                    &vraies,
+                    bruit,
+                    biais,
+                    graine,
+                    niveau.map(|n| (n, graine_artefacts.unwrap_or(graine))),
+                );
+                // niveau : seuls les stacks conservés (préfixe des stacks simulés, donc même bruit et même mouvement que Good) ; poses vraies restreintes de même
+                let (stacks, vraies) = match niveau {
+                    None => (stacks, vraies),
+                    Some(n) => (
+                        n.stacks().iter().map(|&i| stacks[i].clone()).collect::<Vec<_>>(),
+                        vraies.select(n.stacks()),
+                    ),
+                };
                 let part = |poses: &SlicePoses| {
                     let mut e: Vec<f64> = erreurs_de_pose_sans_mouvement_commun(&stacks, poses, &vraies)
                         .into_iter()
@@ -6571,7 +6709,7 @@ mod tests {
                     )
                 };
                 let (p, m, q) = part(&SlicePoses::identity(&stacks));
-                println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}");
+                println!("SEMISYN {modele} {a} {graine} entete {p:.2} {m:.2} {q:.2}{suffixe}");
                 for (nom, config) in &variantes {
                     let mut travail = if nom.contains("bias=1") {
                         correct_stacks(
@@ -6623,7 +6761,7 @@ mod tests {
                         .poses;
                     }
                     let (p, m, q) = part(&poses);
-                    println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}");
+                    println!("SEMISYN {modele} {a} {graine} {nom} {p:.2} {m:.2} {q:.2}{suffixe}");
                     if let Some(dossier) = &oracle_sortie {
                         let reglages = crate::pipeline::ReconstructionConfig {
                             alpha: 0.05,
@@ -11141,6 +11279,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_stratified_levels_keep_the_documented_stacks_and_fractions() {
+        use NiveauMalPose::*;
+        assert_eq!(NiveauMalPose::depuis_nom("Bad"), Some(Bad));
+        assert_eq!(NiveauMalPose::depuis_nom("inconnu"), None);
+        assert_eq!(Good.stacks(), &[0, 1, 2]);
+        assert_eq!(Med.stacks(), &[0, 1, 2]);
+        assert_eq!(Bad.stacks(), &[0, 1]);
+        assert_eq!(Single.stacks(), &[0]);
+        assert_eq!(Good.fractions(), (0.0, 0.0, 0.0));
+        assert_eq!(Med.fractions(), (0.1, 0.1, 0.0));
+        assert_eq!(Bad.fractions(), (0.3, 0.3, 0.1));
+        assert_eq!(Single.fractions(), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn slices_are_drawn_without_replacement_reproducibly_and_depend_on_the_seed() {
+        let tirage = |graine: u64, fraction: f64| tirer_coupes_sans_remise(40, fraction, &mut Alea(graine | 1));
+        let a = tirage(5, 0.3);
+        assert_eq!(a.len(), 12); // round(0,3 × 40)
+        assert_eq!(a, tirage(5, 0.3)); // reproductible
+        assert!(a.windows(2).all(|w| w[0] < w[1]) && a.iter().all(|&k| k < 40)); // distinctes, dans l'intervalle, croissantes
+        assert_eq!(tirage(5, 0.1).len(), 4);
+        assert!(tirage(5, 0.0).is_empty());
+        assert_ne!(a, tirage(6, 0.3)); // une autre graine : un autre tirage
+        assert_ne!(a, (0..12).collect::<Vec<_>>()); // pas le préfixe
+        assert_eq!(
+            tirer_coupes_sans_remise(10, 1.0, &mut Alea(3)),
+            (0..10).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn artefacts_follow_the_level_counts_and_definitions() {
+        let (nx, ny, nb) = (9, 9, 40);
+        // oracle à la main : une impulsion de 100 au centre sur un fond de 1, masque plein
+        let base = Array3::from_shape_fn((nx, ny, nb), |(i, j, _)| if (i, j) == (4, 4) { 100.0_f32 } else { 1.0 });
+        let masque_plein = Array3::<u8>::from_elem((nx, ny, nb), 1);
+        let injecte = |niveau, graine, n_stack| {
+            let (mut d, mut m) = (base.clone(), masque_plein.clone());
+            injecter_artefacts(&mut d, &mut m, niveau, graine, n_stack);
+            (d, m)
+        };
+        // Good : aucun changement, au bit près
+        let (d, m) = injecte(NiveauMalPose::Good, 3, 0);
+        assert_eq!((d, m), (base.clone(), masque_plein.clone()));
+        // Med : 4 coupes à creux (fond 0,3 ; impulsion 30), 4 coupes manquantes, aucune floue
+        let (d, m) = injecte(NiveauMalPose::Med, 3, 0);
+        let creuses = (0..nb).filter(|&k| (d[[0, 0, k]] - FACTEUR_CREUX).abs() < 1e-6).count();
+        let manquantes = (0..nb)
+            .filter(|&k| m.index_axis(Axis(2), k).iter().all(|&v| v == 0))
+            .count();
+        assert_eq!((creuses, manquantes), (4, 4));
+        assert!((0..nb).all(|k| d[[4, 4, k]] == 100.0 || (d[[4, 4, k]] - 30.0).abs() < 1e-4)); // jamais floue
+                                                                                               // Bad : 12 creuses, 12 manquantes, 4 floues (l'impulsion centrale n'est ni 100 ni 30)
+        let (d, m) = injecte(NiveauMalPose::Bad, 3, 0);
+        let creuses = (0..nb).filter(|&k| d[[0, 0, k]] < 0.5).count();
+        let manquantes = (0..nb)
+            .filter(|&k| m.index_axis(Axis(2), k).iter().all(|&v| v == 0))
+            .count();
+        let floues = (0..nb)
+            .filter(|&k| (d[[4, 4, k]] - 100.0).abs() > 1e-3 && (d[[4, 4, k]] - 30.0).abs() > 1e-3)
+            .count();
+        assert_eq!((creuses, manquantes, floues), (12, 12, 4));
+        // reproductible, dépend de la graine et du numéro de stack
+        assert_eq!(injecte(NiveauMalPose::Bad, 3, 0), (d.clone(), m.clone()));
+        assert_ne!(injecte(NiveauMalPose::Bad, 4, 0).1, m);
+        assert_ne!(injecte(NiveauMalPose::Bad, 3, 1).1, m);
     }
 
     /// Flou gaussien séparable d'écart type `sigma` (en voxels), bords prolongés par le voxel le plus proche. `sigma = 0` rend l'image telle quelle.
