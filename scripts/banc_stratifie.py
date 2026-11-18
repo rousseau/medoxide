@@ -32,6 +32,8 @@ import banc_mesures as bm
 import banc_simule as bs
 
 NIVEAUX = ["good", "med", "bad", "single"]
+# `medx svr recon --input` exige au moins deux piles : le niveau Single n'existe pas pour le banc interne (précision 10 de F4.0.7).
+NIVEAUX_INTERNE = ["good", "med", "bad"]
 #: Stacks conservés par niveau (indices dans l'ordre des piles simulées : axial, coronal, sagittal) : un préfixe, comme dans le test Rust.
 STACKS = {"good": [0, 1, 2], "med": [0, 1, 2], "bad": [0, 1], "single": [0]}
 #: Fractions de coupes (creux de signal, manquantes, floues), tirées indépendamment sans remise.
@@ -108,7 +110,7 @@ def tache_interne(a, code, corr, graine, niveau):
         return aligne
     simule = os.path.abspath(f"{a.o2}/{code}/passe1/simule")
     piles, masques = deriver_piles(simule, f"{d}/piles", niveau, graine)
-    options = ["--min-stack-coverage", "1"] if niveau == "single" else []
+    options = []
     volume, _, _ = bs.reconstruire(a.medx, piles, masques, options, graine, f"{d}/recon")
     bs.recaler(corr["source"], volume, corr["masque"], aligne)
     return aligne
@@ -116,14 +118,14 @@ def tache_interne(a, code, corr, graine, niveau):
 
 def mesurer_interne(a, code, corr, graine):
     """Lignes (niveau, psnr, ssim, voxels) d'un (sujet, graine), dans le masque commun de Good, Med et Bad."""
-    chemins = {n: os.path.abspath(f"{a.racine}/p{a.passe}/interne/{code}/g{graine}/{n}/aligne.nii.gz") for n in NIVEAUX}
+    chemins = {n: os.path.abspath(f"{a.racine}/p{a.passe}/interne/{code}/g{graine}/{n}/aligne.nii.gz") for n in NIVEAUX_INTERNE}
     ref, masque = bs.lire(corr["source"]), bs.lire(corr["masque"]) > 0
     vols = {n: bs.lire(p) for n, p in chemins.items()}
     commun = masque.copy()
     for n in ("good", "med", "bad"):
         commun &= vols[n] > 0
     lignes = []
-    for n in NIVEAUX:
+    for n in NIVEAUX_INTERNE:
         m = bm.mesures_volume(vols[n], ref, commun)
         lignes.append({"code": code, "graine": graine, "niveau": n, "psnr": m["psnr"], "ssim": m["ssim"], "voxels": int(commun.sum()), "volume": somme(f"{a.racine}/p{a.passe}/interne/{code}/g{graine}/{n}/recon/volume.nii.gz")})
     return lignes
@@ -136,7 +138,7 @@ def lire_corr(chemin):
 
 def interne(a):
     corr = lire_corr(a.correspondances)
-    taches = [(c, g, n) for c in a.codes for g in a.graines for n in NIVEAUX]
+    taches = [(c, g, n) for c in a.codes for g in a.graines for n in NIVEAUX_INTERNE]
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
         futs = {ex.submit(tache_interne, a, c, corr[c], g, n): (c, g, n) for c, g, n in taches}
         for f in cf.as_completed(futs):
