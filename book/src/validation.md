@@ -446,6 +446,34 @@ L'option expérimentale `--edge-kappa` remplace la pénalité quadratique de Tik
 
 L'option reste donc désactivée par défaut. Les deux mesures (juge et `S`) sont des substituts, et le juge favorise le lissage : un gain de netteté réel n'est pas exclu, mais il n'est pas démontré. Autre constat : l'optimum de Tikhonov sur l'atlas simulé (α = 0,01) est dix fois plus petit que sur données réelles (0,1), une nouvelle illustration du fait que les simulations ne prédisent pas le réel.
 
+## Un banc stratifié par mal-posé : validité de l'instrument
+
+Les bancs récents de la littérature stratifient par nombre de stacks et par sévérité des artefacts, pas seulement par
+amplitude de mouvement. Un banc à trois niveaux a été construit, à mouvement vrai identique : **Good** (3 stacks, rien d'ajouté),
+**Med** (3 stacks, 10 % de coupes à signal ×0,3, 10 % de coupes manquantes) et **Bad** (2 stacks, 30 % de signal ×0,3, 30 % de
+coupes manquantes, 10 % de coupes floues, σ = 1,5 pixel dans le plan), plus un niveau **Single** (1 stack) rapporté à part. Les
+artefacts sont injectés par le test d'alignement semi-synthétique (variables `MEDOXIDE_NIVEAU`, `MEDOXIDE_GRAINE_ARTEFACTS`, défaut
+inchangé au bit près) et, pour la fidélité, par `scripts/banc_stratifie.py` sur les piles du simulateur interne. Ce qui est
+mesuré est la validité de l'instrument (6 sujets de développement, 3 graines), pas une méthode. Critères fixés avant la mesure :
+(i) deux exécutions identiques donnent les mêmes chiffres ; (ii) l'erreur croît (le PSNR décroît) de Good à Med à Bad pour au moins 5
+sujets sur 6 ; (iii) l'écart Good − Bad dépasse 3 fois l'étendue entre graines.
+
+- **(i) Déterminisme : tenu.** Seconde passe identique pour deux sujets : 16 comparaisons de journaux du banc d'alignement
+  (au caractère près) et 18 comparaisons du banc interne (volumes reconstruits identiques, écart de PSNR et de SSIM nul).
+- **(ii) et (iii) : non tenus pour le banc d'alignement (mouvement)**, dans les huit familles évaluées (modèle de mouvement ×
+  amplitude × grandeur) : au plus 4 sujets sur 6 monotones (médiane) et 2 sur 6 au plus pour la part de coupes à plus de 4 mm ;
+  l'écart Good − Bad est inférieur à 3 fois l'étendue entre graines (par exemple médiane, mouvement lisse ±4 mm : 0,53 mm en Good,
+  1,00 en Med, 1,87 en Bad ; écart 1,34 mm, étendue 2,16 mm). La tendance moyenne est dans le bon sens pour la médiane, mais le
+  bruit entre graines et entre sujets la masque.
+- **Banc interne (fidélité) : (ii) tenu, (iii) non tenu.** PSNR moyen 18,60 (Good), 17,67 (Med), 17,31 dB (Bad), monotone pour 6
+  sujets sur 6 ; SSIM 0,358, 0,286, 0,264, monotone pour 5 sur 6 ; mais l'écart Good − Bad (1,28 dB) reste sous 3 fois
+  l'étendue entre graines (1,53 dB).
+
+Conclusion : l'instrument est reproductible, et la fidélité se dégrade dans le bon sens, mais la séparation des niveaux n'est pas
+démontrée dans les conditions de ce banc (six sujets, trois graines). Il n'entre donc pas, en l'état, dans une règle de décision.
+Réserves : banc interne non validé pour la résolution absolue, réglages de simulation non physiques ; artefacts injectés par des
+modèles simples ; le niveau Single n'est mesuré que par le banc d'alignement (la reconstruction exige au moins deux piles).
+
 ## Limites
 
 - **Six sujets d'un seul jeu**, un seul contraste (TRUFI) : rien ne montre que medoxide soit meilleur que SVRTK
