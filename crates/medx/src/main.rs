@@ -5,6 +5,8 @@
 //! Sous-commandes : `fetalbet`, nommée d'après l'algorithme (Fetal-BET, extraction cérébrale en
 //! IRM fœtale), et `svr` (reconstruction coupe-vers-volume, en développement).
 
+mod describe;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -12,10 +14,19 @@ use clap::{Parser, Subcommand, ValueEnum};
 use medoxide_svr::pipeline::{DeviceKind, Motion, ReconstructionConfig};
 
 #[derive(Parser)]
-#[command(name = "medx", version, about = "Boîte à outils medoxide pour l'imagerie médicale")]
+#[command(
+    name = "medx",
+    version,
+    about = "Boîte à outils medoxide pour l'imagerie médicale",
+    arg_required_else_help = true
+)]
 struct Cli {
+    /// Imprime sur la sortie standard la description JSON des commandes que guioxide peut lancer (schéma
+    /// `oxide-describe/1`) et sort ; ne lit ni n'écrit rien d'autre
+    #[arg(long)]
+    describe: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// Estimation du mouvement, telle qu'écrite sur la ligne de commande (`--motion`).
@@ -822,8 +833,17 @@ fn calcul_des_reseaux(device: Option<DeviceArg>) -> Result<medoxide_bounti::segm
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.describe {
+        print!("{}", describe::document().en_texte());
+        return ExitCode::SUCCESS;
+    }
+    let Some(commande) = cli.command else {
+        // `arg_required_else_help` écarte l'appel sans argument ; reste `--describe` seul, traité plus haut.
+        let _ = <Cli as clap::CommandFactory>::command().print_help();
+        return ExitCode::from(2);
+    };
 
-    match cli.command {
+    match commande {
         Command::Bounti {
             input,
             output,
