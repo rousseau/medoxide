@@ -8,6 +8,7 @@
 
 pub mod bids;
 pub mod cache;
+pub mod contrat;
 pub mod json;
 pub mod machine;
 pub mod sorties;

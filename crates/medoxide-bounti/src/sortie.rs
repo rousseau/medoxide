@@ -4,6 +4,7 @@
 use crate::segmentation::Segmentation;
 use crate::table::dseg_tsv;
 use medoxide_core::bids::{self, ErreurBids, Generateur};
+use medoxide_core::contrat;
 use nalgebra::Matrix4;
 use ndarray::Array3;
 use std::path::{Path, PathBuf};
@@ -76,9 +77,12 @@ pub fn fichiers_bids(
 ) -> Result<Fichiers, ErreurSortie> {
     let d = bids::dossier_derive(racine_bids, sortie, bids::PIPELINE_BOUNTI, participant, session)?;
     Ok(Fichiers {
-        etiquettes: d.anat.join(format!("{}_desc-bounti_dseg.nii.gz", d.prefixe)),
-        table: d.anat.join(format!("{}_desc-bounti_dseg.tsv", d.prefixe)),
-        masque: Some(d.anat.join(format!("{}_desc-bounti_mask.nii.gz", d.prefixe))),
+        // Suffixes : table des sorties de `medoxide_core::contrat`, la même que celle de `medx --describe`.
+        etiquettes: d
+            .anat
+            .join(format!("{}{}", d.prefixe, contrat::SUFFIXE_BOUNTI_ETIQUETTES)),
+        table: d.anat.join(format!("{}{}", d.prefixe, contrat::SUFFIXE_BOUNTI_TABLE)),
+        masque: Some(d.anat.join(format!("{}{}", d.prefixe, contrat::SUFFIXE_BOUNTI_MASQUE))),
         derive: Some(d.pipeline),
     })
 }

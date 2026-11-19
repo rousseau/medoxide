@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use medoxide_core::bids::{self, Generateur};
+use medoxide_core::contrat;
 use medoxide_core::json::Json;
 
 use crate::pipeline::{Motion, ReconstructionConfig, ReconstructionOutput};
@@ -40,13 +41,14 @@ pub fn fichiers_bids(
     session: Option<&str>,
 ) -> Result<Fichiers, SvrError> {
     let d = bids::dossier_derive(racine_bids, sortie, bids::PIPELINE_SVR, participant, session)?;
-    let nom = |suffixe: &str| d.anat.join(format!("{}_desc-svr_{suffixe}", d.prefixe));
+    // Suffixes : table des sorties de `medoxide_core::contrat`, la même que celle de `medx --describe`.
+    let nom = |suffixe: &str| d.anat.join(format!("{}{suffixe}", d.prefixe));
     Ok(Fichiers {
-        volume: nom("T2w.nii.gz"),
-        description: nom("T2w.json"),
-        mouvement: nom("motion.tsv"),
-        qualite: nom("slicequality.tsv"),
-        qualite_acquisition: d.anat.join(format!("{}_desc-acq_slicequality.tsv", d.prefixe)),
+        volume: nom(contrat::SUFFIXE_SVR_VOLUME),
+        description: nom(contrat::SUFFIXE_SVR_VOLUME_JSON),
+        mouvement: nom(contrat::SUFFIXE_SVR_MOUVEMENT),
+        qualite: nom(contrat::SUFFIXE_SVR_QUALITE),
+        qualite_acquisition: nom(contrat::SUFFIXE_ACQ_QUALITE),
         derive: d.pipeline,
     })
 }

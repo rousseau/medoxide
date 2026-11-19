@@ -133,7 +133,7 @@ pub fn piles_bids(racine_bids: &Path, participant: &str, session: Option<&str>) 
         .map(|e| e.path())
         .filter(|p| {
             p.file_name()
-                .is_some_and(|n| n.to_string_lossy().ends_with("_T2w.nii.gz"))
+                .is_some_and(|n| n.to_string_lossy().ends_with(crate::contrat::SUFFIXE_PILE))
         })
         .collect();
     if piles.is_empty() {
@@ -166,7 +166,11 @@ pub fn entites_de_pile(chemin: &Path) -> String {
 
 /// Masque cérébral d'une pile dans `dossier` (dossier `anat` de [`PIPELINE_FETALBET`]) : `<entités de la pile>_desc-brain_mask.nii.gz`.
 pub fn masque_de_pile(dossier: &Path, pile: &Path) -> PathBuf {
-    dossier.join(format!("{}_desc-brain_mask.nii.gz", entites_de_pile(pile)))
+    dossier.join(format!(
+        "{}{}",
+        entites_de_pile(pile),
+        crate::contrat::SUFFIXE_MASQUE_PILE
+    ))
 }
 
 /// Qui a écrit les fichiers : déclaré dans `GeneratedBy` de `dataset_description.json`.
