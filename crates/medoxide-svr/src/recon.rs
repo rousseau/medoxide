@@ -5275,6 +5275,47 @@ mod tests {
         assert_eq!(default_device_kind(Motion::SliceToVolume), DeviceKind::Cpu);
     }
 
+    /// Empreinte SHA-256 des poses et du volume rendus par `pipeline::reconstruct` en coupe-coupe (jeu de blobs à 3 stacks, réglages allégés pour la durée du test), avec et sans correction de biais. Écrite AVANT le
+    /// consensus de graines (F4.1.3) sur le code de `main` : le défaut (`s2s_consensus = None`) doit rendre exactement les mêmes octets ; toute modification du chemin par défaut fait échouer ce test.
+    #[test]
+    fn the_default_slice_to_slice_output_is_bit_identical() {
+        use crate::pipeline::{reconstruct, Motion, ReconstructionConfig};
+        use sha2::{Digest, Sha256};
+        let t = Temp::new("empreinte_defaut");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let empreinte = |biais: usize| {
+            let config = ReconstructionConfig {
+                motion: Motion::SliceToSlice,
+                resolution_mm: 2.0,
+                cg_max_iterations: 7,
+                s2s_sweeps: 1,
+                s2s_coarse_sweeps: 1,
+                s2s_coarse_levels: 1,
+                s2s_block_sweeps: 1,
+                s2s_bias_rounds: biais,
+                ..Default::default()
+            };
+            let sortie = reconstruct(&stacks, &config, &device).unwrap();
+            let mut h = Sha256::new();
+            for (si, s) in stacks.iter().enumerate() {
+                for k in 0..s.dim().2 {
+                    for v in sortie.poses.get(si, k).iter() {
+                        h.update(v.to_le_bytes());
+                    }
+                }
+            }
+            for v in sortie.volume.iter() {
+                h.update(v.to_le_bytes());
+            }
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let (sans, avec) = (empreinte(0), empreinte(1));
+        eprintln!("empreintes : sans biais {sans}, avec biais {avec}");
+        assert_eq!(sans, "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b");
+        assert_eq!(avec, "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b");
+    }
+
     /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les
     /// mêmes réglages, volume égal (à 1e-9 près, relatif) à celui de `ReconstructionProblem` avec ces poses, grille égale à `reconstruction_grid` ; (b) coupe-volume, 1 cycle : poses égales (1e-6 mm) à celles
     /// de `reconstruct_with_motion_correction` appelé directement avec la référence « sans la coupe », et DIFFÉRENTES de celles de la référence « sans le stack » (le champ `s2v_leave_slice_out` agit) ;
