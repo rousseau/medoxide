@@ -1651,6 +1651,22 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Où** : `crates/medoxide-ismrmrd/src/{lib.rs,entete.rs}`, `crates/medoxide-ismrmrd/tests/`,
   `scripts/ecrire_fixtures_ismrmrd.py`, `scripts/empreintes_ismrmrd.py`, `docs/ULF.md`.
 
+## 2026-11-20 — Un code générique en précision, et un test qui ne voit pas tout
+
+- **Quoi (concept)** : `ModeleCpr<T: Reel>` est écrit une fois pour `f32` et `f64`. `Reel` est un trait qui ne fait que
+  regrouper ce dont le code a besoin (`FftNum` de rustfft ; `Float` et `FloatConst` de `num_traits`, pour `sqrt`,
+  `sin_cos`, `TAU`), avec une implémentation pour tout type qui les a déjà (`impl<T: ...> Reel for T {}`). Le
+  compilateur produit une version par type utilisé (monomorphisation) : aucun coût à l'exécution. Le `f64` sert à la
+  parité avec la référence, le `f32` est la précision des GPU (wgpu, Metal).
+- **Quoi (méthode)** : la FFT 3D se factorise (lecture × phases) ; comme on ne garde qu'une ligne de la FFT de lecture,
+  une seule ligne de sa matrice sert, et le modèle coûte une FFT 2D par échantillon de lecture au lieu d'une FFT 3D.
+  Les sommes sont faites dans un ordre fixe (parallélisme sur des sorties indépendantes) : le résultat ne dépend pas du
+  nombre de fils.
+- **Quoi (méthode, tests)** : un test du produit scalaire vérifie que deux opérateurs sont adjoints l'un de l'autre, pas
+  qu'ils sont les bons. Changer le signe de la ligne de la FFT de lecture donne une autre paire d'opérateurs, adjoints
+  et unitaires : ces tests passent, seule la parité avec fmi échoue. Il faut les deux.
+- **Où** : `crates/medoxide-ulf/src/cpr.rs`, `crates/medoxide-ulf/tests/parite.rs`, `scripts/cas_cpr.py`, `docs/ULF.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*

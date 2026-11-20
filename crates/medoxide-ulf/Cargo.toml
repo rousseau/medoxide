@@ -1,0 +1,16 @@
+[package]
+name = "medoxide-ulf"
+version.workspace = true
+edition.workspace = true
+description = "Reconstruction IRM ultra-bas champ (48 mT) : modèle direct avec champ B0 et son adjoint (étape 1), voir docs/ULF.md"
+
+[dependencies]
+# FFT sur CPU, toute taille (base mixte) : la plus rapide aux tailles utiles d'après oxide/bench/ulf-essais.md.
+rustfft = "6.4"
+ndarray = { workspace = true }
+# Lignes de lecture traitées en parallèle.
+rayon = { workspace = true }
+
+[dev-dependencies]
+# Lecture des cas de test (HDF5 écrits par h5py, complexes compris) ; déjà dans le workspace (medoxide-ismrmrd).
+hdf5 = { package = "hdf5-metno", version = "0.15", features = ["static", "complex"] }
