@@ -1,0 +1,21 @@
+[package]
+name = "medoxide-ismrmrd"
+version.workspace = true
+edition.workspace = true
+description = "Lecture des acquisitions cartésiennes 3D de l'IRM ultra-bas champ (ISMRMRD HDF5 de Spinloop, HDF5 de fridge-magnet-imaging)"
+
+[dependencies]
+# Lecture HDF5. `static` : HDF5 compilé depuis les sources (cmake requis à la compilation, aucune bibliothèque système) ;
+# `complex` : lecture directe des complexes écrits par h5py en `num_complex::Complex32`. Voir docs/ULF.md (P3).
+hdf5 = { package = "hdf5-metno", version = "0.15", features = ["static", "complex"] }
+# Même version que celle de hdf5-metno et de ndarray (déjà dans le graphe).
+num-complex = "0.4"
+# En-tête XML ISMRMRD : arbre en lecture seule, sans dépendance.
+roxmltree = "0.20"
+ndarray = { workspace = true }
+
+[dev-dependencies]
+# Valeurs attendues des fichiers de test, écrites en JSON par scripts/ecrire_fixtures_ismrmrd.py ; déjà dans le graphe.
+serde_json = "1"
+# Empreinte SHA-256 du k-space lu, comparée à celle du code Python (test sur données réelles) ; déjà dans le workspace.
+sha2 = { workspace = true }
