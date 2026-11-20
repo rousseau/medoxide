@@ -1629,6 +1629,28 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
 - **Quoi (méthode, tests)** : deux préconditions de mes propres tests étaient fausses (une rampe de contraste ×8 ne donne qu'un rapport ≈ 2,7 entre les bandes mesurées ; une transformation `3v + 40` qui laisse les zéros à zéro n'est pas affine). Écrire dans le test la précondition (`assert!(avant > 3.0)`) a révélé la première tout de suite. Les mutants (variance non lissée, moyenne sans masque) sont tués ; le premier a demandé d'ajouter un critère (l'écart type de `|valeur|`).
 - **Où** : `crates/medoxide-svr/src/s2s.rs` (`normalisation_locale_coupe`), `crates/medoxide-svr/src/lib.rs` (`Volume::locally_normalised`, `Stack::locally_normalised`), `crates/medoxide-svr/src/recon.rs` (`the_local_normalisation_removes_gain_and_offset_and_respects_the_mask`).
 
+## 2026-11-20 — Lire du HDF5 et du XML : types composés par nom, arbre emprunté, égalité au bit près
+
+- **Quoi (concept)** : `roxmltree::Document<'a>` est un arbre XML **emprunté** au texte : ses nœuds pointent dans la
+  chaîne d'origine au lieu de la copier, et la durée de vie `'a` garantit que le texte vit plus longtemps que l'arbre.
+  `Entete::depuis_xml` en tire des valeurs possédées (`String`, nombres) avant de rendre la main : la structure rendue ne
+  dépend plus du texte. La fermeture appelée sur place `(|| Some([...?, ...?]))()` permet d'utiliser `?` sur des `Option`
+  au milieu d'une fonction qui rend un `Result`.
+- **Quoi (concept)** : un type composé HDF5 (l'équivalent d'une `struct` C) se lit dans une `struct` Rust annotée
+  `#[derive(H5Type)]` et `#[repr(C)]` (disposition mémoire de C, sinon Rust réordonne les champs). HDF5 convertit
+  **par nom de champ** : on ne déclare que les champs utiles (`flags`, `idx.kspace_encode_step_1`…) de l'en-tête
+  ISMRMRD qui en compte une trentaine, structure imbriquée comprise. `VarLenArray<f32>` lit un tableau de longueur
+  variable (les échantillons d'une lecture). La feature `static` de `hdf5-metno` compile la bibliothèque C HDF5 depuis
+  ses sources dans un script de construction (`build.rs`, via cmake) : rien à installer sur la machine, sauf cmake.
+- **Quoi (méthode)** : le lecteur est comparé au code Python de référence par l'**empreinte SHA-256** des octets du
+  k-space (complex64, ordre C, comme `ndarray.tobytes()`) : égalité au bit près sur 17 fichiers réels (11 de fmi, 6 de
+  Spinloop), sans copier de données dans le dépôt public. Pour Spinloop, l'égalité au bit près tient parce que la
+  moyenne des lignes répétées est faite comme en Python : somme en `f64` dans l'ordre du fichier, division, puis
+  conversion en `f32`. Deux mutations (train d'équilibre non ignoré, somme au lieu de la moyenne) font échouer le test
+  synthétique.
+- **Où** : `crates/medoxide-ismrmrd/src/{lib.rs,entete.rs}`, `crates/medoxide-ismrmrd/tests/`,
+  `scripts/ecrire_fixtures_ismrmrd.py`, `scripts/empreintes_ismrmrd.py`, `docs/ULF.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*
