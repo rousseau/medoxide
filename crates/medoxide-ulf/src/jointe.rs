@@ -267,6 +267,8 @@ pub struct Bilan {
     pub support: f64,
     pub scalaires: f64,
     pub totale: f64,
+    /// Durée (s) du modèle CPR et de son gradient (CPU), transferts vers et depuis le dispositif compris.
+    pub secondes_operateur: f64,
 }
 
 /// Un pas de la boucle jointe, de lr `facteur` × lr de base.
@@ -290,7 +292,9 @@ pub fn pas_joint<T: Reel>(
     let b0 = champ.b0(enc_champ);
     let feuille = |x: &Tensor<1>| x.clone().detach().reshape(dims).require_grad();
     let (f_re, f_im, f_b0) = (feuille(&re), feuille(&im), feuille(&b0));
+    let debut = std::time::Instant::now();
     let (termes, coupure) = evaluer(d, &f_re, &f_im, &f_b0);
+    let mut secondes_operateur = debut.elapsed().as_secs_f64();
     let w = reglages.poids;
     let Termes {
         fidelite,
@@ -305,7 +309,9 @@ pub fn pas_joint<T: Reel>(
         + lissage.clone() * w.lissage
         + support.clone() * w.support;
     let grads = perte.backward();
+    let debut = std::time::Instant::now();
     let (gu_op, gb0_op) = coupure.gradients(d, &grads);
+    secondes_operateur += debut.elapsed().as_secs_f64();
     let direct = |x: &Tensor<3>| {
         x.grad(&grads)
             .map_or_else(|| Array3::<T>::zeros(dims), depuis_tenseur::<T>)
@@ -327,6 +333,7 @@ pub fn pas_joint<T: Reel>(
         support: scalaire(support),
         scalaires: scalaire(penalite.clone()),
         totale: scalaire(perte) + w.scalaires * scalaire(penalite),
+        secondes_operateur,
     };
     let (lr, lr_s) = (reglages.lr * facteur, reglages.lr_scalaires * facteur);
     let image = ImageInr {
@@ -343,6 +350,17 @@ pub struct Estimation {
     pub u_im: Array3<f64>,
     pub champ: ChampB0,
     pub image: ImageInr,
+    pub durees: Durees,
+}
+
+/// Durées (s) des phases de [`estimer`].
+#[derive(Clone, Debug, Default)]
+pub struct Durees {
+    pub demarrage_champ: f64,
+    pub demarrage_image: f64,
+    pub jointe: f64,
+    /// Part de `jointe` passée dans le modèle CPR (voir [`Bilan::secondes_operateur`]).
+    pub operateur: f64,
 }
 
 /// Méthode C complète : démarrage à chaud du champ sur b0_init, de l'image sur la moyenne des magnitudes corrigées,
@@ -360,18 +378,26 @@ pub fn estimer<T: Reel>(
 ) -> Estimation {
     let t = champ.reseau.tables[0].val();
     let (device, dtype) = (t.device(), t.dtype());
+    let mut durees = Durees::default();
+    let debut = std::time::Instant::now();
     let cible = CibleChamp::nouvelle(b0_init, &device, dtype);
     let mut champ = champ;
     let mut adam = Adam::default();
     for _ in 0..reglages.n_prefit {
         champ = pas_prefit_champ(champ, enc_champ, &cible, &mut adam, reglages.lr_prefit).0;
     }
+    let _ = scalaire(champ.s.val());
+    durees.demarrage_champ = debut.elapsed().as_secs_f64();
+    let debut = std::time::Instant::now();
     let cible = CibleImage::nouvelle(d, b0_init, &device, dtype);
     let mut image = image;
     let mut adam = Adam::default();
     for _ in 0..reglages.n_prefit {
         image = pas_prefit_image(image, enc_image, &cible, &mut adam, reglages.lr_prefit).0;
     }
+    let _ = scalaire(image.reseau.couches[0].bias.as_ref().unwrap().val().slice(0..1));
+    durees.demarrage_image = debut.elapsed().as_secs_f64();
+    let debut = std::time::Instant::now();
     let mut adam = Adam::default();
     for it in 0..reglages.n_iter {
         let (c, i, bilan) = pas_joint(
@@ -385,8 +411,10 @@ pub fn estimer<T: Reel>(
             reglages.facteur_lr(it),
         );
         (champ, image) = (c, i);
+        durees.operateur += bilan.secondes_operateur;
         suivi(it, &bilan);
     }
+    durees.jointe = debut.elapsed().as_secs_f64();
     let dims = d.dims;
     let b0 = depuis_tenseur::<f64>(champ.b0(enc_champ).detach().reshape(dims));
     let (re, im) = image.image(enc_image);
@@ -397,5 +425,6 @@ pub fn estimer<T: Reel>(
         u_im: vers(im),
         champ,
         image,
+        durees,
     }
 }

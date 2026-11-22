@@ -150,7 +150,11 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
         },
     );
     let secondes = t0.elapsed().as_secs_f64();
-    println!("{} : {secondes:.1} s", o.entree);
+    let du = &r.durees;
+    println!(
+        "{} : {secondes:.1} s (démarrage du champ {:.1} s, de l'image {:.1} s, boucle jointe {:.1} s dont opérateur {:.1} s)",
+        o.entree, du.demarrage_champ, du.demarrage_image, du.jointe, du.operateur
+    );
 
     let s = hdf5::File::create(&o.sortie).unwrap();
     s.new_dataset_builder().with_data(&r.b0).create("b0_hz").unwrap();
@@ -161,6 +165,10 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     let attr = |nom: &str, v: f64| s.new_attr::<f64>().create(nom).unwrap().write_scalar(&v).unwrap();
     attr("secondes", secondes);
     attr("graine", o.graine as f64);
+    attr("secondes_demarrage_champ", du.demarrage_champ);
+    attr("secondes_demarrage_image", du.demarrage_image);
+    attr("secondes_jointe", du.jointe);
+    attr("secondes_operateur", du.operateur);
     attr("poids_fmi", if o.poids.is_some() { 1.0 } else { 0.0 });
     let texte = |nom: &str, v: &str| {
         let v: hdf5::types::VarLenUnicode = v.parse().unwrap();

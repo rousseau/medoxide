@@ -474,7 +474,7 @@ mesuré paramètre par paramètre par le script (`cas_jointe.py plancher`). Les 
 - Durées sur le Mac (CPU, `f64`) : 30 à 60 s par plan pour le test Rust ; 29 min par plan pour le script PyTorch, dont
   l'essentiel est le démarrage complet (600 pas).
 
-### Résultat du critère 5 (2026-11-22) : bout en bout, `f32` sur GPU — non tenu tel qu'écrit
+### Résultat du critère 5 (2026-11-22) : bout en bout, `f32` sur GPU — non tenu tel qu'écrit, tenu amendé
 
 Exemple `jointe_p1` (méthode complète : démarrage à chaud de 300 pas par réseau, 200 pas joints ; modèle CPR sur CPU en
 `f32`, réseaux et pertes sur GPU en `f32`) ; comparaison par `scripts/compare_jointe_p1.py` aux sorties de
@@ -512,7 +512,19 @@ graines). Ce que montrent les contrôles :
 - Une quatrième graine sort de l'étendue de trois graines une fois sur deux : le critère, écrit sur une seule exécution
   contre l'enveloppe de trois graines, ne pouvait pas distinguer un portage fidèle du bruit d'initialisation.
 
-Décision en attente (François) : amender le critère sur ces bases, ou mesurer plus de graines de chaque côté.
+**Amendement du critère 5** (décidé par François le 2026-11-22, après la mesure ; motif : le critère d'origine compare
+une seule exécution à l'étendue de trois graines et ne distingue pas un portage fidèle du bruit d'initialisation). Le
+critère devient :
+1. avec les poids initiaux de fmi (graine 0), B0 à moins du plus grand écart entre graines de la référence `f64`, sur les
+   six plans (fidélité du portage, à initialisation égale) ;
+2. avec l'initialisation de Burn, sur trois graines : écart de B0 entre graines de Rust du même ordre que celui de
+   PyTorch, et moyennes (B0, LNCC, écart aux données) compatibles avec celles des graines de PyTorch, compte tenu du
+   bruit des graines (absence d'écart systématique).
+
+**Tenu** avec les mesures ci-dessus : (1) B0 à 1,2–3,4 Hz pour des seuils de 2,5–8,6 Hz ; (2) écarts entre graines
+1,9–8,9 Hz contre 1,8–8,6 Hz, moyennes de B0 à 1,3–2,3 Hz, LNCC et écart aux données à moins de 2 écarts-types sauf
+l'écart aux données de sub000 xy (+0,5 %, 3,2 écarts-types sur trois graines), noté. Les LNCC hors enveloppe de 1e-4 au
+plus restent notées.
 
 Durées (critère 6, préliminaires) : 330 s par plan sur la RTX (CUDA), 290–310 s sur le Mac (Metal), dont 90–130 s de
 démarrage à chaud ; PyTorch `f32` : 208 s sur la RTX. Pas joint : 1,2 s (RTX), 0,8 s (Mac).
