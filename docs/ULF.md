@@ -581,3 +581,24 @@ réseaux (complexes en paires réel / imaginaire) :
    plans.
 4. Durées rapportées (RTX CUDA, Mac Metal) ; objectif : opérateur ≤ 0,1 s par pas sur la RTX, plan complet sous les
    208 s de PyTorch `f32`.
+
+### Résultats de P4 ter (2026-11-22)
+
+1. **`OperateurCpr` contre `ModeleCpr`** (`tests/operateur.rs`, neuf quantités, grilles 7 × 6 × 5, 8 × 5 × 4, 16 × 12 × 9
+   et 115 × 115 × 45) : ≤ 8,8e-16 en `f64` ; ≤ 4,3e-7 en `f32` sur CPU, Metal et CUDA. Tenu.
+2. **Critères 2 à 4** avec le nouvel opérateur : tests passés, plans de P1 compris ; écarts du critère 4 identiques à
+   ceux de l'opérateur CPU au chiffre près. Le test des pertes sur P1 demande 6 à 8 Go en `f64` sur CPU : le lancer
+   avec `--test-threads 1`. Tenu.
+3. **Critère 5 amendé, poids de fmi, CUDA** : B0 à 1,7 / 2,4 / 2,1 / 1,1 / 3,3 / 3,8 Hz de la graine 0, sous les seuils
+   des six plans ; LNCC hors enveloppe de 1e-4 au plus sur deux plans et écart aux données dans l'enveloppe partout,
+   comme avec l'opérateur CPU. Tenu.
+4. **Durées** :
+   - RTX, CUDA : **107–108 s par plan** (six plans), contre 240–245 s avec l'opérateur CPU et 208 s pour PyTorch
+     `f32` ; démarrage à chaud 42 s, boucle jointe 61 s (0,30 s par pas, contre 0,97 s). Objectif « plan sous 208 s »
+     tenu.
+   - Part de l'opérateur : 13,6 s sur 200 pas (0,07 s par pas) d'après `jointe_p1`, mais sur GPU les opérations sont
+     asynchrones et la mesure ne compte que ce qui s'exécute avant la première lecture ; borne haute tirée du pas
+     joint moins un pas de démarrage des deux réseaux : environ 0,16 s par pas. L'objectif ≤ 0,1 s par pas n'est donc
+     pas établi.
+   - Mac, Metal : pas de mesure valable (Mac chargé par d'autres travaux pendant l'essai : 623 s, démarrage à chaud
+     compris, deux fois plus lent qu'à vide). À refaire sur un Mac libre.
