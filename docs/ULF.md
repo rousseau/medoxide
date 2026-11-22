@@ -116,3 +116,28 @@ appelle « adjoint » est le modèle direct de la méthode jointe.
 L'étape suivante est l'estimation jointe (B0 et image). Avant de la porter, le plan demande de comparer une base lisse
 du champ (B-splines ou harmoniques sphériques) à l'INR de la référence, côté Python : c'est un choix de méthode, à
 décider avant d'écrire le code.
+
+### Choix de la représentation de B0 et de la précision (2026-11-21 / 22)
+
+Étude Python (fmi, branche `p4/b0-base-lisse`, script `b0_bases_lisses.py` : critères et règle écrits avant les calculs,
+amendements déclarés), sur les six plans de P1, RTX 2080 Ti :
+
+- **Base lisse ou INR : l'INR reste.** Harmoniques sphériques (degré 4, 8) : très en dessous (LNCC 0,66 contre 0,80
+  sur le premier plan), abandonnées. B-splines cubiques (nœuds tous les 40, 20, 10 mm) :
+  - accord des champs entre plans **meilleur** que l'INR (corrélation +0,008, RMS −12 Hz ; dix fois le bruit des
+    graines) ;
+  - écart aux données de l'étape 1 **plus grand** de 7 à 33 % (au-delà du bruit, et à 400 itérations aussi : c'est la
+    représentation, pas la convergence) ;
+  - super-résolution du fantôme contre l'IRM 1,5 T : égale (erreur 10,46 % pour l'INR, 10,51 % pour B-splines 20 mm) ;
+  - prédiction d'un plan laissé hors de la super-résolution : un peu moins bonne sur le fantôme (+0,4 à +1,6 %),
+    nettement sur subB (+2 à +7 %, 10 mm à peine mieux que 20 mm) : le champ y varie vite près des bords.
+  La règle et la prédiction du plan laissé dehors désignent l'INR (finest32, grille de hachage).
+- **Précision : l'étape 1 peut tourner en `f32`.** La méthode jointe entière en float32 / complex64 donne un B0 à
+  0,2–3,0 Hz du float64 (RMS dans l'objet), toujours sous l'écart entre deux graines (2,4–7,4 Hz), et une LNCC dans
+  l'intervalle des graines ; l'écart aux données y est aussi, sauf sub000 xy (1,289 contre 1,287 au plus : 0,15 %).
+  2,6 fois plus rapide (208 s contre 544 s par plan).
+- **Graines** : `INRField` et `INRImage` remettent la graine à 0 dans leur constructeur ; l'étude passe la graine
+  explicitement. Bruit des graines : LNCC ± 0,001, écart aux données ≤ 3 %, B0 2–9 Hz RMS.
+
+Conséquence pour le portage : l'estimation jointe se porte avec une INR à grille de hachage, en `f32`, sur GPU.
+Critère de parité de l'estimation (à écrire avant le code) : B0 et image finaux dans le bruit des graines.
