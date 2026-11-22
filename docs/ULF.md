@@ -553,3 +553,31 @@ Lecture :
 - Le Mac (Metal) est plus lent que la RTX sur les réseaux (119 s de démarrage contre 42 s), plus rapide sur l'opérateur.
 - Sur CPU seul, les réseaux dominent (backend CPU de Burn) : facteur 5 sur le Mac, 17 sur la RTX, où il n'occupe
   qu'environ deux cœurs sur douze.
+
+## P4 ter : opérateur CPR sur le dispositif (2026-11-22)
+
+**Constat** (critère 6) : sur la RTX, le modèle CPR sur CPU fait 0,85–0,91 s des 0,97 s d'un pas joint. Mesure par
+passe (`chrono_cpr`, P1, `f32`) : RTX 36–82 ms, Mac 14–41 ms, dix passes par pas. Les `sin_cos` n'en font qu'une petite
+part (direct avec champ 49 ms, sans champ 36 ms sur la RTX) : le coût est la somme le long de la lecture, en N₀² · N₁N₂
+(68 millions de produits complexes par passe), qu'une optimisation du CPU ne réduirait que d'un facteur 2 ou 3.
+
+**Conception.** Un second opérateur, `OperateurCpr`, fait les mêmes calculs en tenseurs Burn sur le dispositif des
+réseaux (complexes en paires réel / imaginaire) :
+- somme le long de la lecture : phases exp(∓2iπ b0 tᵢ) et produits par cᵢ(x₀) en tenseurs [échantillons, N₀, N₁N₂],
+  par paquets d'échantillons (mémoire bornée), réduits par `sum_dim` ;
+- FFT 2D centrée des coupes écrite comme deux produits matriciels par les matrices de la DFT centrée normalisée
+  (115 × 115 et 45 × 45 : quelques dizaines de millions d'opérations, négligeable) ;
+- passes sans champ (F et F⁻¹ de la fidélité) : F₀ aussi en produit matriciel, sans phases ;
+- gradients : les formules écrites du critère 2 (pas d'autodiff à travers l'opérateur, la coupure du graphe reste) ;
+- `Donnees`, `evaluer` et `Coupure` passent sur cet opérateur ; u, b0 et les gradients restent sur le dispositif
+  (plus de transferts). `ModeleCpr` (CPU) reste la référence validée contre fmi.
+
+**Critères (écrits avant le code)** :
+1. `OperateurCpr` contre `ModeleCpr` (direct, adjoint, adjoint pondéré, deux gradients ; avec et sans champ ; grilles
+   paires et impaires et taille P1) : ≤ 1e-12 en `f64` (CPU), ≤ 1e-5 en `f32` sur CPU et sur GPU (wgpu ; CUDA sur la
+   RTX).
+2. Les tests des critères 2, 3 et 4 (`f64`, mêmes seuils, plans de P1 compris) passent avec le nouvel opérateur.
+3. Critère 5 amendé refait avec le nouvel opérateur, poids initiaux de fmi : B0 sous le seuil des graines sur les six
+   plans.
+4. Durées rapportées (RTX CUDA, Mac Metal) ; objectif : opérateur ≤ 0,1 s par pas sur la RTX, plan complet sous les
+   208 s de PyTorch `f32`.
