@@ -526,5 +526,30 @@ critère devient :
 l'écart aux données de sub000 xy (+0,5 %, 3,2 écarts-types sur trois graines), noté. Les LNCC hors enveloppe de 1e-4 au
 plus restent notées.
 
-Durées (critère 6, préliminaires) : 330 s par plan sur la RTX (CUDA), 290–310 s sur le Mac (Metal), dont 90–130 s de
-démarrage à chaud ; PyTorch `f32` : 208 s sur la RTX. Pas joint : 1,2 s (RTX), 0,8 s (Mac).
+### Résultat du critère 6 (2026-11-22) : durées
+
+Plan sub000 xy (subB yz pour la seconde mesure CUDA), méthode complète en `f32` (`jointe_p1`, durées par phase dans
+le fichier de sortie), dispositif libre de tout autre calcul. Les mesures du critère 5 sur la RTX ne comptent pas : un
+reste d'un calcul arrêté (version à `select`) occupait le GPU pendant ce temps (`suivi --arrete` ferme la session sans
+tuer le processus).
+
+| dispositif | total | démarrage champ + image | boucle jointe (200 pas) | dont opérateur CPR* |
+|---|---|---|---|---|
+| RTX, CUDA | 240 s, 245 s | 16 + 26 s | 193 s, 198 s | 170 s, 175 s |
+| Mac, Metal | 283 s | 49 + 70 s | 161 s | 103 s |
+| Mac, CPU seul | 1 295 s | 229 + 467 s | 596 s | 70 s |
+| RTX, CPU seul | 4 189 s | 871 + 1 539 s | 1 771 s | 182 s |
+| référence : PyTorch `f32`, RTX | 208 s | | | |
+
+\* Durée de `evaluer` et `Coupure::gradients` : modèle CPR sur CPU et transferts, mais aussi, sur GPU, l'attente des
+calculs du réseau encore en file au moment du premier transfert ; c'est donc une borne haute de la part de l'opérateur
+(sur CPU seul, où rien n'est en file : 70 s sur le Mac, 0,35 s par pas ; 182 s sur la RTX, 0,91 s par pas).
+
+Lecture :
+- Sur la RTX, Rust est 15 % plus lent que PyTorch ; la boucle jointe y fait 0,97 s par pas, dont 0,85 s comptés dans
+  l'opérateur, qui coûte bien cela sur son CPU (0,91 s par pas en CPU seul) : le CPU x86_64 de la RTX fait les FFT
+  2,6 fois plus lentement que celui du Mac, et l'estimation de la conception (0,2–0,3 s par pas) valait pour le Mac. Le démarrage à chaud (sans opérateur) est rapide (42 s). Le gain viendra de l'opérateur : FFT sur GPU
+  (la voie écartée en conception) ou recouvrement du calcul CPU et GPU.
+- Le Mac (Metal) est plus lent que la RTX sur les réseaux (119 s de démarrage contre 42 s), plus rapide sur l'opérateur.
+- Sur CPU seul, les réseaux dominent (backend CPU de Burn) : facteur 5 sur le Mac, 17 sur la RTX, où il n'occupe
+  qu'environ deux cœurs sur douze.
