@@ -103,6 +103,24 @@ def plan(args, sujet, nom_plan):
     return res
 
 
+def dispersion(args, suffixes):
+    """B0 : RMS dans l'objet entre sorties de Rust (graines) deux à deux, et entre graines de PyTorch ; moyenne des
+    sorties de Rust à la graine 0 de PyTorch (écart systématique éventuel), rapportée à celle d'une graine."""
+    for nom in args.plans.split(","):
+        sujet, q = nom.split("_")
+        m = np.load(Path(args.p1) / sujet / q / "inputs.npz")["mask"]
+        g = Path(args.graines) / sujet / q
+        py = [np.load(g / f"{n}.npz")["b0_hz"].astype(np.float64) for n in ("inr32", "inr32_s1", "inr32_s2")]
+        ru = []
+        for suf in suffixes:
+            with h5py.File(Path(args.rust) / f"{nom}{suf}.h5") as f:
+                ru.append(f["b0_hz"][()])
+        paires = lambda xs: [rms(xs[i], xs[j], m) for i in range(len(xs)) for j in range(i + 1, len(xs))]  # noqa: E731
+        moy_ru, moy_py = sum(ru) / len(ru), sum(py) / len(py)
+        print(f"{nom} : entre graines Rust {np.round(paires(ru), 2).tolist()} Hz, PyTorch {np.round(paires(py), 2).tolist()}"
+              f" Hz | moyenne Rust − moyenne PyTorch {rms(moy_ru, moy_py, m):.2f} Hz", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--rust", required=True)
@@ -111,7 +129,11 @@ def main():
     p.add_argument("--p1", required=True)
     p.add_argument("--plans", default=",".join(f"{s}_{q}" for s, q in PLANS))
     p.add_argument("--sortie")
+    p.add_argument("--dispersion", help="suffixes de sorties Rust séparés par des virgules (graines)")
     args = p.parse_args()
+    if args.dispersion:
+        dispersion(args, args.dispersion.split(","))
+        return
     tout = {}
     for nom in args.plans.split(","):
         sujet, q = nom.split("_")

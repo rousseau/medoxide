@@ -473,3 +473,46 @@ mesuré paramètre par paramètre par le script (`cas_jointe.py plancher`). Les 
     lissage 1e-2 au lieu de 1e-4.
 - Durées sur le Mac (CPU, `f64`) : 30 à 60 s par plan pour le test Rust ; 29 min par plan pour le script PyTorch, dont
   l'essentiel est le démarrage complet (600 pas).
+
+### Résultat du critère 5 (2026-11-22) : bout en bout, `f32` sur GPU — non tenu tel qu'écrit
+
+Exemple `jointe_p1` (méthode complète : démarrage à chaud de 300 pas par réseau, 200 pas joints ; modèle CPR sur CPU en
+`f32`, réseaux et pertes sur GPU en `f32`) ; comparaison par `scripts/compare_jointe_p1.py` aux sorties de
+`b0_bases_lisses.py` (graines 0, 1, 2 en float64 et calcul float32 de PyTorch, sur la RTX). Les métriques sont recalculées
+avec le code de l'étude ; contrôles : la LNCC du calcul float32 de PyTorch est retrouvée à 1e-16, et σ (tiré de ce
+calcul) redonne l'écart aux données de la sortie de P1 à 4e-9.
+
+**Correction préalable.** Les premiers essais duraient des heures : au retour, burn-cubecl 0.22.1 somme le gradient de
+`select` avec un fil par colonne de la table, qui parcourt les 4,7 millions d'indices du niveau (38 s par passe pour
+l'image sur Metal, 12 s par pas du champ sur CUDA). La lecture des tables passe désormais par `gather`, dont le retour
+est une addition atomique par valeur : 0,12 s. Écarts des critères 1 et 4 inchangés.
+
+**Critère tel qu'écrit (une exécution, initialisation de Burn, graine 0, CUDA)** : tenu sur deux plans sur six.
+
+| plan | B0 à la graine 0 (seuil) | LNCC (enveloppe) | écart aux données (enveloppe) |
+|---|---|---|---|
+| sub000 xy | 3,56 Hz (2,71) ✗ | 0,8276 (0,8277–0,8281) ✗ | 1,2905 (1,2832–1,2893) ✗ |
+| sub000 yz | 3,47 Hz (2,55) ✗ | 0,7946 (0,7947–0,7948) ✗ | 2,1357 ✓ |
+| sub000 zx | 2,77 Hz (3,11) ✓ | 0,8137 ✓ | 1,5765 (1,5810–1,5876) ✗ |
+| subB xy | 3,34 Hz (3,10) ✗ | 0,6253 ✓ | 2,6204 (2,6463–2,6604) ✗ |
+| subB yz | 3,65 Hz (8,62) ✓ | 0,6498 ✓ | 2,3803 ✓ |
+| subB zx | 3,91 Hz (6,08) ✓ | 0,6419 ✓ | 2,4237 ✓ |
+
+Les sorties d'enveloppe vont dans les deux sens (sur sub000 zx et subB xy, Rust colle mieux aux données que les trois
+graines). Ce que montrent les contrôles :
+- **Mêmes poids initiaux que fmi** (graine 0, option `--poids`), CUDA : B0 à 1,2–3,4 Hz de la graine 0, sous le seuil
+  sur les six plans ; LNCC hors enveloppe de 1e-4 au plus sur trois plans, écart aux données de 0,08 % sur un. Le
+  portage reproduit la méthode : l'écart du tableau vient de l'initialisation, qui se comporte comme une autre graine.
+  (B0 plus loin de la graine 0 que le calcul float32 de PyTorch sur certains plans : 2,07 Hz contre 0,17 sur sub000 zx ;
+  800 pas d'Adam amplifient les différences d'arrondi et l'ordre non déterministe des additions atomiques.)
+- **Graines de Burn 0, 1, 2** (CUDA, Metal, Metal) : écart de B0 entre deux graines de Rust 1,9–8,9 Hz, contre 1,8–8,6 Hz
+  entre graines de PyTorch ; moyenne des trois B0 de Rust à 1,3–2,3 Hz de celle de PyTorch. LNCC moyenne à 1,7 écart-type
+  au plus de celle de PyTorch ; écart aux données moyen à moins d'un écart-type, sauf sub000 xy (+0,5 %, +3,2 écarts-types,
+  une comparaison sur douze avec trois graines de chaque côté).
+- Une quatrième graine sort de l'étendue de trois graines une fois sur deux : le critère, écrit sur une seule exécution
+  contre l'enveloppe de trois graines, ne pouvait pas distinguer un portage fidèle du bruit d'initialisation.
+
+Décision en attente (François) : amender le critère sur ces bases, ou mesurer plus de graines de chaque côté.
+
+Durées (critère 6, préliminaires) : 330 s par plan sur la RTX (CUDA), 290–310 s sur le Mac (Metal), dont 90–130 s de
+démarrage à chaud ; PyTorch `f32` : 208 s sur la RTX. Pas joint : 1,2 s (RTX), 0,8 s (Mac).
