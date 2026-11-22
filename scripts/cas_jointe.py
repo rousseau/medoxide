@@ -4,6 +4,7 @@ lisible par Rust.
     cd ~/Exp/fridge-magnet-imaging/notebooks/francois   # utils_cpr.py, inr.py et compare_methods.py de fmi (cb7174b)
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py synthetique <medoxide>/crates/medoxide-ulf/tests/donnees/jointe_synthetique.h5
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py p1 <inputs.npz> <sortie.h5>   # un plan de P1
+    PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py entrees <inputs.npz> <sortie.h5>   # entrées seules (critère 5)
 
 Reprend `compare_methods.estimate_joint` (sans RED) en float64 sur CPU, réseaux initialisés par fmi (graine 0, tables
 dans ± 1e-4) :
@@ -213,5 +214,20 @@ def p1(entrees, sortie):
            i["b0_bounds"].tolist())
 
 
+def entrees(entrees_npz, sortie):
+    """Entrées d'un plan de P1 pour l'exemple `jointe_p1` de medoxide-ulf (critère 5) : données seules, sans pas."""
+    i = np.load(entrees_npz)
+    t = i["time_array"]
+    temps = t[:, 0, 0]
+    assert np.allclose(t, temps[:, None, None]), "temps non constant le long des axes de phase"
+    with h5py.File(sortie, "w") as f:
+        for nom, v in dict(k_reg=i["k_reg"], k_inv=i["k_inv"], temps=temps.astype(np.float64),
+                           espacement_mm=i["spacing_mm"].astype(np.float64),
+                           b0_init=i["b0_warm_start"].astype(np.float64),
+                           bornes_b0=i["b0_bounds"].astype(np.float64)).items():
+            f.create_dataset(nom, data=v)
+    print(f"écrit : {sortie}")
+
+
 if __name__ == "__main__":
-    {"synthetique": synthetique, "p1": p1, "plancher": plancher}[sys.argv[1]](*sys.argv[2:])
+    {"synthetique": synthetique, "p1": p1, "plancher": plancher, "entrees": entrees}[sys.argv[1]](*sys.argv[2:])
