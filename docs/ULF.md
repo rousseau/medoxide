@@ -373,3 +373,41 @@ Quatre mutations font échouer les tests du cas synthétique, PyTorch comme diff
 - signe du facteur 2iπ dans chacun des deux gradients ;
 - pondération par le temps oubliée ;
 - conjugué déplacé.
+
+### Résultat du critère 3 (2026-11-22) : pertes et coupure du graphe
+
+Module `pertes` :
+- `Donnees` prépare une fois, par paire reg / inv, le facteur `echelle`, les k-space normalisés, les magnitudes
+  observées |F⁻¹k|, le masque de support (calculé en `f64`) et les matrices du flou de la LNCC ;
+- `evaluer` donne les cinq termes non pondérés et la coupure ;
+- `Coupure::gradients` ramène sur u et b0 les gradients des feuilles placées à la sortie du modèle.
+
+La LNCC passe par un flou séparable écrit en produits matriciels (bords nuls exacts), une variance non biaisée et les
+sommes à deux niveaux du critère 1. F⁻¹ et F sont le modèle sans champ (`Aᴴ(0)`, `A(0)`). Références :
+`scripts/cas_pertes.py`, avec l'autograd de PyTorch en float64 sur `joint_losses` réglé comme `estimate_joint`, plus
+`bending_penalty` et la pénalité hors support :
+- cas synthétique 32 × 24 × 16, versionné (objet simulé par le modèle direct, avec bruit) ;
+- sorties de l'étape 1 de P1 sur les six plans (`MEDOXIDE_ULF_P1_PERTES`, hors dépôt).
+
+- **Masque de support** : identique voxel pour voxel. **Facteur d'échelle** : à 1e-12.
+- **`f64`** :
+  - valeurs à 6,5e-15 au plus ;
+  - gradients à 5,8e-13 au plus, à travers la coupure.
+- **`f32`** :
+  - valeurs à 1,1e-6 au plus, gradients de la fidélité, du terme B0, du lissage et du support sous 1e-4 ;
+  - le gradient du terme image par rapport à u est à 8,1e-5 – 3,4e-4. PyTorch `f32` fait 9,5e-5 – 2,6e-4 sur le même
+    calcul : il dépasse lui aussi le seuil de 1e-4 sur cinq plans sur six, et Rust reste à 1,4 fois PyTorch au plus.
+    C'est le conditionnement de la LNCC : la variance locale y est calculée comme E[a²] − E[a]², sujette aux pertes de
+    chiffres en `f32`, et la formule est celle de la référence.
+- **Amendement du critère `f32`** (2026-11-22, déclaré après le premier dépassement, avant la mesure des autres plans) :
+  même règle qu'au critère 1. En `f32`, chaque valeur et chaque gradient doit être sous le seuil initial ou sous deux
+  fois l'écart de PyTorch `f32` au float64 sur le même cas (mesuré par le script). Tenu sur les six plans et sur le cas
+  synthétique.
+- **Mutations** :
+  - font échouer le test : images corrigées non détachées dans le terme image, signe de la contribution de inv au
+    gradient de b0, F⁻¹ au lieu de F au retour de la fidélité, dilatation du masque permutée, lissage sans division
+    par h² ;
+  - survit : variance biaisée dans le plancher de la LNCC. Le plancher (1e-12 · var · var) n'agit que si la variance
+    locale tombe à ce niveau, et n − 1 au lieu de n le change de 1e-4 en relatif : la mutation est presque
+    équivalente sur ces données.
+- Le second `backward` de la coupure (propagation dans les réseaux) sera exercé au critère 4.
