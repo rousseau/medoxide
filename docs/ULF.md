@@ -430,8 +430,8 @@ Module `jointe` : `Adam`, `pas_prefit_champ`, `pas_prefit_image`, `pas_joint` (l
 - deux pas plutôt qu'un, pour exercer les corrections de biais d'Adam et la décroissance cosinus au-delà du premier.
 
 Cas : synthétique 32 × 24 × 16, versionné (réseaux à petites tables, comme au critère 1) ; six plans de P1 aux
-réglages de P1 (`MEDOXIDE_ULF_P1_JOINTE`, hors dépôt, 600 Mo par plan, entrées de P1 sans sortie de sujet autre que
-les k-space déjà hors dépôt).
+réglages de P1 (`MEDOXIDE_ULF_P1_JOINTE`, 600 Mo par plan, hors dépôt puisqu'ils contiennent les k-space des
+sujets).
 
 **Point de départ des pas joints.** Ils partaient d'abord de l'état après 2 pas de démarrage. Le test a échoué sur le
 cas synthétique : terme image à 8,9e-9 de PyTorch avant tout pas, image à 5,3e-9 après le premier pas. Cause : à cet
