@@ -141,3 +141,140 @@ amendements déclarés), sur les six plans de P1, RTX 2080 Ti :
 
 Conséquence pour le portage : l'estimation jointe se porte avec une INR à grille de hachage, en `f32`, sur GPU.
 Critère de parité de l'estimation (à écrire avant le code) : B0 et image finaux dans le bruit des graines.
+
+## P4 bis : estimation jointe B0 + image, conception (2026-11-22)
+
+### Ce qu'on porte
+
+`compare_methods.estimate_joint` (référence `cb7174b`) dans le réglage de P1 (`finest32`, surcharges de
+`b0_sensitivity.overrides`), précision `f32` :
+
+- **B0** : `INRField`. Grille de hachage de 8 niveaux, 2 caractéristiques par niveau, table de 2¹⁹, résolution 2 → 32
+  (facteur (32/2)^(1/7)), puis un MLP de 64 neurones × 2 couches cachées (ReLU), et une sortie. Ensuite
+  `forme = tanh(net)`, centrée et ramenée à une moyenne quadratique de 1 (dénominateur détaché du gradient),
+  et `B0 = offset + amplitude · forme`, avec :
+  - `amplitude = b0_min · (b0_max/b0_min)^sigmoid(s)` ;
+  - `offset = b0_max · tanh(o)`.
+
+  Les bornes viennent de `b0_bounds_hz` :
+  - `b0_min` = 1/(2π T_lecture) ;
+  - `b0_max` = 1/(2·dwell).
+- **Image** : `INRImage`. Grille de 16 niveaux, résolution de base 16, facteur 2, table de 2¹⁹, MLP 64 × 2, deux
+  sorties (parties réelle et imaginaire). Les données sont divisées par `data_scale`, le maximum des |F⁻¹ k| de reg
+  et inv ; l'image est remultipliée par ce facteur à la fin.
+- **Coordonnées** : `linspace(0, 1, n)` par axe (indexation `ij`).
+- **Pertes** (`joint_losses`, mode `magnitude`, terme image `lncc`, `image_term_updates_b0 = False`, terme B0 `lncc`).
+  La perte totale vaut :
+  - 1 · fidélité, avec fidélité = ‖|F⁻¹k_reg| − |F⁻¹A(+b0)u|‖² + même terme pour inv avec −b0, en moyennes ;
+  - \+ 1e-2 · image, avec image = −[LNCC(|u|, |Aᴴ(+b0)k_reg|) + LNCC(|u|, |Aᴴ(−b0)k_inv|)], les images corrigées
+    étant détachées ;
+  - \+ 1e-2 · b0, avec b0 = −LNCC(|Aᴴ(+b0)k_reg|, |Aᴴ(−b0)k_inv|) ;
+  - \+ 1e-4 · lissage, avec lissage = Σ_axes moyenne((∂²B0 / h²)²) (`bending_penalty`, différences finies) ;
+  - \+ 1 · support, avec support = moyenne(|u|²) hors du masque `object_support_mask` ;
+  - \+ 1e-5 · (s² + o²).
+
+  La LNCC utilise une fenêtre gaussienne de 4 mm (σ en voxels par axe). Le flou est séparable et à bords nuls.
+  Le plancher vaut `eps · sqrt(var(a) · var(b))`, avec eps = 1e-6 et une variance **non biaisée** (défaut de
+  `torch.var`) ; le gradient passe aussi par ce plancher.
+- **Démarrage à chaud** (`prefit`) : 300 itérations d'Adam (lr 1e-2, constant), en moindres carrés relatifs :
+  - le champ sur `b0_init` ;
+  - l'image sur la moyenne des magnitudes corrigées (`averaged_corrected`, phase nulle).
+- **Optimisation** : 200 itérations d'Adam (β = 0,9 / 0,999, **ε = 1e-8**, pas de décroissance des poids) :
+  - lr 1e-3 pour les deux réseaux (tables et MLP) ;
+  - lr 1e-2 pour s et o ;
+  - décroissance cosinus `lr · (r + (1 − r) · ½ (1 + cos(π it / 200)))`, avec r = 1e-2.
+
+Entrées : `k_reg`, `k_inv` (fenêtrées, sens de lecture rétabli), `t`, l'espacement, les bornes et `b0_init`.
+`b0_init` est le champ de la méthode INR seule (« méthode B » : même champ, perte `lncc` seule, 400 itérations).
+Pour la parité, ces entrées sont lues dans les `inputs.npz` de P1. La chaîne qui va du fichier ISMRMRD (P3) à ces
+entrées (fenêtre de Tukey autour de l'écho, normalisation) et la méthode B viennent après ; elles réutilisent les
+mêmes briques.
+
+### Conception (validée le 2026-11-22 : opérateur sur CPU à gradient écrit ; `b0_init` lu dans P1, méthode B ensuite)
+
+Crate `medoxide-ulf`, générique en `B: AutodiffBackend`. Les tests tournent sur le backend CPU `flex`, en `f64`
+et en `f32` ; les calculs tournent sur wgpu (Metal) ou CUDA, en `f32`. Quatre modules :
+
+1. **`inr`** : grille de hachage + MLP.
+   - Les points de la grille sont fixes (les voxels). Les indices de table et les poids trilinéaires de chaque
+     niveau se calculent donc **une fois, sur CPU, en `f64` et en entiers 64 bits**, avec la même arithmétique
+     que `inr._fast_hash` :
+     - produits masqués sur 32 bits, puis XOR, puis modulo la taille de table ;
+     - niveaux denses indexés par pas ;
+     - même modulo au bord.
+   - L'encodage devient un `select` sur la table, pondéré, que l'autodiff de Burn sait dériver (accumulation
+     dans la table).
+   - Mémoire sur 115 × 115 × 45 : environ 0,6 Go pour l'image (16 niveaux × 8 coins × un indice et un poids) et
+     0,3 Go pour le champ.
+   - Calculer les coordonnées en `f64` évite la perte de précision du `f32` aux niveaux fins : l'échelle du
+     niveau 15 de l'image vaut 524 287, et un pas de voxel en `f32` y perd environ 3 % de la fraction.
+   - Initialisation propre à Burn :
+     - tables uniformes ± 1e-4 ;
+     - couches linéaires à ± 1/√fan_in, comme `nn.Linear` (à vérifier dans Burn).
+   - L'écart à PyTorch est alors du bruit de graine, déjà mesuré.
+2. **`cpr_diff`** : le modèle validé en P4 (CPU, `rustfft`) devient une opération à gradient propre (trait
+   `Backward` de `burn-autodiff`).
+   - Les complexes sont des paires réelles côté Burn : aucune convention de gradient complexe à reproduire.
+   - Les dérivées par rapport au champ n'ont besoin que d'un opérateur de plus, l'adjoint pondéré par le temps
+     `Aₜᴴ k = Σᵢ tᵢ F⁻¹(Mᵢ k) exp(+2iπ b0 tᵢ)`, calculé dans la même passe que `Aᴴ` :
+     - pour y = A(b0) u et un gradient g sur y :
+       - ∂/∂u = Aᴴ g ;
+       - ∂/∂b0 = Re(−2iπ · u · conj(Aₜᴴ g)) ;
+     - pour z = Aᴴ(b0) k et un gradient g sur z :
+       - ∂/∂b0 = Re(conj(g) · 2iπ · Aₜᴴ k) ;
+       - ∂/∂k = A g (non utilisé : les données sont fixes).
+   - Rien n'est gardé par segment de temps : la mémoire ne dépend pas du nombre d'échantillons de lecture. C'est
+     l'équivalent du `checkpoint` qu'il a fallu ajouter en Python pour tenir sur la RTX.
+   - Coût par itération : environ 6 passes (2 `A`, 2 `Aᴴ` + `Aₜᴴ`, 2 passes au retour), soit 0,2 à 0,3 s sur CPU
+     au rythme mesuré en P4 (0,03–0,05 s par passe), contre environ 1 s par itération pour la référence Python `f32` sur
+     GPU (208 s par plan, démarrage à chaud compris). Les transferts CPU ↔ GPU portent sur 5 Mo par volume.
+3. **`pertes`** :
+   - LNCC avec flou séparable écrit comme un produit par une matrice de Toeplitz le long de chaque axe (bords nuls
+     exacts, dérivable sans noyau dédié) ;
+   - fidélité, lissage, support, pénalité des scalaires ;
+   - masque du support (flou, seuil, dilatation par `max_pool3d`) et `data_scale`, calculés une fois, hors gradient.
+4. **`jointe`** :
+   - le démarrage à chaud puis la boucle ;
+   - deux optimiseurs Adam de Burn (réseaux ; scalaires), puisqu'il y a un lr par groupe ; Adam étant par
+     paramètre, c'est équivalent à un seul Adam à deux groupes ;
+   - ε fixé à 1e-8 (Burn a 1e-5 par défaut, ce qui écraserait les gradients des tables, initialisées à 1e-4) ;
+   - la décroissance cosinus est appliquée à la main.
+
+Autre voie envisagée, non retenue pour la première version : tout sur GPU, opérateur compris (FFT de Bluestein
+au-dessus de `burn-signal`, 0,2–0,6 s par FFT 3D en 230³ d'après les essais), gradient par l'autodiff de Burn. Elle
+garderait en mémoire les intermédiaires de chaque segment (c'est ce qui dépassait les 11 Go en Python) et serait
+plus lente que `rustfft` sur CPU aux tailles utiles. On y reviendra si le profil de la première version le
+justifie.
+
+### Critères (écrits avant le code)
+
+Les cas de test sont écrits par un script Python (`scripts/cas_jointe.py`, fmi `cb7174b`) :
+- un petit cas synthétique versionné (grille 9 × 6 × 5, champ et image INR initialisés avec la graine 0 ; aucune
+  donnée de sujet) ;
+- les six plans de P1 (activés par `MEDOXIDE_ULF_P1`, hors dépôt).
+
+1. **INR** (mêmes poids, chargés depuis le script) :
+   - indices de table identiques à ceux de PyTorch, entier pour entier ;
+   - sorties du champ et de l'image à ≤ 1e-12 en `f64` et ≤ 1e-6 en `f32` (écart relatif L2) ;
+   - gradient d'une fonctionnelle linéaire aléatoire par rapport à tous les paramètres à ≤ 1e-10 / 1e-5.
+2. **Opération dérivable** :
+   - gradients par rapport à u et b0 contre des différences finies (`f64`, ≤ 1e-6) et contre l'autograd de PyTorch,
+     sur le cas synthétique (≤ 1e-10 en `f64`, ≤ 1e-5 en `f32`) et sur les plans de P1 (≤ 1e-8 / 1e-4) ;
+   - une mutation (signe du facteur 2iπ dans le gradient en b0) doit faire échouer ce test.
+3. **Pertes** : chaque terme et son gradient par rapport à (u, b0), évalués sur les sorties de P1 :
+   - valeurs à ≤ 1e-10 (`f64`) et 1e-5 (`f32`) ;
+   - gradients à ≤ 1e-8 / 1e-4 ;
+   - même masque de support, voxel pour voxel.
+4. **Un pas d'optimisation** : partant des poids exportés de PyTorch, les paramètres après un pas de démarrage à
+   chaud et après un pas de la boucle jointe sont à ≤ 1e-10 (`f64`) des valeurs de PyTorch. Au-delà, l'écart grandit
+   sans signification (optimisation non convexe) ; c'est le critère 5 qui juge.
+5. **Bout en bout, `f32` sur GPU, initialisation de Burn**, sur les six plans de P1 :
+   - B0 à moins du plus grand écart entre graines de ce plan (RMS dans l'objet, de 2,4 à 7,4 Hz selon le plan) de la
+     référence `f64` ;
+   - LNCC et écart aux données dans l'enveloppe des graines 0, 1, 2 en `f64` et du calcul `f32` de PyTorch
+     (l'enveloppe inclut ce dernier, puisqu'il sortait de 0,15 % de l'intervalle des graines sur sub000 xy).
+6. Durée rapportée, sans critère, sur le Mac (Metal), la RTX (CUDA) et le CPU seul ; référence : 208 s par plan pour
+   PyTorch `f32` sur la RTX.
+
+Ordre : 1 → 2 → 3 → 4 → 5. Chaque critère est tenu avant de passer au suivant ; les mutations qui le font échouer
+sont notées.
