@@ -332,4 +332,44 @@ Les tables sont tirées dans [−1, 1] pour que la sortie varie vraiment.
   - `f32` sur wgpu (Vulkan) et sur CUDA : **un échec strict**, le gradient du biais final du champ, à 1,40e-5 pour une
     limite de 1,20e-5 (2 × PyTorch `f32`, 6,0e-6). Sur ce même cas, le CPU de la RTX est à 1,19e-5 et celui du Mac à
     1,75e-6 : sur cette quantité mal conditionnée (κ ≈ 100 sur 270 points), l'écart `f32` est de l'arrondi qui varie
-    d'un matériel à l'autre d'un facteur 8. Noté comme échec, sans second amendement : décision demandée.
+    d'un matériel à l'autre d'un facteur 8. Noté comme échec, sans second amendement.
+- **Décision (2026-11-22)** : l'échec strict est accepté ; on passe au critère 2.
+
+### Changement de conception (2026-11-22) : gradient de l'opérateur par coupure du graphe
+
+La conception prévoyait une opération Burn à retour propre (trait `Backward` de `burn-autodiff`). En Burn 0.22, une
+telle opération passe par une extension de backend générée par macro (`backend_extension`), à implémenter pour
+chaque backend (`Flex`, `Cube`) et à nouveau pour l'autodiff. On fait plus simple, sans dépendre du backend : on
+**coupe le graphe à la sortie des réseaux**.
+
+1. Les sorties des réseaux (u, b0) sont recopiées en feuilles détachées. Les pertes partent de ces feuilles, et les
+   sorties de l'opérateur, calculées sur CPU, sont elles aussi des feuilles.
+2. Un premier `backward` donne les gradients des pertes par rapport à ces feuilles.
+3. Les gradients écrits à la main (ci-dessous) ramènent les gradients des sorties de l'opérateur sur u et b0, et
+   s'ajoutent aux gradients directs.
+4. Un second `backward`, sur Σ (u, b0) · gradient détaché, les propage dans les réseaux.
+
+C'est le même calcul que l'opération à retour propre. Seule la mise en œuvre change : deux `backward` par itération.
+Elle sera validée au critère 3, avec les pertes.
+
+### Résultat du critère 2 (2026-11-22) : gradients de l'opérateur
+
+`ModeleCpr::adjoint_et_pondere` calcule `Aᴴ k` et `Aₜᴴ k` dans la même passe, et `adjoint` reste inchangé (parité
+de P4 conservée). Deux fonctions donnent les gradients :
+- `gradient_direct` : pour y = A(b0) u, ∂L/∂u = Aᴴ g et ∂L/∂b0 = 2π Im(u · conj(Aₜᴴ g)) ;
+- `gradient_adjoint_b0` : pour z = Aᴴ(b0) k, ∂L/∂b0 = −2π Im(conj(g) · Aₜᴴ k).
+
+On y note g = ∂L/∂Re + i ∂L/∂Im (la convention de PyTorch). Références écrites par `scripts/cas_cpr.py gradients`,
+avec l'autograd de PyTorch sur les fonctions de fmi : pertes L_y = Σ Re(conj(w_y) · A(b0) x) et
+L_z = Σ Re(conj(w_z) · Aᴴ(b0) k), à poids aléatoires.
+
+| Cas | `f64` contre PyTorch | `f32` contre PyTorch | Différences finies (`f64`) |
+|---|---|---|---|
+| Synthétique 9 × 6 × 5 (versionné) | 8,3e-16 – 9,4e-16 | 4,8e-7 – 6,0e-7 | ≤ 8,4e-9 |
+| Six plans de P1 (`MEDOXIDE_ULF_P1_GRAD`) | 7,3e-16 – 8,7e-16 | 3,0e-7 – 4,2e-7 | ≤ 1,7e-8 |
+
+Tous les seuils sont tenus : 1e-10 / 1e-5 sur le synthétique, 1e-8 / 1e-4 sur P1, 1e-6 pour les différences finies.
+Quatre mutations font échouer les tests du cas synthétique, PyTorch comme différences finies :
+- signe du facteur 2iπ dans chacun des deux gradients ;
+- pondération par le temps oubliée ;
+- conjugué déplacé.
