@@ -411,3 +411,41 @@ sommes à deux niveaux du critère 1. F⁻¹ et F sont le modèle sans champ (`A
     locale tombe à ce niveau, et n − 1 au lieu de n le change de 1e-4 en relatif : la mutation est presque
     équivalente sur ces données.
 - Le second `backward` de la coupure (propagation dans les réseaux) sera exercé au critère 4.
+
+### Changement de conception : Adam écrit dans le module (2026-11-22)
+
+L'Adam de Burn 0.22.1 garde β₁, β₂ et ε en `f32`, corrections de biais comprises : 1 − 0,9f32 diffère de 0,1 de
+2,4e-7 en relatif, et le paramètre après un pas s'écarte d'autant de PyTorch, même en `f64`. Le module `jointe` reprend
+donc `torch.optim.Adam` (`_single_tensor_adam` : `lerp` du premier moment, `addcmul` du second, ε ajouté à
+√v / √(1 − β₂ᵗ)) avec des scalaires `f64`. Le lr est donné à chaque pas, ce qui couvre les groupes (réseaux à 1e-3,
+scalaires du champ à 1e-2) et la décroissance cosinus, sans deux optimiseurs.
+
+### Résultat du critère 4 (2026-11-22) : pas d'optimisation
+
+Module `jointe` : `Adam`, `pas_prefit_champ`, `pas_prefit_image`, `pas_joint` (les deux `backward` de la coupure),
+`estimer` (méthode complète, pas encore exercée de bout en bout). Références : `scripts/cas_jointe.py`, qui reprend
+`estimate_joint` en float64 sur CPU avec les poids initiaux de fmi (graine 0) :
+- 2 pas de démarrage à chaud pour le champ (cible b0_init), puis 2 pour l'image (cible `averaged_corrected`) ;
+- depuis les mêmes poids initiaux, le démarrage complet (300 pas par réseau), puis 2 pas joints ;
+- deux pas plutôt qu'un, pour exercer les corrections de biais d'Adam et la décroissance cosinus au-delà du premier.
+
+Cas : synthétique 32 × 24 × 16, versionné (réseaux à petites tables, comme au critère 1) ; six plans de P1 aux
+réglages de P1 (`MEDOXIDE_ULF_P1_JOINTE`, hors dépôt, environ 600 Mo par plan).
+
+**Point de départ des pas joints.** Ils partaient d'abord de l'état après 2 pas de démarrage. Le test a échoué sur le
+cas synthétique : terme image à 8,9e-9 de PyTorch avant tout pas, image à 5,3e-9 après le premier pas. Cause : à cet
+état, |u| vaut 0,202 à 1,5e-5 près (écart-type relatif). La variance locale de la LNCC, E[a²] − E[a]², y perd une
+dizaine de chiffres ; PyTorch lui-même bouge de 3 à 5e-10 quand |u| est recalculé par √(re² + im²) au lieu de `abs`.
+Cet état n'arrive jamais dans la méthode, où la boucle jointe part toujours du démarrage complet. Les pas joints partent
+donc des poids exportés par PyTorch après le démarrage complet, ce que permet la lettre du critère (« partant des
+poids exportés de PyTorch ») ; le seuil est inchangé.
+
+- **Cas synthétique (`f64`)** :
+  - démarrage : champ à 8,2e-13, image à 1,3e-16 ; cible de l'image à 6,0e-16 ;
+  - pas joints : termes de la perte à 1,6e-15 au plus, paramètres du champ et de l'image à 2,0e-15 au plus (5,3e-14
+    rapporté au déplacement du pas).
+- **Mutations**, toutes détectées :
+  - ε = 1e-5 (défaut de Burn), β₁ et β₂ en `f32` (2,6e-8), sans correction de biais du premier moment ;
+  - lr des scalaires égal à celui des réseaux, décroissance cosinus décalée d'un pas ;
+  - pénalité des scalaires absente du second `backward`, gradient direct de b0 oublié dans la coupure, poids du
+    lissage 1e-2 au lieu de 1e-4.
