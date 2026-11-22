@@ -4069,6 +4069,7 @@ dependencies = [
 name = "medoxide-ulf"
 version = "0.1.0"
 dependencies = [
+ "burn",
  "hdf5-metno",
  "ndarray 0.17.2",
  "rayon",

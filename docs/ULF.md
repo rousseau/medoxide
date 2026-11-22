@@ -192,7 +192,8 @@ mêmes briques.
 
 ### Conception (validée le 2026-11-22 : opérateur sur CPU à gradient écrit ; `b0_init` lu dans P1, méthode B ensuite)
 
-Crate `medoxide-ulf`, générique en `B: AutodiffBackend`. Les tests tournent sur le backend CPU `flex`, en `f64`
+Crate `medoxide-ulf`, tenseurs de Burn 0.22 (type de device choisi à l'exécution, type flottant donné à chaque
+création de tenseur). Les tests tournent sur le backend CPU `flex`, en `f64`
 et en `f32` ; les calculs tournent sur wgpu (Metal) ou CUDA, en `f32`. Quatre modules :
 
 1. **`inr`** : grille de hachage + MLP.
@@ -278,3 +279,50 @@ Les cas de test sont écrits par un script Python (`scripts/cas_jointe.py`, fmi 
 
 Ordre : 1 → 2 → 3 → 4 → 5. Chaque critère est tenu avant de passer au suivant ; les mutations qui le font échouer
 sont notées.
+
+### Résultat du critère 1 (2026-11-22) : INR à grille de hachage
+
+Module `inr` (`ConfigGrille`, `Encodage`, `InrHachage`, `ChampB0`, `ImageInr`). Cas de test écrits par
+`scripts/cas_inr.py` (fmi `p4/b0-base-lisse`, `inr.py` et `utils_cpr.py` identiques à `cb7174b`) :
+- cas synthétique 9 × 6 × 5, versionné, à petites tables, avec des niveaux denses et des niveaux hachés ;
+- cas aux réglages de P1 sur 115 × 115 × 45 (1,4 Go, hors dépôt, sans donnée de sujet ; `MEDOXIDE_ULF_INR`).
+
+Les tables sont tirées dans [−1, 1] pour que la sortie varie vraiment.
+
+- **Indices de table** : identiques à ceux de PyTorch, entier pour entier, sur tous les niveaux des deux cas.
+- **Coordonnées** : identiques bit pour bit. `torch.linspace` calcule chaque valeur en une multiplication-addition
+  fusionnée (FMA, un seul arrondi), sur CPU arm64, CPU x86_64 et CUDA (vérifié pour n = 2 à 299). Sans FMA, 3 valeurs
+  sur 45 diffèrent d'un ulp, et le test des coordonnées échoue sur le cas P1.
+- **`f64` (CPU)** :
+  - sorties à 3,6e-15 (synthétique) et 1,1e-15 (P1) ;
+  - gradients à 3,3e-14 et 4,6e-12.
+- **`f32`** :
+  - synthétique : sorties à 8,1e-7 et gradients à 4,0e-6 sur CPU, sous les seuils initiaux (wgpu : 2,1e-6 et 4,4e-6) ;
+  - P1, CPU / wgpu (Metal) :
+    - B0 à 6,1e-7 / 9,9e-7 (PyTorch `f32` : 1,4e-6) ;
+    - image à 5,5e-8 (PyTorch `f32` : 1,6e-3, ses coordonnées `f32` perdant la fraction aux niveaux fins) ;
+    - gradients à 9,9e-3 / 1,0e-2 au plus, au niveau de PyTorch `f32` ou en dessous pour chaque paramètre.
+- **Amendement du critère `f32`** (2026-11-22, déclaré après le premier dépassement, avant les corrections) : en `f32`,
+  chaque sortie et chaque gradient doit être sous le seuil initial **ou** sous deux fois l'écart de PyTorch `f32` au
+  float64 sur le même cas (mesuré par le script), le plus grand des deux. Les seuils initiaux (1e-6, 1e-5) sont
+  intenables aux réglages de P1 pour deux raisons :
+  - le gradient du biais final du champ est une compensation presque complète, parce que le centrage rend B0 presque
+    insensible à un décalage uniforme : κ = Σ|termes| / |somme| = 9,5e5, soit κ · u ≈ 6e-2 en `f32` ;
+  - PyTorch `f32` lui-même s'écarte de 1,1e-2 sur ce biais, et jusqu'à 11 % sur les gradients de l'image.
+- **Trois corrections numériques en route**, chacune mesurée :
+  - (a) **sommes à deux niveaux** : moyennes du champ (B0 en `f32` : 8,8e-5 → 6,1e-7) et diffusion des scalaires en deux
+    étapes (gradient de l'offset : 1,0e-5 → 2,5e-7). Au retour d'une diffusion, Burn somme le gradient en une seule
+    boucle par valeur diffusée, sur CPU comme sur GPU ;
+  - (b) **MLP par blocs de 1 024 points** (produit matriciel par lots, points complétés par des points fictifs de poids
+    nul) : les gradients des poids et des biais se somment aussi à deux niveaux (gradient des poids de la dernière
+    couche du champ : 4,0e-5 → 1,6e-5, PyTorch 1,9e-5) ;
+  - (c) **contournement d'un défaut de `burn-autodiff` 0.22.1** : au retour, `float_div_scalar` calcule l'inverse du
+    diviseur en `f32`, même pour un tenseur `f64` (gradient limité à environ 1e-8 relatif). On multiplie donc par
+    l'inverse.
+- **Mutations** :
+  - font échouer le test : permutation des nombres premiers du hachage, pas dense transposé, décalage + 0,5 retiré,
+    ordre des coins inversé, dénominateur du champ non détaché, `linspace` sans FMA (cas P1) ;
+  - équivalente : le masque 32 bits du hachage, puisqu'une table hachée a toujours une taille en puissance de 2 et
+    que le modulo ne garde que les bits bas.
+- **Mémoire** (cas P1) : l'encodage précalculé de l'image tient environ 0,6 Go en `f32` (indices et poids), comme
+  prévu.

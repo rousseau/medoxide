@@ -10,7 +10,12 @@ rustfft = "6.4"
 ndarray = { workspace = true }
 # Lignes de lecture traitées en parallèle.
 rayon = { workspace = true }
+# INR (grille de hachage + MLP) et pertes de l'estimation jointe, avec gradients ; `flex` : backend CPU (tests, f64).
+burn = { workspace = true, features = ["autodiff", "optim", "flex"] }
 
 [dev-dependencies]
 # Lecture des cas de test (HDF5 écrits par h5py, complexes compris) ; déjà dans le workspace (medoxide-ismrmrd).
 hdf5 = { package = "hdf5-metno", version = "0.15", features = ["static", "complex"] }
+
+[features]
+cuda = ["burn/cuda"]

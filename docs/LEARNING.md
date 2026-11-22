@@ -1667,6 +1667,27 @@ de l'évaluation finale deviennent : PSNR ≥ 26,5 dB (borne haute − 1,5 dB) e
   et unitaires : ces tests passent, seule la parité avec fmi échoue. Il faut les deux.
 - **Où** : `crates/medoxide-ulf/src/cpr.rs`, `crates/medoxide-ulf/tests/parite.rs`, `scripts/cas_cpr.py`, `docs/ULF.md`.
 
+## 2026-11-22 — Reproduire PyTorch au bit près, et les sommes en `f32`
+
+- **Quoi (concept)** : une grille de hachage multi-résolution (Instant-NGP) range des vecteurs de caractéristiques aux
+  sommets de grilles de plus en plus fines ; un point lit les 8 sommets de sa cellule à chaque niveau, interpolés en
+  trilinéaire, puis un petit MLP les combine. Quand la grille fine a trop de sommets, l'indice du sommet est haché
+  (produits par des nombres premiers, XOR, modulo la taille de la table). Ici les points sont toujours les mêmes (les
+  voxels) : indices et poids se calculent une fois, sur CPU, en entiers 64 bits et en `f64`.
+- **Quoi (méthode)** : pour retrouver les mêmes indices que PyTorch, il faut les mêmes coordonnées au bit près ; or
+  `torch.linspace` calcule chaque valeur en une multiplication-addition fusionnée (`f64::mul_add` en Rust), sur CPU
+  comme sur CUDA. Pour trouver la formule, on a comparé plusieurs candidates à PyTorch sur 298 tailles.
+- **Quoi (méthode, précision)** : en `f32`, une somme séquentielle de n termes accumule une erreur en n · ε. Au retour
+  d'une diffusion (un scalaire ajouté à 595 125 voxels), Burn somme le gradient ainsi, sur CPU comme sur GPU ; une
+  diffusion en deux étapes (1 → blocs → points) le ramène à deux sommes courtes. Le seuil d'un test `f32` doit tenir
+  compte du conditionnement κ = Σ|termes| / |somme| : on mesure ce que fait PyTorch `f32` sur le même cas, et l'on se
+  compare à lui.
+- **Quoi (outil)** : en Burn 0.22, le type flottant se donne à la création de chaque tenseur
+  (`Tensor::from_data(données, (&device, DType::F64))`) ; sans lui, les données sont converties dans le type par défaut
+  du device (`f32`). Au retour, `burn-autodiff` 0.22.1 calcule l'inverse d'un diviseur scalaire en `f32` : multiplier
+  par l'inverse plutôt que diviser.
+- **Où** : `crates/medoxide-ulf/src/inr.rs`, `crates/medoxide-ulf/tests/inr.rs`, `scripts/cas_inr.py`, `docs/ULF.md`.
+
 ---
 
 *(à compléter à la prochaine étape)*
