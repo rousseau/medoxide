@@ -5,6 +5,7 @@
 pub mod cpr;
 pub mod inr;
 pub mod jointe;
+pub mod operateur;
 pub mod pertes;
 
 pub use cpr::{ModeleCpr, Reel};

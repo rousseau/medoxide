@@ -22,6 +22,7 @@ use rustfft::num_complex::{Complex, Complex64};
 
 use crate::cpr::{ModeleCpr, Reel};
 use crate::inr::{diffuser, moyenne};
+use crate::operateur::{Complexe, OperateurCpr};
 
 /// Fenêtre gaussienne de la LNCC (mm), `compare_methods.LNCC_SIGMA_MM`.
 pub const SIGMA_LNCC_MM: f64 = 4.0;
@@ -124,10 +125,6 @@ pub fn depuis_tenseur<T: Reel>(t: Tensor<3>) -> Array3<T> {
     Array3::from_shape_vec((n0, n1, n2), v.into_iter().map(|x| T::from_f64(x).unwrap()).collect()).unwrap()
 }
 
-fn complexe<T: Reel>(re: Array3<T>, im: Array3<T>) -> Array3<Complex<T>> {
-    Zip::from(&re).and(&im).map_collect(|r, i| Complex::new(*r, *i))
-}
-
 fn module(re: Tensor<3>, im: Tensor<3>) -> Tensor<3> {
     (re.clone() * re + im.clone() * im).sqrt()
 }
@@ -139,7 +136,10 @@ fn aplatir(x: Tensor<3>) -> Tensor<1> {
 
 /// Données d'une paire reg / inv, préparées une fois : modèle, k-space normalisés, magnitudes observées, masque.
 pub struct Donnees<T: Reel> {
+    /// Modèle CPR sur CPU (référence ; cible du démarrage à chaud de l'image).
     pub modele: ModeleCpr<T>,
+    /// Modèle CPR sur le dispositif, utilisé par les pertes et la coupure (docs/ULF.md, P4 ter).
+    pub operateur: OperateurCpr,
     pub dims: [usize; 3],
     /// Facteur de normalisation (`data_scale`) : maximum des |F⁻¹ k| de reg et inv.
     pub echelle: f64,
@@ -149,6 +149,8 @@ pub struct Donnees<T: Reel> {
     pub masque: Array3<bool>,
     device: Device,
     dtype: DType,
+    k_reg_d: Complexe<3>,
+    k_inv_d: Complexe<3>,
     obs_reg: Tensor<3>,
     obs_inv: Tensor<3>,
     hors_support: Tensor<3>,
@@ -200,12 +202,22 @@ impl<T: Reel> Donnees<T> {
                 (device, dtype),
             )
         });
+        let sur_disp = |k: &Array3<Complex<T>>| {
+            Complexe::new(
+                vers_tenseur(&k.mapv(|z| z.re), device, dtype),
+                vers_tenseur(&k.mapv(|z| z.im), device, dtype),
+            )
+        };
+        let (k_reg_d, k_inv_d) = (sur_disp(&k_reg), sur_disp(&k_inv));
         Self {
             modele,
+            operateur: OperateurCpr::new(dims, temps, device, dtype),
             dims,
             echelle,
             k_reg,
             k_inv,
+            k_reg_d,
+            k_inv_d,
             espacement_mm,
             masque,
             device: device.clone(),
@@ -264,30 +276,29 @@ pub struct Termes {
 }
 
 /// Feuilles de l'autodiff placées à la sortie du modèle CPR, et ce qu'il faut pour en ramener les gradients.
-pub struct Coupure<T: Reel> {
-    u: Array3<Complex<T>>,
-    b0: Array3<T>,
+pub struct Coupure {
+    u: Complexe<3>,
+    b0: Tensor<3>,
     /// F⁻¹A(+b0)u, F⁻¹A(−b0)u, Aᴴ(+b0)k_reg, Aᴴ(−b0)k_inv : (réel, imaginaire).
     feuilles: [(Tensor<3>, Tensor<3>); 4],
-    atk_reg: Array3<Complex<T>>,
-    atk_inv: Array3<Complex<T>>,
+    atk_reg: Complexe<3>,
+    atk_inv: Complexe<3>,
 }
 
 /// Évalue les termes en (u, b0) (tenseurs de forme `dims`, dans le type de `donnees`) et la coupure du graphe.
-pub fn evaluer<T: Reel>(d: &Donnees<T>, u_re: &Tensor<3>, u_im: &Tensor<3>, b0: &Tensor<3>) -> (Termes, Coupure<T>) {
-    let u = complexe(depuis_tenseur::<T>(u_re.clone()), depuis_tenseur::<T>(u_im.clone()));
-    let b0h = depuis_tenseur::<T>(b0.clone());
-    let moins_b0 = b0h.mapv(|v| -v);
-    let zero = Array3::<T>::zeros(d.dims);
-    let m = &d.modele;
-    let pred_reg = m.adjoint(&m.direct(&u, &b0h), &zero);
-    let pred_inv = m.adjoint(&m.direct(&u, &moins_b0), &zero);
-    let (c_reg, atk_reg) = m.adjoint_et_pondere(&d.k_reg, &b0h);
-    let (c_inv, atk_inv) = m.adjoint_et_pondere(&d.k_inv, &moins_b0);
-    let feuille = |z: &Array3<Complex<T>>| {
+pub fn evaluer<T: Reel>(d: &Donnees<T>, u_re: &Tensor<3>, u_im: &Tensor<3>, b0: &Tensor<3>) -> (Termes, Coupure) {
+    let op = &d.operateur;
+    let u = Complexe::new(u_re.clone(), u_im.clone()).detach();
+    let b0d = b0.clone().detach();
+    let moins_b0 = b0d.clone().neg();
+    let pred_reg = op.transformee_inverse(&op.direct(&u, &b0d));
+    let pred_inv = op.transformee_inverse(&op.direct(&u, &moins_b0));
+    let (c_reg, atk_reg) = op.adjoint_et_pondere(&d.k_reg_d, &b0d);
+    let (c_inv, atk_inv) = op.adjoint_et_pondere(&d.k_inv_d, &moins_b0);
+    let feuille = |z: &Complexe<3>| {
         (
-            vers_tenseur(&z.mapv(|c| c.re), &d.device, d.dtype).require_grad(),
-            vers_tenseur(&z.mapv(|c| c.im), &d.device, d.dtype).require_grad(),
+            z.re.clone().detach().require_grad(),
+            z.im.clone().detach().require_grad(),
         )
     };
     let feuilles = [feuille(&pred_reg), feuille(&pred_inv), feuille(&c_reg), feuille(&c_inv)];
@@ -321,7 +332,7 @@ pub fn evaluer<T: Reel>(d: &Donnees<T>, u_re: &Tensor<3>, u_im: &Tensor<3>, b0: 
         termes,
         Coupure {
             u,
-            b0: b0h,
+            b0: b0d,
             feuilles,
             atk_reg,
             atk_inv,
@@ -329,25 +340,27 @@ pub fn evaluer<T: Reel>(d: &Donnees<T>, u_re: &Tensor<3>, u_im: &Tensor<3>, b0: 
     )
 }
 
-impl<T: Reel> Coupure<T> {
+impl Coupure {
     /// Contributions du modèle CPR aux gradients de la perte par rapport à u (complexe, ∂L/∂Re + i ∂L/∂Im) et à b0,
-    /// à ajouter aux gradients que Burn donne directement pour u et b0.
-    pub fn gradients(&self, d: &Donnees<T>, grads: &Gradients) -> (Array3<Complex<T>>, Array3<T>) {
+    /// sur le dispositif, à ajouter aux gradients que Burn donne directement pour u et b0.
+    pub fn gradients<T: Reel>(&self, d: &Donnees<T>, grads: &Gradients) -> (Complexe<3>, Tensor<3>) {
         let lire = |f: &(Tensor<3>, Tensor<3>)| {
-            let g = |t: &Tensor<3>| t.grad(grads).map_or_else(|| Array3::zeros(d.dims), depuis_tenseur::<T>);
-            complexe(g(&f.0), g(&f.1))
+            let g = |t: &Tensor<3>| {
+                t.grad(grads)
+                    .map_or_else(|| Tensor::zeros(d.dims, (&d.device, d.dtype)), Tensor::from_inner)
+            };
+            Complexe::new(g(&f.0), g(&f.1))
         };
         let [g_pred_reg, g_pred_inv, g_c_reg, g_c_inv] = self.feuilles.each_ref().map(lire);
-        let m = &d.modele;
-        let zero = Array3::<T>::zeros(d.dims);
-        let moins_b0 = self.b0.mapv(|v| -v);
-        // pred = F⁻¹ y avec F unitaire : ∂L/∂y = F ∂L/∂pred, et F = A(0).
-        let (gu_reg, gb_reg) = m.gradient_direct(&self.u, &self.b0, &m.direct(&g_pred_reg, &zero));
-        let (gu_inv, gb_inv) = m.gradient_direct(&self.u, &moins_b0, &m.direct(&g_pred_inv, &zero));
-        let gc_reg = m.gradient_adjoint_b0(&self.atk_reg, &g_c_reg);
-        let gc_inv = m.gradient_adjoint_b0(&self.atk_inv, &g_c_inv);
+        let op = &d.operateur;
+        let moins_b0 = self.b0.clone().neg();
+        // pred = F⁻¹ y avec F unitaire : ∂L/∂y = F ∂L/∂pred.
+        let (gu_reg, gb_reg) = op.gradient_direct(&self.u, &self.b0, &op.transformee(&g_pred_reg));
+        let (gu_inv, gb_inv) = op.gradient_direct(&self.u, &moins_b0, &op.transformee(&g_pred_inv));
+        let gc_reg = op.gradient_adjoint_b0(&self.atk_reg, &g_c_reg);
+        let gc_inv = op.gradient_adjoint_b0(&self.atk_inv, &g_c_inv);
         // les termes calculés avec −b0 contribuent avec le signe opposé
-        let gb0 = &gb_reg - &gb_inv + &gc_reg - &gc_inv;
-        (&gu_reg + &gu_inv, gb0)
+        let gb0 = gb_reg - gb_inv + gc_reg - gc_inv;
+        (gu_reg.add(&gu_inv), gb0)
     }
 }

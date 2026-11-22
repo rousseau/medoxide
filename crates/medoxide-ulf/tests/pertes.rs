@@ -144,12 +144,14 @@ fn ecarts<T: Reel>(cas: &Cas) -> Vec<[f64; 3]> {
                 .unwrap()[0];
             let grads = t.backward();
             let (gu_op, gb0_op) = coupure.gradients(&d, &grads);
+            let (gu_op_re, gu_op_im) = (depuis_tenseur::<T>(gu_op.re), depuis_tenseur::<T>(gu_op.im));
+            let gb0_op = depuis_tenseur::<T>(gb0_op);
             let direct = |x: &Tensor<3>| {
                 x.grad(&grads)
                     .map_or_else(|| Array3::<T>::zeros(d.dims), depuis_tenseur::<T>)
             };
             let (gre, gim) = (direct(&u_re), direct(&u_im));
-            let gu = Array3::from_shape_fn(d.dims, |i| gu_op[i] + Complex::new(gre[i], gim[i]));
+            let gu = Array3::from_shape_fn(d.dims, |i| Complex::new(gu_op_re[i] + gre[i], gu_op_im[i] + gim[i]));
             let gb0 = &direct(&b0) + &gb0_op;
             let e = [
                 ((v - valeur) / valeur).abs(),

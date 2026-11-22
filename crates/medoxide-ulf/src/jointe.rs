@@ -312,18 +312,14 @@ pub fn pas_joint<T: Reel>(
     let debut = std::time::Instant::now();
     let (gu_op, gb0_op) = coupure.gradients(d, &grads);
     secondes_operateur += debut.elapsed().as_secs_f64();
-    let direct = |x: &Tensor<3>| {
-        x.grad(&grads)
-            .map_or_else(|| Array3::<T>::zeros(dims), depuis_tenseur::<T>)
-    };
-    let g_re = &direct(&f_re) + &gu_op.mapv(|z| z.re);
-    let g_im = &direct(&f_im) + &gu_op.mapv(|z| z.im);
-    let g_b0 = &direct(&f_b0) + &gb0_op;
-    let (device, dtype) = (re.device(), re.dtype());
+    let direct = |x: &Tensor<3>| x.grad(&grads).map(Tensor::from_inner);
+    let plus = |a: Option<Tensor<3>>, b: Tensor<3>| a.map_or_else(|| b.clone(), |a| a + b.clone());
     let n = re.dims()[0];
-    let g = |a: &Array3<T>| vers_tenseur(a, &device, dtype).reshape([n]);
+    let g_re = plus(direct(&f_re), gu_op.re).reshape([n]).detach();
+    let g_im = plus(direct(&f_im), gu_op.im).reshape([n]).detach();
+    let g_b0 = plus(direct(&f_b0), gb0_op).reshape([n]).detach();
     let penalite = champ.penalite_scalaires();
-    let second = (re * g(&g_re)).sum() + (im * g(&g_im)).sum() + (b0 * g(&g_b0)).sum() + penalite.clone() * w.scalaires;
+    let second = (re * g_re).sum() + (im * g_im).sum() + (b0 * g_b0).sum() + penalite.clone() * w.scalaires;
     let grads2 = second.backward();
     let bilan = Bilan {
         fidelite: scalaire(fidelite),
