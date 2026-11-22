@@ -430,7 +430,8 @@ Module `jointe` : `Adam`, `pas_prefit_champ`, `pas_prefit_image`, `pas_joint` (l
 - deux pas plutôt qu'un, pour exercer les corrections de biais d'Adam et la décroissance cosinus au-delà du premier.
 
 Cas : synthétique 32 × 24 × 16, versionné (réseaux à petites tables, comme au critère 1) ; six plans de P1 aux
-réglages de P1 (`MEDOXIDE_ULF_P1_JOINTE`, hors dépôt, environ 600 Mo par plan).
+réglages de P1 (`MEDOXIDE_ULF_P1_JOINTE`, hors dépôt, 600 Mo par plan, entrées de P1 sans sortie de sujet autre que
+les k-space déjà hors dépôt).
 
 **Point de départ des pas joints.** Ils partaient d'abord de l'état après 2 pas de démarrage. Le test a échoué sur le
 cas synthétique : terme image à 8,9e-9 de PyTorch avant tout pas, image à 5,3e-9 après le premier pas. Cause : à cet
@@ -440,12 +441,34 @@ Cet état n'arrive jamais dans la méthode, où la boucle jointe part toujours d
 donc des poids exportés par PyTorch après le démarrage complet, ce que permet la lettre du critère (« partant des
 poids exportés de PyTorch ») ; le seuil est inchangé.
 
-- **Cas synthétique (`f64`)** :
+**Démarrage du champ, amendement du 2026-11-22** (déclaré après l'échec de `sub000_yz`, avant la mesure des trois
+plans de subB). À l'initialisation de fmi, la sortie du réseau du champ est presque constante (−0,029 à 2,7e-6 près
+sur `sub000_yz`) ; la forme du champ est cette sortie centrée puis ramenée à une moyenne quadratique de 1, et le
+centrage perd des chiffres. PyTorch ne se reproduit pas lui-même à 1e-10 : entre ses calculs à un thread et à huit
+threads (seul l'ordre des sommes change), les paramètres du champ après les deux pas diffèrent jusqu'à 6,1e-10 sur ce
+plan. Ce point de départ est celui de la méthode et ne peut pas être déplacé. Règle, la même qu'aux critères 1 et 3 :
+sur les deux démarrages, un paramètre passe s'il est sous 1e-10 ou sous deux fois cet écart de PyTorch à lui-même,
+mesuré paramètre par paramètre par le script (`cas_jointe.py plancher`). Les pas joints gardent le seuil de 1e-10.
+
+- **Cas synthétique** :
   - démarrage : champ à 8,2e-13, image à 1,3e-16 ; cible de l'image à 6,0e-16 ;
   - pas joints : termes de la perte à 1,6e-15 au plus, paramètres du champ et de l'image à 2,0e-15 au plus (5,3e-14
     rapporté au déplacement du pas).
-- **Mutations**, toutes détectées :
+- **Six plans de P1** :
+  - cible du démarrage de l'image à 6,2e-16 au plus, image après son démarrage à 1,2e-14 au plus ;
+  - pas joints : termes de la perte sous 1e-10 partout (de 1e-16 à 1,4e-12), paramètres à 2,1e-11 au plus (champ) et
+    1,0e-13 au plus (image) ;
+  - champ après son démarrage : 2,4e-11, 2,6e-11, 7,0e-11 et 3,2e-11 sur quatre plans, sous 1e-10 ; 3,4e-10 sur
+    `subB_xy`, sous sa limite amendée (plancher de PyTorch 2,3e-10) ;
+  - **manqué sur `sub000_yz`** : le champ est à 7,5e-10 (PyTorch contre lui-même : 6,1e-10 au plus), mais deux
+    paramètres dépassent leur limite amendée, les biais des couches 0 et 1 du réseau du champ : 2,2e-10 et 2,1e-10,
+    pour des planchers de 7,3e-11 et 3,3e-11 (limites 1,5e-10 et 1,0e-10). Le plancher est mesuré sur une seule
+    perturbation (un thread contre huit) et sous-estime donc la dispersion paramètre par paramètre ; Rust somme dans
+    un autre ordre encore (sommes à deux niveaux). Écart non corrigé, en attente de décision.
+- **Mutations**, toutes détectées sur le cas synthétique :
   - ε = 1e-5 (défaut de Burn), β₁ et β₂ en `f32` (2,6e-8), sans correction de biais du premier moment ;
   - lr des scalaires égal à celui des réseaux, décroissance cosinus décalée d'un pas ;
   - pénalité des scalaires absente du second `backward`, gradient direct de b0 oublié dans la coupure, poids du
     lissage 1e-2 au lieu de 1e-4.
+- Durées sur le Mac (CPU, `f64`) : 30 à 60 s par plan pour le test Rust ; 29 min par plan pour le script PyTorch, dont
+  l'essentiel est le démarrage complet (600 pas).

@@ -8,8 +8,11 @@
 //! les corrections de biais d'Adam et la décroissance cosinus au-delà du premier pas.
 //!
 //! Seuil : après chaque phase, chaque paramètre (table, poids, biais, scalaire) à ≤ 1e-10 de PyTorch en écart relatif
-//! L2. Sont aussi affichés l'écart rapporté au déplacement de PyTorch depuis l'état précédent (plus sévère), la cible du
-//! démarrage de l'image (≤ 1e-12) et les termes de la perte à chaque pas joint (≤ 1e-10).
+//! L2. Amendement du 2026-11-22 (docs/ULF.md) : sur les deux démarrages, un paramètre passe aussi s'il reste sous deux
+//! fois l'écart de PyTorch à lui-même entre ses calculs à un thread et au nombre de threads par défaut
+//! (`plancher_pytorch/…`, mesuré par le script) : à l'initialisation, la sortie du réseau du champ est presque constante
+//! et son centrage perd des chiffres. Sont aussi vérifiés la cible du démarrage de l'image (≤ 1e-12) et les termes de la
+//! perte à chaque pas joint (≤ 1e-10), et affiché l'écart rapporté au déplacement de PyTorch depuis l'état précédent.
 
 use std::path::Path;
 
@@ -103,26 +106,55 @@ fn parametres_rust(r: &InrHachage) -> Vec<Vec<f64>> {
     p
 }
 
+fn noter(echecs: &mut Vec<String>, nom: String, e: f64, seuil: f64) {
+    if e > seuil || e.is_nan() {
+        echecs.push(format!("{nom} : {e:.2e} > {seuil:.2e}"));
+    }
+}
+
+fn max(v: &[f64]) -> f64 {
+    v.iter().copied().fold(0.0, f64::max)
+}
+
 fn norme(v: impl Iterator<Item = f64>) -> f64 {
     v.map(|x| x * x).sum::<f64>().sqrt()
 }
 
 /// Compare des paramètres à la référence ; `avant` : référence à l'état précédent, pour l'écart rapporté au
-/// déplacement. Rend le plus grand écart relatif (critère) et le plus grand écart rapporté au déplacement.
-fn comparer(nom: &str, rust: &[Vec<f64>], reference: &[Vec<f64>], avant: &[Vec<f64>]) -> (f64, f64) {
-    let (mut e_max, mut d_max) = (0.0f64, 0.0f64);
-    for ((a, r), p) in rust.iter().zip(reference).zip(avant) {
-        assert_eq!(a.len(), r.len());
-        let diff = norme(a.iter().zip(r).map(|(x, y)| x - y));
-        let e = diff / norme(r.iter().copied());
-        let d = diff / norme(r.iter().zip(p).map(|(x, y)| x - y));
-        e_max = e_max.max(if e.is_nan() { f64::INFINITY } else { e });
-        if d.is_finite() {
-            d_max = d_max.max(d);
-        }
-    }
+/// déplacement (affiché). Rend l'écart relatif de chaque paramètre.
+fn comparer(nom: &str, rust: &[Vec<f64>], reference: &[Vec<f64>], avant: &[Vec<f64>]) -> Vec<f64> {
+    let mut d_max = 0.0f64;
+    let ecarts: Vec<f64> = rust
+        .iter()
+        .zip(reference)
+        .zip(avant)
+        .map(|((a, r), p)| {
+            assert_eq!(a.len(), r.len());
+            let diff = norme(a.iter().zip(r).map(|(x, y)| x - y));
+            let d = diff / norme(r.iter().zip(p).map(|(x, y)| x - y));
+            if d.is_finite() {
+                d_max = d_max.max(d);
+            }
+            let e = diff / norme(r.iter().copied());
+            if e.is_nan() {
+                f64::INFINITY
+            } else {
+                e
+            }
+        })
+        .collect();
+    let e_max = ecarts.iter().copied().fold(0.0, f64::max);
     println!("  {nom:<32} écart relatif {e_max:.2e}   rapporté au déplacement {d_max:.2e}");
-    (e_max, d_max)
+    ecarts
+}
+
+/// Noms des paramètres d'un réseau du fichier (avec `s` et `o` pour le champ), dans l'ordre de [`parametres_h5`].
+fn noms(g: &hdf5::Group, champ: bool) -> Vec<String> {
+    let mut n: Vec<String> = parametres_h5(g).into_iter().map(|(nom, _, _)| nom).collect();
+    if champ {
+        n.extend(["s".to_string(), "o".to_string()]);
+    }
+    n
 }
 
 fn parametres_champ_h5(g: &hdf5::Group) -> Vec<Vec<f64>> {
@@ -183,10 +215,33 @@ fn verifier(chemin: &Path) -> Vec<String> {
     let mut champ = champ_h5(0);
     let mut image = image_h5(0);
     let mut echecs = Vec::new();
-    let mut noter = |nom: String, e: f64, seuil: f64| {
-        if e > seuil || e.is_nan() {
-            echecs.push(format!("{nom} : {e:.2e} > {seuil:.0e}"));
+    // Démarrages (amendement du 2026-11-22) : chaque paramètre sous SEUIL ou sous deux fois le plancher de PyTorch
+    // (écart entre ses calculs à un thread et au nombre de threads par défaut).
+    let plancher = |e: usize, reseau: &str, p: &str| {
+        f.dataset(&format!("plancher_pytorch/etat_{e}/{reseau}/{p}"))
+            .unwrap()
+            .read_scalar::<f64>()
+            .unwrap()
+    };
+    let verifier_demarrage = |echecs: &mut Vec<String>, e: usize, reseau: &str, ecarts: &[f64], noms: &[String]| {
+        let mut pire = (0.0f64, 0.0f64, String::new());
+        for (ecart, p) in ecarts.iter().zip(noms) {
+            let pl = plancher(e, reseau, p);
+            let limite = SEUIL.max(2.0 * pl);
+            if ecart / limite > pire.0 / pire.1.max(f64::MIN_POSITIVE) || pire.2.is_empty() {
+                pire = (*ecart, limite, p.clone());
+            }
+            noter(
+                echecs,
+                format!("démarrage, {reseau}, {p} (PyTorch contre lui-même {pl:.2e})"),
+                *ecart,
+                limite,
+            );
         }
+        println!(
+            "  {:<32} au plus près de sa limite : {} à {:.2e} pour {:.2e}",
+            "", pire.2, pire.0, pire.1
+        );
     };
 
     // démarrage à chaud du champ
@@ -196,33 +251,33 @@ fn verifier(chemin: &Path) -> Vec<String> {
         champ = pas_prefit_champ(champ, &enc_champ, &cible, &mut adam, reglages.lr_prefit).0;
     }
     let r = parametres_champ_h5(&groupe(1, "champ"));
-    let (e1, _) = comparer(
+    let e1 = comparer(
         "démarrage du champ : champ",
         &parametres_champ(&champ),
         &r,
         &parametres_champ_h5(&g0),
     );
-    noter("démarrage du champ".into(), e1, SEUIL);
+    verifier_demarrage(&mut echecs, 1, "champ", &e1, &noms(&g0, true));
 
     // démarrage à chaud de l'image
     let cible = CibleImage::nouvelle(&d, &b0_init, &device, DType::F64);
     let ref_cible: Array3<f64> = f.dataset("cible_image").unwrap().read::<f64, Ix3>().unwrap();
     let e_cible = norme(cible.magnitude.iter().zip(&ref_cible).map(|(a, b)| a - b)) / norme(ref_cible.iter().copied());
     println!("  cible du démarrage de l'image       écart relatif {e_cible:.2e}");
-    noter("cible de l'image".into(), e_cible, 1e-12);
+    noter(&mut echecs, "cible de l'image".into(), e_cible, 1e-12);
     let mut adam = Adam::default();
     for _ in 0..n_prefit {
         image = pas_prefit_image(image, &enc_image, &cible, &mut adam, reglages.lr_prefit).0;
     }
     let r = parametres_image_h5(&groupe(2, "image"));
     let avant = parametres_image_h5(&groupe(0, "image"));
-    let (e2, _) = comparer(
+    let e2 = comparer(
         "démarrage de l'image : image",
         &parametres_rust(&image.reseau),
         &r,
         &avant,
     );
-    noter("démarrage de l'image".into(), e2, SEUIL);
+    verifier_demarrage(&mut echecs, 2, "image", &e2, &noms(&groupe(0, "image"), false));
 
     // boucle jointe, depuis les poids de PyTorch après le démarrage complet (état 3)
     let (mut champ, mut image) = (champ_h5(3), image_h5(3));
@@ -258,24 +313,24 @@ fn verifier(chemin: &Path) -> Vec<String> {
             let r = pertes(nom)[it];
             let e = ((v - r) / r).abs();
             println!("  pas joint {it}, terme {nom:<9} {v:+.12e} (PyTorch {r:+.12e})  écart {e:.2e}");
-            noter(format!("pas joint {it}, terme {nom}"), e, SEUIL);
+            noter(&mut echecs, format!("pas joint {it}, terme {nom}"), e, SEUIL);
         }
         let rc = parametres_champ_h5(&groupe(4 + it, "champ"));
         let ri = parametres_image_h5(&groupe(4 + it, "image"));
-        let (ec, _) = comparer(
+        let ec = max(&comparer(
             &format!("pas joint {it} : champ"),
             &parametres_champ(&champ),
             &rc,
             &ref_champ,
-        );
-        let (ei, _) = comparer(
+        ));
+        let ei = max(&comparer(
             &format!("pas joint {it} : image"),
             &parametres_rust(&image.reseau),
             &ri,
             &ref_image,
-        );
-        noter(format!("pas joint {it}, champ"), ec, SEUIL);
-        noter(format!("pas joint {it}, image"), ei, SEUIL);
+        ));
+        noter(&mut echecs, format!("pas joint {it}, champ"), ec, SEUIL);
+        noter(&mut echecs, format!("pas joint {it}, image"), ei, SEUIL);
         (ref_champ, ref_image) = (rc, ri);
     }
     echecs

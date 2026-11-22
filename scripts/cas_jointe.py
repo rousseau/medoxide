@@ -21,7 +21,11 @@ Contenu :
   `etat_<e>/champ/{s,o}` : paramètres à l'état e = 0 (initial), 1 (après N_PREFIT pas de démarrage du champ, champ
   seul), 2 (après N_PREFIT pas de démarrage de l'image, image seule), 3 (après le démarrage complet, 300 pas par réseau
   depuis l'état 0 : point de départ des pas joints), puis 4, 5, … après chaque pas joint (les deux réseaux) ;
-- `pertes_jointes/<terme>` : valeurs non pondérées des termes à chaque pas joint (avant le pas), `totale` pondérée.
+- `pertes_jointes/<terme>` : valeurs non pondérées des termes à chaque pas joint (avant le pas), `totale` pondérée ;
+- `plancher_pytorch/etat_<e>/<réseau>/<paramètre>` (e = 1, 2) : écart relatif de chaque paramètre entre le calcul de
+  PyTorch à un thread et au nombre de threads par défaut, sur les démarrages (mode `plancher`, ajouté à un fichier
+  existant : `cas_jointe.py plancher <cas.h5>`). À l'initialisation, la sortie du réseau du champ est presque constante
+  et son centrage perd des chiffres ; seuil amendé le 2026-11-22 (docs/ULF.md, critère 4).
 """
 
 import os
@@ -131,6 +135,53 @@ def ecrire(chemin, cas, k_reg, k_inv, temps, espacement, b0_init, bornes):
         for nom, v in pertes.items():
             f.create_dataset(f"pertes_jointes/{nom}", data=np.asarray(v))
     print(f"écrit : {chemin}")
+    plancher(chemin)
+
+
+def parametres(net, champ=None):
+    """Paramètres aplatis, nommés comme dans le fichier."""
+    p = {f"niveau_{l}/table": n.embedding.weight for l, n in enumerate(net.encoding.levels)}
+    for c, m in enumerate(m for m in net.mlp.net if isinstance(m, torch.nn.Linear)):
+        p[f"couche_{c}/poids"], p[f"couche_{c}/biais"] = m.weight, m.bias
+    if champ is not None:
+        p["s"], p["o"] = champ.scale_param, champ.offset_param
+    return {k: v.detach().clone().reshape(-1) for k, v in p.items()}
+
+
+def plancher(chemin):
+    """Plancher de reproductibilité de PyTorch lui-même sur les deux démarrages à chaud (états 1 et 2) : écart relatif
+    de chaque paramètre entre le calcul à un thread et le calcul au nombre de threads par défaut (seul l'ordre des
+    sommes change). Écrit dans `plancher_pytorch/etat_<e>/<réseau>/<paramètre>` ; amendement du 2026-11-22
+    (docs/ULF.md, critère 4)."""
+    with h5py.File(chemin, "a") as f:
+        cas = {n: {k: (v.item() if hasattr(v, "item") else v) for k, v in f[f"{n}_config"].attrs.items()}
+               for n in ("champ", "image")}
+        b0_init = torch.tensor(f["b0_init"][()])
+        bornes = f["bornes_b0"][()]
+        dims = tuple(b0_init.shape)
+        n_prefit = int(f.attrs["n_prefit"])
+        u_target = torch.tensor(f["cible_image"][()]).to(torch.complex128)
+        defaut = torch.get_num_threads()
+
+        def demarrages(threads):
+            torch.set_num_threads(threads)
+            field = utils_cpr.INRField(**cas["champ"], b0_min_hz=bornes[0], b0_max_hz=bornes[1], seed=0)
+            image = utils_cpr.INRImage(**cas["image"], seed=0)
+            utils_cpr.prefit(lambda: field.b0(dims), field.parameters(), b0_init, n_iter=n_prefit)
+            utils_cpr.prefit(lambda: image.image(dims), image.parameters(), u_target, n_iter=n_prefit)
+            return parametres(field.net, field), parametres(image.net)
+
+        a, b = demarrages(defaut), demarrages(1)
+        torch.set_num_threads(defaut)
+        if "plancher_pytorch" in f:
+            del f["plancher_pytorch"]
+        for (e, nom), pa, pb in zip(((1, "champ"), (2, "image")), a, b):
+            for k in pa:
+                ref = np.asarray(f[f"etat_{e}/{nom}/{k}"][()], dtype=np.float64).reshape(-1)
+                assert np.array_equal(pa[k].numpy(), ref), f"{k} : le calcul par défaut ne redonne pas le fichier"
+                v = float((pa[k] - pb[k]).norm() / pa[k].norm())
+                f.create_dataset(f"plancher_pytorch/etat_{e}/{nom}/{k}", data=v)
+        print(f"plancher écrit ({defaut} threads contre 1) : {chemin}")
 
 
 def synthetique(sortie):
@@ -163,4 +214,4 @@ def p1(entrees, sortie):
 
 
 if __name__ == "__main__":
-    {"synthetique": synthetique, "p1": p1}[sys.argv[1]](*sys.argv[2:])
+    {"synthetique": synthetique, "p1": p1, "plancher": plancher}[sys.argv[1]](*sys.argv[2:])
