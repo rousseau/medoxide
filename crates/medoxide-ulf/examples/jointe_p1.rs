@@ -2,7 +2,7 @@
 //! (300 pas par réseau) puis 200 pas joints, réseaux initialisés par Burn.
 //!
 //!     cargo run --release -p medoxide-ulf --example jointe_p1 [--features cuda] -- \
-//!         <entrées.h5> <sortie.h5> [--dispositif cpu|wgpu|cuda] [--f64] [--graine n]
+//!         <entrées.h5> <sortie.h5> [--dispositif cpu|wgpu|cuda] [--f64] [--graine n] [--poids <cas_jointe.h5>]
 //!
 //! Entrées (HDF5, écrites par `scripts/cas_jointe.py entrees`) : `k_reg`, `k_inv` (complexes bruts), `temps`,
 //! `espacement_mm`, `b0_init` (champ de départ), `bornes_b0`. Sortie : `b0_hz`, `u` (complexe, à l'échelle des
@@ -27,6 +27,8 @@ struct Options {
     dispositif: String,
     f64: bool,
     graine: u64,
+    /// Poids initiaux lus dans un cas de `scripts/cas_jointe.py p1` (état 0, initialisation de fmi) au lieu de Burn.
+    poids: Option<String>,
 }
 
 fn options() -> Options {
@@ -37,12 +39,14 @@ fn options() -> Options {
         dispositif: "cpu".into(),
         f64: false,
         graine: 0,
+        poids: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dispositif" => o.dispositif = args.next().expect("cpu, wgpu ou cuda"),
             "--f64" => o.f64 = true,
             "--graine" => o.graine = args.next().expect("graine").parse().expect("entier"),
+            "--poids" => o.poids = Some(args.next().expect("cas.h5")),
             _ => panic!("option inconnue : {a}"),
         }
     }
@@ -57,6 +61,34 @@ fn dispositif(nom: &str) -> Device {
         "cuda" => Device::cuda(0).autodiff(),
         _ => panic!("dispositif {nom} indisponible (cuda : compiler avec --features cuda)"),
     }
+}
+
+/// Réseau au format de `cas_jointe.py` (tables, couches au format PyTorch).
+fn lire_reseau(g: &hdf5::Group, device: &Device, dtype: DType) -> InrHachage {
+    let lire = |nom: &str| {
+        let d = g.dataset(nom).unwrap();
+        (d.read_raw::<f64>().unwrap(), d.shape())
+    };
+    let compter = |prefixe: &str| {
+        g.member_names()
+            .unwrap()
+            .iter()
+            .filter(|n| n.starts_with(prefixe))
+            .count()
+    };
+    let tables = (0..compter("niveau_"))
+        .map(|l| {
+            let (v, f) = lire(&format!("niveau_{l}/table"));
+            (v, [f[0], f[1]])
+        })
+        .collect();
+    let couches = (0..compter("couche_"))
+        .map(|c| {
+            let (w, f) = lire(&format!("couche_{c}/poids"));
+            (w, [f[0], f[1]], lire(&format!("couche_{c}/biais")).0)
+        })
+        .collect();
+    InrHachage::depuis_poids(tables, couches, device, dtype)
 }
 
 fn lancer<T: Reel>(o: &Options, dtype: DType) {
@@ -76,14 +108,21 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     let (cfg_champ, cfg_image) = (ConfigGrille::champ_p1(), ConfigGrille::image_p1());
     let enc_champ = Encodage::nouveau(&cfg_champ, dims, &device, dtype);
     let enc_image = Encodage::nouveau(&cfg_image, dims, &device, dtype);
-    let champ = ChampB0::nouveau(
-        InrHachage::nouveau(&cfg_champ, 1, 64, 2, &device, dtype),
-        bornes[0],
-        bornes[1],
-    );
-    let image = ImageInr {
-        reseau: InrHachage::nouveau(&cfg_image, 2, 64, 2, &device, dtype),
+    let (reseau_champ, reseau_image) = match &o.poids {
+        Some(cas) => {
+            let f = hdf5::File::open(cas).unwrap();
+            (
+                lire_reseau(&f.group("etat_0/champ").unwrap(), &device, dtype),
+                lire_reseau(&f.group("etat_0/image").unwrap(), &device, dtype),
+            )
+        }
+        None => (
+            InrHachage::nouveau(&cfg_champ, 1, 64, 2, &device, dtype),
+            InrHachage::nouveau(&cfg_image, 2, 64, 2, &device, dtype),
+        ),
     };
+    let champ = ChampB0::nouveau(reseau_champ, bornes[0], bornes[1]);
+    let image = ImageInr { reseau: reseau_image };
     let reglages = Reglages::default();
     let mut debut = Instant::now();
     let r = estimer(
@@ -122,6 +161,7 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     let attr = |nom: &str, v: f64| s.new_attr::<f64>().create(nom).unwrap().write_scalar(&v).unwrap();
     attr("secondes", secondes);
     attr("graine", o.graine as f64);
+    attr("poids_fmi", if o.poids.is_some() { 1.0 } else { 0.0 });
     let texte = |nom: &str, v: &str| {
         let v: hdf5::types::VarLenUnicode = v.parse().unwrap();
         s.new_attr::<hdf5::types::VarLenUnicode>()

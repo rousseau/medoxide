@@ -464,7 +464,8 @@ mesuré paramètre par paramètre par le script (`cas_jointe.py plancher`). Les 
     paramètres dépassent leur limite amendée, les biais des couches 0 et 1 du réseau du champ : 2,2e-10 et 2,1e-10,
     pour des planchers de 7,3e-11 et 3,3e-11 (limites 1,5e-10 et 1,0e-10). Le plancher est mesuré sur une seule
     perturbation (un thread contre huit) et sous-estime donc la dispersion paramètre par paramètre ; Rust somme dans
-    un autre ordre encore (sommes à deux niveaux). Écart non corrigé, en attente de décision.
+    un autre ordre encore (sommes à deux niveaux). Écart accepté par François le 2026-11-22 ; le test le tolère pour ces
+    deux paramètres seulement, plafonné à 3e-10.
 - **Mutations**, toutes détectées sur le cas synthétique :
   - ε = 1e-5 (défaut de Burn), β₁ et β₂ en `f32` (2,6e-8), sans correction de biais du premier moment ;
   - lr des scalaires égal à celui des réseaux, décroissance cosinus décalée d'un pas ;

@@ -27,6 +27,11 @@ use rustfft::num_complex::Complex64;
 
 const SEUIL: f64 = 1e-10;
 
+/// Écarts acceptés le 2026-11-22 (docs/ULF.md, critère 4) : démarrage du champ de `sub000_yz`, deux biais à 2,2e-10 et
+/// 2,1e-10 pour des limites amendées de 1,5e-10 et 1,0e-10. Ils restent plafonnés, pour qu'une régression échoue.
+const ECARTS_ACCEPTES: [(&str, &str); 2] = [("sub000_yz", "couche_0/biais"), ("sub000_yz", "couche_1/biais")];
+const PLAFOND_ACCEPTE: f64 = 3e-10;
+
 fn lire(g: &hdf5::Group, nom: &str) -> (Vec<f64>, Vec<usize>) {
     let d = g.dataset(nom).unwrap();
     (d.read_raw::<f64>().unwrap(), d.shape())
@@ -227,7 +232,11 @@ fn verifier(chemin: &Path) -> Vec<String> {
         let mut pire = (0.0f64, 0.0f64, String::new());
         for (ecart, p) in ecarts.iter().zip(noms) {
             let pl = plancher(e, reseau, p);
-            let limite = SEUIL.max(2.0 * pl);
+            let mut limite = SEUIL.max(2.0 * pl);
+            let plan = chemin.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+            if reseau == "champ" && ECARTS_ACCEPTES.iter().any(|(q, n)| plan == *q && p == n) {
+                limite = limite.max(PLAFOND_ACCEPTE);
+            }
             if ecart / limite > pire.0 / pire.1.max(f64::MIN_POSITIVE) || pire.2.is_empty() {
                 pire = (*ecart, limite, p.clone());
             }
