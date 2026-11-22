@@ -326,3 +326,10 @@ Les tables sont tirées dans [−1, 1] pour que la sortie varie vraiment.
     que le modulo ne garde que les bits bas.
 - **Mémoire** (cas P1) : l'encodage précalculé de l'image tient environ 0,6 Go en `f32` (indices et poids), comme
   prévu.
+- **Plateformes** (cas synthétique, Linux x86_64, RTX) :
+  - `f64` sur CPU : 4,6e-15 et 3,6e-14 ;
+  - `f32` sur CPU : tenu ;
+  - `f32` sur wgpu (Vulkan) et sur CUDA : **un échec strict**, le gradient du biais final du champ, à 1,40e-5 pour une
+    limite de 1,20e-5 (2 × PyTorch `f32`, 6,0e-6). Sur ce même cas, le CPU de la RTX est à 1,19e-5 et celui du Mac à
+    1,75e-6 : sur cette quantité mal conditionnée (κ ≈ 100 sur 270 points), l'écart `f32` est de l'arrondi qui varie
+    d'un matériel à l'autre d'un facteur 8. Noté comme échec, sans second amendement : décision demandée.
