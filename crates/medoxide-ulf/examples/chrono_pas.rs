@@ -18,14 +18,23 @@ fn main() {
         "cuda" => Device::cuda(0).autodiff(),
         _ => Device::flex().autodiff(),
     };
-    let dtype = if args.get(2).is_some_and(|a| a == "f64") { DType::F64 } else { DType::F32 };
+    let dtype = if args.get(2).is_some_and(|a| a == "f64") {
+        DType::F64
+    } else {
+        DType::F32
+    };
     let dims = [115, 115, 45];
     let t = Instant::now();
     let (cc, ci) = (ConfigGrille::champ_p1(), ConfigGrille::image_p1());
-    let (ec, ei) = (Encodage::nouveau(&cc, dims, &device, dtype), Encodage::nouveau(&ci, dims, &device, dtype));
+    let (ec, ei) = (
+        Encodage::nouveau(&cc, dims, &device, dtype),
+        Encodage::nouveau(&ci, dims, &device, dtype),
+    );
     println!("encodages : {:.2} s", t.elapsed().as_secs_f64());
     let mut champ = ChampB0::nouveau(InrHachage::nouveau(&cc, 1, 64, 2, &device, dtype), 12.5, 108.0);
-    let image = ImageInr { reseau: InrHachage::nouveau(&ci, 2, 64, 2, &device, dtype) };
+    let image = ImageInr {
+        reseau: InrHachage::nouveau(&ci, 2, 64, 2, &device, dtype),
+    };
     let cible = CibleChamp::nouvelle(&Array3::from_shape_fn(dims, |(i, _, _)| i as f64), &device, dtype);
     let mut adam = Adam::default();
     for k in 0..4 {
@@ -38,11 +47,19 @@ fn main() {
         let t = Instant::now();
         let (re, im) = image.image(&ei);
         let v = (re.powi_scalar(2) + im.powi_scalar(2)).sum();
-        let s = v.clone().into_data().convert::<f64>().to_vec::<f64>().unwrap()[0];
+        let s = v.clone().into_data().convert::<f64>().try_to_vec::<f64>().unwrap()[0];
         println!("image, avant {k} : {:.3} s ({s:?})", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let g = v.backward();
-        let gt = image.reseau.tables[15].val().grad(&g).unwrap().sum().into_data().convert::<f64>().to_vec::<f64>().unwrap()[0];
+        let gt = image.reseau.tables[15]
+            .val()
+            .grad(&g)
+            .unwrap()
+            .sum()
+            .into_data()
+            .convert::<f64>()
+            .try_to_vec::<f64>()
+            .unwrap()[0];
         println!("image, arrière {k} : {:.3} s ({gt:?})", t.elapsed().as_secs_f64());
     }
 }

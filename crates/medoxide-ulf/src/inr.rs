@@ -159,8 +159,12 @@ pub fn indices_et_poids(niveau: &Niveau, dims: [usize; 3]) -> (Vec<i64>, Vec<f64
 pub struct Encodage {
     /// Dimensions de la grille.
     pub dims: [usize; 3],
-    /// Par niveau : indices (8 · points complétés) et poids (8 · points complétés, 1).
-    niveaux: Vec<(Tensor<1, Int>, Tensor<2>)>,
+    /// Par niveau : indices (8 · points complétés, caractéristiques ; même indice sur chaque colonne) et poids
+    /// (8 · points complétés, 1). Les indices sont répétés par colonne pour lire la table par `gather` plutôt que par
+    /// `select` : au retour, burn-cubecl 0.22.1 somme le gradient de `select` avec un fil par colonne qui parcourt tous
+    /// les indices (38 s par passe pour l'image de P1 sur Metal), celui de `gather` par une addition atomique par valeur
+    /// là où le dispositif la permet (CUDA en `f32`).
+    niveaux: Vec<(Tensor<2, Int>, Tensor<2>)>,
 }
 
 impl Encodage {
@@ -172,8 +176,10 @@ impl Encodage {
                 let (mut indices, mut poids) = indices_et_poids(&config.niveau(l), dims);
                 indices.resize(complet, 0);
                 poids.resize(complet, 0.0);
+                let c = config.n_caracteristiques;
+                let repetes: Vec<i64> = indices.iter().flat_map(|&i| std::iter::repeat_n(i, c)).collect();
                 (
-                    Tensor::from_data(TensorData::new(indices, [complet]), device),
+                    Tensor::from_data(TensorData::new(repetes, [complet, c]), device),
                     Tensor::from_data(TensorData::new(poids, [complet, 1]), (device, dtype)),
                 )
             })
@@ -270,7 +276,7 @@ impl InrHachage {
         let table = self.tables[l].val();
         let n_carac = table.dims()[1];
         let k = encodage.n_blocs();
-        (table.select(0, indices.clone()) * poids.clone())
+        (table.gather(0, indices.clone()) * poids.clone())
             .reshape([k * BLOC, 8, n_carac])
             .sum_dim(1)
             .reshape([k, BLOC, n_carac])
