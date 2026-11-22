@@ -8,7 +8,7 @@
 //! gradients de L = Σ r · sortie à ≤ 1e-10 et ≤ 1e-5 (écarts relatifs L2). Amendement du 2026-11-22 (docs/ULF.md) : en
 //! `f32`, une quantité passe aussi si elle reste sous deux fois l'écart de PyTorch float32 au float64 sur le même cas
 //! (conditionnement : centrage du champ, sommes sur 595 125 points). `MEDOXIDE_ULF_GPU` ajoute la vérification `f32` sur
-//! wgpu.
+//! wgpu, `MEDOXIDE_ULF_CUDA` (avec la feature `cuda`) sur CUDA.
 
 use std::path::Path;
 
@@ -267,6 +267,12 @@ fn verifier(chemin: &Path) {
     if std::env::var("MEDOXIDE_ULF_GPU").is_ok() {
         let gpu = Device::wgpu(burn::tensor::DeviceKind::DefaultDevice).autodiff();
         ecarts.push(("f32 wgpu", verifier_reseaux(&f, dims, DType::F32, &gpu)));
+    }
+    // CUDA (feature `cuda`) si MEDOXIDE_ULF_CUDA est défini : la cible des calculs sur la RTX.
+    #[cfg(feature = "cuda")]
+    if std::env::var("MEDOXIDE_ULF_CUDA").is_ok() {
+        let gpu = Device::cuda(0).autodiff();
+        ecarts.push(("f32 cuda", verifier_reseaux(&f, dims, DType::F32, &gpu)));
     }
     for (nom, e) in &ecarts {
         println!(
