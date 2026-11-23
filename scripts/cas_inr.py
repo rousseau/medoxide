@@ -3,6 +3,7 @@
     cd ~/Exp/fridge-magnet-imaging/notebooks/francois   # inr.py et utils_cpr.py de fmi (référence cb7174b)
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_inr.py synthetique <medoxide>/crates/medoxide-ulf/tests/donnees/inr_synthetique.h5
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_inr.py p1 <sortie.h5>   # réglages de P1 (finest32) sur 115 × 115 × 45
+    PYTHONPATH=. uv run python <medoxide>/scripts/cas_inr.py p1_b <sortie.h5>   # champ de la méthode B (finest 16), seul
 
 Pour chaque réseau (`champ` : INRField, `image` : INRImage), en float64 :
 - `config` (attributs) : niveaux, caractéristiques par niveau, log2 de la table, résolution de base, facteur entre
@@ -48,6 +49,10 @@ P1 = {  # compare_methods.B0_INR_CONFIG avec finest 32 (b0_sensitivity.overrides
                   per_level_scale=(32 / 2) ** (1 / 7), n_neurons=64, n_hidden_layers=2),
     "image": dict(n_levels=16, n_features_per_level=2, log2_hashmap_size=19, base_resolution=16, per_level_scale=2.0,
                   n_neurons=64, n_hidden_layers=2),
+}
+P1_B = {  # méthode B : compare_methods.B0_INR_CONFIG par défaut (finest 16), champ seul (docs/ULF.md, P5)
+    "dims": (115, 115, 45),
+    "champ": dict(P1["champ"], per_level_scale=(16 / 2) ** (1 / 7)),
 }
 B0_MIN, B0_MAX = 12.5, 108.0  # bornes de l'amplitude du champ (Hz), de l'ordre de celles de P1
 
@@ -159,6 +164,8 @@ def ecrire(chemin, cas):
 
         ecarts_f32(g, champ.net, dims, {"b0": b0, "sortie": sortie.reshape(1, -1).T}, champ_f32, r)
 
+        if "image" not in cas:
+            return
         image = INRImage(**cas["image"], seed=0)
         capture = preparer(image.net, gen)
         g = f.create_group("image")
@@ -182,5 +189,5 @@ def ecrire(chemin, cas):
 
 if __name__ == "__main__":
     mode, sortie = sys.argv[1], sys.argv[2]
-    ecrire(sortie, {"synthetique": SYNTHETIQUE, "p1": P1}[mode])
+    ecrire(sortie, {"synthetique": SYNTHETIQUE, "p1": P1, "p1_b": P1_B}[mode])
     print(f"écrit : {sortie}")

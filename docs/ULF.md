@@ -662,3 +662,12 @@ Presque tout existe déjà ; il reste :
 
 Ordre : 1 → 2 → 3 → 4 → 5, avec les mutations qui font échouer chaque test notées. La chaîne qui va du fichier
 ISMRMRD (P3) aux entrées (fenêtre de Tukey autour de l'écho, normalisation) reste à part et vient après.
+
+### Résultat du critère 1 de P5 (2026-11-23) : grille du champ de la méthode B
+
+`ConfigGrille::champ_b()` (facteur 8^(1/7)), `scripts/cas_inr.py p1_b` (champ seul, 115 × 115 × 45, poids tirés comme
+en P4 bis), test `inr_comme_pytorch_methode_b` (`MEDOXIDE_ULF_INR_B`) : configuration du fichier égale à `champ_b()`,
+géométrie des niveaux bit pour bit, indices identiques entier pour entier ; sorties ≤ 4,5e-15 et gradients ≤ 6,3e-13 en
+`f64` ; en `f32` (CPU et Metal) sorties ≤ 1,4e-6 et gradients ≤ 1,7e-4, sauf le biais de la dernière couche (6,9e-2 :
+la forme est centrée, ce gradient est une somme qui s'annule ; PyTorch `f32` s'écarte de 7,1e-2 sur le même cas, il
+passe par l'amendement du 2026-11-22). Tenu.

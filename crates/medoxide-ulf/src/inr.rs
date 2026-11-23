@@ -45,6 +45,15 @@ impl ConfigGrille {
         }
     }
 
+    /// Grille du champ de la méthode B (`compare_methods.B0_INR_CONFIG` par défaut, hors surcharges de
+    /// `b0_sensitivity`) : 8 niveaux, résolution 2 → 16 (docs/ULF.md, P5).
+    pub fn champ_b() -> Self {
+        Self {
+            facteur: 8f64.powf(1.0 / 7.0),
+            ..Self::champ_p1()
+        }
+    }
+
     /// Grille de l'image de P1 (`compare_methods.U_INR_CONFIG`) : 16 niveaux, résolution de base 16, facteur 2.
     pub fn image_p1() -> Self {
         Self {
