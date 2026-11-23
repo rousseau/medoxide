@@ -323,6 +323,74 @@ def methode_b(source, sortie):
     print(f"écrit : {sortie}")
 
 
+def sensibilite_b(chemin, n_ulp="4"):
+    """Sensibilité de PyTorch lui-même à un écart d'un ulp sur la sortie du réseau du champ. À l'initialisation de fmi,
+    cette sortie est presque constante (écart-type 2e-6 pour une moyenne de 0,12) : le centrage de `INRField.b0`
+    amplifie environ 1e5 fois l'arrondi de chaque valeur, et un autre code (autre ordre des produits du MLP, autre
+    `tanh`) arrondit autrement. Mêmes pas que `methode_b`, la sortie du réseau étant multipliée par 1 + n_ulp · r · 2⁻⁵³
+    (r = ±1, tirage fixe ; 4 par défaut, qui écarte le b0 initial d'environ 1,9e-11, un peu plus que l'écart de Rust,
+    1,5e-11). Écrit `sensibilite_pytorch/etat_<e>/champ/<paramètre>` (écart relatif au calcul par défaut) et
+    `sensibilite_pytorch/b0_etat_0`, dans un fichier existant. Diagnostic du critère 2 de P5 (docs/ULF.md)."""
+    with h5py.File(chemin, "a") as f:
+        config = {k: (v.item() if hasattr(v, "item") else v) for k, v in f["champ_config"].attrs.items()}
+        k_reg, k_inv = torch.tensor(f["k_reg"][()]), torch.tensor(f["k_inv"][()])
+        temps, espacement = f["temps"][()], f["espacement_mm"][()].tolist()
+        bornes = f["bornes_b0"][()].tolist()
+        n_pas = int(f.attrs["n_pas"])
+        if "sensibilite_pytorch" in f:
+            del f["sensibilite_pytorch"]
+        dims = tuple(k_reg.shape)
+        if dims[0] > 64:
+            checkpointer()
+        t = torch.tensor(np.broadcast_to(np.asarray(temps)[:, None, None], dims).copy())
+        sigma = [cm.LNCC_SIGMA_MM / h for h in espacement]
+        gen = torch.Generator().manual_seed(1)
+        signe = (torch.randint(0, 2, dims, generator=gen, dtype=torch.float64) * 2 - 1) * float(n_ulp)
+        b0_defaut = utils_cpr.INRField.b0
+
+        def b0_permute(self, shape):
+            forme = torch.tanh(utils_cpr._eval_net(self.net, shape)[0] * (1 + signe * 2.0 ** -53))
+            forme = forme - forme.mean()
+            forme = forme / torch.sqrt(forme.square().mean().detach() + 1e-6)
+            return self.offset_hz() + self.amplitude_hz() * forme
+
+        def pas(permute):
+            utils_cpr.INRField.b0 = b0_permute if permute else b0_defaut
+            try:
+                field = utils_cpr.INRField(**config, b0_min_hz=bornes[0], b0_max_hz=bornes[1], seed=0)
+                b0_0 = field.b0(dims).detach().clone()
+                opt = torch.optim.Adam(field.param_groups(lr=cm.LR, scalar_lr=cm.SCALAR_LR))
+                sched = cm.cosine_schedule(opt, cm.N_ITER_INR)
+                etats = [parametres(field.net, field)]
+                for _ in range(n_pas):
+                    opt.zero_grad()
+                    b0 = field.b0(dims)
+                    terme = utils_cpr.self_consistency_loss(b0, k_reg, k_inv, t, mode=cm.B0_LOSS_MODE,
+                                                            lncc_sigma_vox=sigma)
+                    loss = (terme + cm.W_SMOOTH * utils_cpr.bending_penalty(b0, espacement)
+                            + cm.W_SCALAR_PENALTY * field.scalar_penalty())
+                    loss.backward()
+                    opt.step()
+                    sched.step()
+                    etats.append(parametres(field.net, field))
+                return b0_0, etats
+            finally:
+                utils_cpr.INRField.b0 = b0_defaut
+
+        (b0_a, a), (b0_b, b) = pas(False), pas(True)
+        ref = torch.tensor(f["b0_etat_0"][()])
+        assert torch.equal(b0_a, ref), "le calcul par défaut ne redonne pas le fichier"
+        f.create_dataset("sensibilite_pytorch/b0_etat_0", data=float((b0_a - b0_b).norm() / b0_a.norm()))
+        f["sensibilite_pytorch"].attrs["n_ulp"] = float(n_ulp)
+        for e in range(1, n_pas + 1):
+            for k in a[e]:
+                v = float((a[e][k] - b[e][k]).norm() / a[e][k].norm())
+                f.create_dataset(f"sensibilite_pytorch/etat_{e}/champ/{k}", data=v)
+        pire = max((float(f[f"sensibilite_pytorch/etat_{e}/champ/{k}"][()]), e, k)
+                   for e in range(1, n_pas + 1) for k in a[e])
+        print(f"{chemin} : b0 initial {float(f['sensibilite_pytorch/b0_etat_0'][()]):.2e}, pire paramètre {pire}")
+
+
 if __name__ == "__main__":
     {"synthetique": synthetique, "p1": p1, "plancher": plancher, "entrees": entrees,
-     "methode_b": methode_b}[sys.argv[1]](*sys.argv[2:])
+     "methode_b": methode_b, "sensibilite_b": sensibilite_b}[sys.argv[1]](*sys.argv[2:])

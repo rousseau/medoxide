@@ -671,3 +671,31 @@ géométrie des niveaux bit pour bit, indices identiques entier pour entier ; so
 `f64` ; en `f32` (CPU et Metal) sorties ≤ 1,4e-6 et gradients ≤ 1,7e-4, sauf le biais de la dernière couche (6,9e-2 :
 la forme est centrée, ce gradient est une somme qui s'annule ; PyTorch `f32` s'écarte de 7,1e-2 sur le même cas, il
 passe par l'amendement du 2026-11-22). Tenu.
+
+### Résultat du critère 2 de P5 (2026-11-23) : non tenu tel qu'écrit sur deux plans, amendement proposé
+
+`scripts/cas_jointe.py methode_b` (cas synthétique versionné et six plans de P1), test `tests/methode_b.rs`
+(`MEDOXIDE_ULF_P1_B`) :
+- terme b0 et lissage à l'état initial ≤ 1,1e-14 et 1,0e-13 ; gradient par rapport à b0 ≤ 1,6e-11 ; perte avant
+  chaque pas ≤ 9,2e-14 : **tenu** partout ;
+- paramètres après un et deux pas : ≤ 5e-11 sur quatre plans et sur le cas synthétique, **hors seuil sur `sub000_yz`**
+  (jusqu'à 2,0e-10) **et `subB_yz`** (jusqu'à 4,1e-8 au second pas). Les planchers mesurés entre un et plusieurs
+  threads de PyTorch sont ≤ 1e-11 et n'en rendent pas compte.
+
+**Cause.** À l'initialisation de fmi, la sortie du réseau du champ est presque constante (écart-type 2e-6 pour une
+moyenne de 0,12 après `tanh`) ; le centrage de `INRField.b0` amplifie environ 1e5 fois l'arrondi de chaque valeur. La
+moyenne elle-même est exacte (identique à `math.fsum`) : ce sont les sorties du MLP, qui diffèrent d'un ulp entre Rust
+et PyTorch (ordre des produits, `tanh`), qui donnent le b0 initial à 1,5e-11 sur les six plans. Les premiers pas d'Adam
+amplifient ensuite les composantes du gradient de l'ordre de ε.
+
+**Mesure** (`cas_jointe.py sensibilite_b`) : PyTorch contre lui-même, la sortie du réseau étant multipliée par
+1 + 4 r · 2⁻⁵³ (r = ±1) — b0 initial écarté de 2,7e-11, un peu plus que Rust. Écart des paramètres après les pas :
+7,6e-10 sur `sub000_yz`, 9,2e-8 sur `subB_yz`, ≤ 8,8e-11 ailleurs. Les mêmes deux plans sortent, dans le même ordre de
+grandeur. Sur `subB_yz`, l'écart de Rust vaut **0,44 fois** cette sensibilité sur chacun des dix paramètres hors seuil
+(même direction, amplitude proportionnelle) ; sur `sub000_yz`, 0,26 fois pour la table du niveau 7 et 1,8 fois pour le
+biais de la couche 1 (sensibilité d'un seul tirage).
+
+**Amendement proposé** (à décider) : un paramètre passe aussi s'il reste sous deux fois la sensibilité de PyTorch à
+4 ulp sur la sortie du réseau (`sensibilite_pytorch/…`), en plus du plancher des threads ; le terme, le gradient et la
+perte avant chaque pas gardent leurs seuils. Avec cette règle, les six plans passent (pire rapport : 0,89 du seuil
+amendé).
