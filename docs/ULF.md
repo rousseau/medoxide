@@ -737,3 +737,20 @@ Contrôle P1 : écart relatif maximal de la graine 0 de PyTorch au `b0_warm_star
   PyTorch `f64` (avec recalcul au retour).
 
 **Critère 3 non tenu** (B0 sur 4 plans, LNCC sur 4, moyennes sur 1, contrôle sur 6). Suite à décider par François.
+
+**Décision (2026-11-23, François) : critère 3 amendé, « même initialisation + graines ».** Écrit avant les calculs
+qui le jugent (seul le contrôle P1 est fixé après avoir vu ses valeurs, ci-dessus) :
+
+- **3a. Même initialisation** (six plans) : `methode_b_p1 --poids <cas>` part des poids de la graine 0 de fmi
+  (`etat_0/champ` des fichiers de `cas_jointe.py methode_b`, ramenés en `f32`, comme le fait `graines_b` pour PyTorch
+  `f32`) et fait les 400 pas en `f32` sur la RTX. B0 à ≤ 2 × RMS(PyTorch `f32` − PyTorch `f64`, graine 0) de PyTorch
+  `f64` graine 0 (RMS dans l'objet). C'est la partie qui juge l'implémentation : à poids initiaux égaux, Rust `f32`
+  doit s'écarter de PyTorch `f64` comme PyTorch `f32` le fait.
+- **3b. Graines** (six plans, `f32` sur la RTX, initialisation propre à chaque côté) : graines 0 … 9 de Rust (Burn) et
+  graines 0 … 9 de PyTorch `f32`. Avec `m` la médiane des 45 RMS entre deux graines de PyTorch :
+  - médiane des LNCC de Rust dans [min, max] des LNCC de PyTorch ;
+  - médiane des 45 RMS entre deux graines de Rust dans [m / 2, 2 m] ;
+  - RMS entre le B0 moyen de Rust et celui de PyTorch ≤ m (pour des tirages de même loi, il vaut environ m / √10).
+- **3c. Contrôle P1** : RMS(PyTorch `f64` graine 0 − `b0_warm_start` de P1) ≤ 2 × RMS(PyTorch `f32` − PyTorch `f64`,
+  graine 0) : le cache de P1 vient du même code, à l'ordre des calculs près. Seuil fixé après les valeurs ci-dessus
+  (rapports 0,06 à 0,88) ; il est donc tenu, et ne sert qu'à le consigner.
