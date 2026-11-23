@@ -898,3 +898,17 @@ Lecture (contrôles hors critère) :
 
 **Critère 4 non tenu tel qu'écrit (4a et écart aux données sur trois plans), sans écart systématique visible ; suite à
 décider.**
+
+**Décision (2026-11-23, François) : critère 4 tenu, avec réserves.** L'amendement a été décidé après la mesure. 4a est
+jugé sur la médiane des 25 paires croisées Rust × PyTorch, rapportée à la médiane des paires de PyTorch : tenu sur les
+six plans (5,4–17,7 Hz contre 5,1–20,3). L'écart aux données est jugé sur la différence des moyennes des chaînes
+rapportée à son écart-type : à moins d'un écart-type sur cinq plans.
+
+Réserves notées :
+- sur sub000_zx, Rust colle mieux aux données que PyTorch (−0,29 %, −2,6 écarts-types) ;
+- sur sub000_xy et subB_xy, l'écart aux données de Rust est plus haut de 0,2 %, sous un écart-type. Cela rappelle les
+  +0,5 % de sub000_xy au critère 5 de P4 bis ;
+- la version de fmi utilisée est bea6efb ; `src/fmi` y diffère de 5697306, et la dépendance de la jointe à `src/fmi`
+  n'a pas été vérifiée.
+
+Suite : critère 5 (durées).
