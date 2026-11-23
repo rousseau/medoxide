@@ -5313,8 +5313,27 @@ mod tests {
         };
         let (sans, avec) = (empreinte(0), empreinte(1));
         eprintln!("empreintes : sans biais {sans}, avec biais {avec}");
-        assert_eq!(sans, "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b");
-        assert_eq!(avec, "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b");
+        // Les calculs en virgule flottante ne donnent pas les mêmes octets d'une plateforme à l'autre (fonctions
+        // mathématiques de la bibliothèque du système, instructions disponibles) : une empreinte par plateforme, chacune
+        // mesurée sur le code d'avant le consensus (medoxide@4a61691) puis retrouvée identique après. Sur la PGX, la
+        // garde du biais écarte la correction (même empreinte avec et sans) ; sur les deux autres, elle l'applique.
+        // `std::env::consts::{OS, ARCH}` disent pour quelle plateforme le test a été compilé.
+        let attendues = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "aarch64") => (
+                "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b",
+                "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b",
+            ),
+            ("linux", "x86_64") => (
+                "d2c376b1a852e4927be01b5c0d8a75e3d64847b74aac7791b1bdb59854f24cbf",
+                "2840fbf04482ae187a7f430e9b11cb802a9cc8780467f73a2ef9dfc3efed19bf",
+            ),
+            ("macos", "aarch64") => (
+                "f67683ab2ca345b4c9f5119a8b3b8be9068e6a0fdd8bdad656b26172dfd6a4a0",
+                "120ea97e7ff0a055a036aeef1cd71e40e3f46607befee94aa25abf838258b327",
+            ),
+            (os, arch) => panic!("pas d'empreinte de référence pour {os} {arch} : la mesurer sur medoxide@4a61691"),
+        };
+        assert_eq!((sans.as_str(), avec.as_str()), attendues);
     }
 
     /// Un lancement fictif du coupe-coupe : les poses `base` perturbées coupe par coupe (±`degres`, ±`mm`, graine `graine` ; 0 : aucune perturbation), un rapport par coupe qui porte le numéro du lancement
