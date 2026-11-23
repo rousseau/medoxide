@@ -833,3 +833,27 @@ Une perturbation d'un ulp des poids initiaux éloigne PyTorch `f32` de son `f64`
 Rust à même initialisation reste partout sous la plus grande de ces distances, sauf sub000_xy (9,84 contre 7,22, sous
 le seuil de 14,44). LNCC à même initialisation à ≤ 8e-4 de PyTorch `f64`. 3b reste tenu avec le correctif sur les trois
 règles. **Critère 3 tenu.** Suite : critère 4 (chaîne B → jointe) refait avec le correctif.
+
+### Résultat du critère 4 de P5 (2026-11-23) : chaîne B → jointe, non tenu tel qu'écrit
+
+Calcul `1123-174030-medoxide-medoxide-b-chaine` (RTX, 9d3c1e4) : `jointe_p1 --b0-init` à partir du B0 de la méthode B
+de Rust, graine 0, après le correctif (calcul `1123-140416-medoxide-b-3ab`). Jugé par `scripts/compare_jointe_p1.py
+--suffixe _chaine_cuda` contre les graines de la jointe de PyTorch (`b0_init` = `b0_warm_start` de P1). Contrôles : LNCC
+retrouvée à 1e-16, σ à 4e-9. En Hz, RMS dans l'objet :
+
+| plan | B0 fin − graine 0 (seuil) | LNCC (enveloppe) | écart aux données (enveloppe) | départ B Rust − `b0_warm_start` | graine 0 jointe − `b0_warm_start` |
+|---|---|---|---|---|---|
+| sub000_xy | 8,34 (2,71) hors | 0,8281 (0,8277–0,8281) ok | 1,2872 (1,2832–1,2893) ok | 11,08 | 41,70 |
+| sub000_yz | 16,68 (2,55) hors | 0,7927 (0,7947–0,7948) hors | 2,1570 (2,1344–2,1421) hors | 96,31 | 101,51 |
+| sub000_zx | 10,42 (3,11) hors | 0,8146 (0,8135–0,8139) hors | 1,5798 (1,5810–1,5876) hors | 16,23 | 91,60 |
+| subB_xy | 7,19 (3,10) hors | 0,6257 (0,6250–0,6254) hors | 2,6358 (2,6463–2,6604) hors | 8,58 | 29,07 |
+| subB_yz | 23,82 (8,62) hors | 0,6504 (0,6497–0,6503) hors | 2,3721 (2,3431–2,3896) ok | 35,91 | 108,82 |
+| subB_zx | 5,68 (6,08) ok | 0,6417 (0,6419–0,6427) hors | 2,3983 (2,4213–2,4993) hors | 10,79 | 73,39 |
+
+Lecture. La chaîne ne part pas du même B0 que les graines : le départ de Rust est à 8,6–96 Hz du `b0_warm_start`, ce qui
+correspond à la dispersion entre graines de la méthode B mesurée en 3b (médiane des paires de 6,5 à 94 Hz), et non à un
+défaut. La jointe réduit cet écart (fin à 5,7–24 Hz de la graine 0, partout sous l'écart de départ) sans l'effacer ; le
+seuil, fait de graines à `b0_init` fixé, ne contient pas cette variabilité, comme le texte du critère l'annonçait. Les
+LNCC et les écarts aux données sortent de l'enveloppe dans les deux sens : meilleur que les trois graines sur sub000_zx,
+subB_xy, subB_yz (LNCC) et sub000_zx, subB_xy, subB_zx (écart aux données), moins bon sur sub000_yz. Durée de la
+jointe : 108 s par plan sur la RTX. **Critère 4 non tenu tel qu'écrit ; dépassement rapporté, suite à décider.**
