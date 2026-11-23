@@ -871,3 +871,30 @@ complète de PyTorch :
   - 4a : B0 de la chaîne 0 de Rust à moins du plus grand de ces dix RMS de la chaîne 0 de PyTorch ;
   - 4b : LNCC et écart aux données médians des chaînes de Rust dans [min, max] des chaînes de PyTorch ; médiane des
     RMS entre deux chaînes de Rust dans [m/2, 2m] ; RMS entre les B0 moyens des deux côtés ≤ m.
+
+**Résultat (2026-11-23) : 4b tenu sur la dispersion et les moyennes ; 4a et l'écart aux données médian hors sur trois
+plans chacun, de peu.** Calcul `1123-180309-medoxide-b-chaines` (RTX, f86e739 ; fmi bea6efb, dont `notebooks/francois`
+est identique au 5697306 des graines de la jointe), jugé par `scripts/compare_b4_p1.py`. En Hz, RMS dans l'objet :
+
+| plan | 4a chaîne 0 Rust − PyTorch (seuil) | 4b LNCC médiane [min, max PyTorch] | 4b écart aux données médian [min, max] | 4b paires Rust / PyTorch (médianes) | 4b moyennes (≤ m) |
+|---|---|---|---|---|---|
+| sub000_xy | 8,41 (8,63) ok | 0,8281 [0,8277, 0,8283] ok | 1,2910 [1,2813, 1,2867] hors | 7,21 / 6,20 ok | 2,93 ok |
+| sub000_yz | 16,48 (22,58) ok | 0,7945 [0,7902, 0,7948] ok | 2,1435 [2,1389, 2,1987] ok | 17,14 / 20,26 ok | 4,71 ok |
+| sub000_zx | 10,16 (7,91) hors | 0,8145 [0,8137, 0,8146] ok | 1,5798 [1,5806, 1,5869] hors (meilleur) | 5,64 / 5,06 ok | 3,43 ok |
+| subB_xy | 7,29 (7,27) hors | 0,6252 [0,6250, 0,6254] ok | 2,6689 [2,6521, 2,6655] hors | 5,63 / 5,62 ok | 2,36 ok |
+| subB_yz | 24,06 (20,90) hors | 0,6502 [0,6498, 0,6505] ok | 2,3745 [2,3589, 2,3958] ok | 12,73 / 17,40 ok | 9,14 ok |
+| subB_zx | 6,01 (7,08) ok | 0,6422 [0,6418, 0,6424] ok | 2,4382 [2,3947, 2,4910] ok | 5,67 / 5,63 ok | 2,60 ok |
+
+Lecture (contrôles hors critère) :
+- **4a** compare une paire (chaîne 0 contre chaîne 0, initialisations sans lien) au maximum de dix paires de PyTorch.
+  Sur les 25 paires croisées Rust × PyTorch, la médiane est celle des paires de PyTorch (5,4–17,7 Hz contre 5,1–20,3) et
+  2 à 5 dépassent le maximum de PyTorch : si les chaînes des deux côtés sont interchangeables, on en attend environ
+  2/11 (≈ 4,5 sur 25). Sur les trois plans hors seuil, la paire de 4a est la plus éloignée des 25 ou presque.
+- **Écart aux données** : la différence des moyennes est de −0,5 % à +0,24 %, à moins d'un écart-type (des moyennes de
+  cinq chaînes) sauf sub000_zx, où Rust colle mieux aux données (−0,29 %, −2,6 écarts-types). Avec cinq valeurs de
+  chaque côté, l'étendue de PyTorch est étroite (0,4 % sur sub000_xy). La LNCC médiane est dans l'étendue partout, à
+  1,2 écart-type au plus.
+- La jointe seule prend 108 s par plan en Rust contre environ 208 s pour PyTorch `f32` sur la RTX.
+
+**Critère 4 non tenu tel qu'écrit (4a et écart aux données sur trois plans), sans écart systématique visible ; suite à
+décider.**
