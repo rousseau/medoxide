@@ -6,7 +6,8 @@ référence cb7174b) sur les plans de P1, graines 0, 1, 2 en float64 et graine 0
 
 `--p1` : `<sujet>/<plan>/inputs.npz` de P1. Sortie : `<sujet>/<plan>/b{,_s1,_s2,_f32}.npz` (`b0_hz`) et `.json`
 (`secondes`, perte finale). Avec `--f32-seulement n` (critère 3b amendé) : graines 1 … n en float32 seulement,
-`b_f32_s<g>.npz`.
+`b_f32_s<g>.npz`. Avec `--perturbations n` (seuil de 3a) : graine 0 en float32, poids initiaux du réseau du champ
+multipliés par 1 + r · 2⁻²⁴ (r = ±1, graine de perturbation k = 1 … n) avant le passage en float32, `b_f32_p<k>.npz`.
 
 `INRField` fait `torch.manual_seed(seed)` dans son constructeur, avec 0 par défaut, et `estimate_inr` ne lui passe pas de
 graine : la graine est passée explicitement (comme `b0_bases_lisses.py --seed`). Le float32 reprend
@@ -34,7 +35,7 @@ from cas_pertes import checkpointer, cprmod  # noqa: E402
 PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 
 
-def methode_b(entrees, graine, f32, device):
+def methode_b(entrees, graine, f32, device, perturbation=0):
     i = np.load(entrees)
     k_reg = torch.tensor(i["k_reg"], device=device)
     k_inv = torch.tensor(i["k_inv"], device=device)
@@ -47,6 +48,12 @@ def methode_b(entrees, graine, f32, device):
 
     def champ(**kw):
         f = champ0(**{**kw, "seed": graine})
+        if perturbation:
+            gen = torch.Generator().manual_seed(perturbation)
+            with torch.no_grad():
+                for prm in f.net.parameters():
+                    r = torch.randint(0, 2, prm.shape, generator=gen).to(prm.dtype) * 2 - 1
+                    prm.mul_(1 + r.to(prm.device) * 2.0 ** -24)
         if f32:
             f.net.float()
             f.scale_param = f.scale_param.detach().float().requires_grad_()
@@ -77,6 +84,7 @@ def main():
     p.add_argument("--sortie", required=True)
     p.add_argument("--plans", default=",".join(PLANS))
     p.add_argument("--f32-seulement", type=int)
+    p.add_argument("--perturbations", type=int)
     args = p.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     originaux = (cprmod.time_segmented_cpr, cprmod.time_segmented_cpr_adjoint)
@@ -84,15 +92,19 @@ def main():
         sujet, q = plan.split("_")
         d = Path(args.sortie) / sujet / q
         d.mkdir(parents=True, exist_ok=True)
-        calculs = (("b_f32", 0, True), ("b", 0, False), ("b_s1", 1, False), ("b_s2", 2, False))
+        calculs = [(n, g, f, 0) for n, g, f in (("b_f32", 0, True), ("b", 0, False), ("b_s1", 1, False),
+                                                 ("b_s2", 2, False))]
         if args.f32_seulement:
-            calculs = [(f"b_f32_s{g}", g, True) for g in range(1, args.f32_seulement + 1)]
-        for nom, graine, f32 in calculs:
+            calculs = [(f"b_f32_s{g}", g, True, 0) for g in range(1, args.f32_seulement + 1)]
+        if args.perturbations:
+            calculs = [(f"b_f32_p{k}", 0, True, k) for k in range(1, args.perturbations + 1)]
+        for nom, graine, f32, perturbation in calculs:
             # recalcul au retour pour le float64 seulement (mémoire) ; le float32, mesure de durée de référence, sans
             cprmod.time_segmented_cpr, cprmod.time_segmented_cpr_adjoint = originaux
             if not f32:
                 checkpointer()
-            b0, secondes, perte = methode_b(Path(args.p1) / sujet / q / "inputs.npz", graine, f32, device)
+            b0, secondes, perte = methode_b(Path(args.p1) / sujet / q / "inputs.npz", graine, f32, device,
+                                            perturbation)
             np.savez_compressed(d / f"{nom}.npz", b0_hz=b0)
             (d / f"{nom}.json").write_text(json.dumps({"secondes": secondes, "perte_b0_finale": perte,
                                                        "dispositif": str(device)}, indent=1))
