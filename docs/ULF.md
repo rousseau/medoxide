@@ -912,3 +912,26 @@ Réserves notées :
   n'a pas été vérifiée.
 
 Suite : critère 5 (durées).
+
+### Résultat du critère 5 de P5 (2026-11-24) : durées
+
+Plan sub000_xy, `f32`, méthode B (`methode_b_p1`, 400 pas) puis jointe à partir de ce B0 (`jointe_p1 --b0-init`) ;
+RTX : calculs `1123-140416-medoxide-b-3ab` et `1123-180309-medoxide-b-chaines` (GPU seul utilisé) ; Mac : machine
+libre (charge 1,1 avant, 1,5 après ; une première mesure CPU, faite pendant d'autres calculs, a été arrêtée et refaite).
+
+| dispositif | méthode B | jointe : total | démarrage champ + image | boucle jointe (200 pas) | dont opérateur CPR | chaîne B → jointe |
+|---|---|---|---|---|---|---|
+| RTX, CUDA | 48 s | 108 s | 16 + 26 s | 61 s | 15 s | 156 s |
+| Mac, Metal | 106,5 s | 259 s | 40 + 61 s | 156 s | 56 s | 366 s |
+| Mac, CPU seul | 696 s | 1 756 s | 211 + 396 s | 1 146 s | 644 s | 2 452 s |
+| référence : PyTorch `f32`, RTX | 77 s | 208 s | | | | 285 s |
+
+Lecture :
+- Sur la RTX, la méthode B de Rust prend 0,62 fois le temps de PyTorch, et la chaîne complète 0,55 fois.
+- Sur Metal, la jointe passe de 283 s (P4 bis, opérateur sur CPU) à 259 s.
+- Sur CPU seul, la jointe est plus lente qu'en P4 bis (1 756 s contre 1 295 s). La différence vient de l'opérateur :
+  644 s contre 70 s. Depuis P4 ter, l'opérateur tourne sur le dispositif, donc ici sur le backend CPU de Burn, au lieu
+  de `ModeleCpr` (rustfft). Le démarrage ne change pas (211 + 396 s contre 229 + 467 s). Pour un usage sur CPU seul,
+  il faudrait revenir à `ModeleCpr` quand le dispositif est le CPU. Cette piste est notée, pas faite.
+
+**Critère 5 rapporté** (sans seuil). P5 est terminée : critères 1, 2 (amendé), 3 (amendé), 4 (tenu avec réserves) et 5.
