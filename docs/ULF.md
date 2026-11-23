@@ -781,3 +781,29 @@ La médiane des LNCC de Rust est dans l'enveloppe de PyTorch sur les six plans (
   adjoint, module, LNCC), 70 fois plus forte que celle de PyTorch `f32`.
 
 **Critère 3 non tenu (3a)** : défaut de précision `f32` à localiser et corriger, puis 3a à refaire.
+
+### Correctif `f32` de la moyenne et nouvel essai de 3a (2026-11-23)
+
+**Cause trouvée.** Au pas 0 en `f32`, le B0 initial de Rust était à 0,35 Hz de son `f64` (PyTorch `f32` : 0,007 Hz), et
+presque tout cet écart est un décalage constant (−0,348 Hz, écart-type 3e-3 Hz) : la moyenne `f32` de la sortie presque
+constante du réseau (0,12 ± 2e-6) était fausse de 5e-7, et le centrage de `ChampB0::b0` divise par 2e-6. Le terme b0
+lui-même est exact en `f32` (1,9e-7 sur un B0 final). **Correctif** (981a3df) : en `f32`, `moyenne(x) = x₀ +
+moyenne(x − x₀)`, x₀ détaché ; B0 initial à 3,4e-3 Hz du `f64` (PyTorch `f32` : 7,3e-3). Le `f64` est inchangé bit pour
+bit : avec le décalage aussi en `f64`, le pas joint de P4 bis sur sub000_yz sortait à deux fois son plancher (même
+conditionnement). Tous les tests passent, plans de P1 compris.
+
+**3a refait** (`1123-134919-medoxide-b-3a`), B0 de Rust à même initialisation − PyTorch `f64` (seuil), en Hz :
+
+| plan | avant | après | seuil |
+|---|---|---|---|
+| sub000_xy | 6,09 | 9,84 hors | 5,96 |
+| sub000_yz | 7,40 | 7,56 hors | 7,28 |
+| sub000_zx | 2,75 | 10,41 hors | 2,99 |
+| subB_xy | 4,28 | 0,31 ok | 0,43 |
+| subB_yz | 28,43 | 5,59 hors | 3,13 |
+| subB_zx | 1,59 | 0,66 ok | 0,68 |
+
+Les plans de subB se rapprochent nettement ; ceux de sub000 bougent dans les deux sens (sub000_zx : 2,75 → 10,41)
+pour un changement d'arrondi de quelques ulp. Le seuil repose sur un seul tirage (PyTorch `f32` contre `f64`) d'une
+trajectoire que l'arrondi `f32` déplace de plusieurs Hz : il ne mesure pas la dispersion de cette distance. **3a non
+tenu** ; suite à décider.
