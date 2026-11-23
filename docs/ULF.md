@@ -807,3 +807,10 @@ Les plans de subB se rapprochent nettement ; ceux de sub000 bougent dans les deu
 pour un changement d'arrondi de quelques ulp. Le seuil repose sur un seul tirage (PyTorch `f32` contre `f64`) d'une
 trajectoire que l'arrondi `f32` déplace de plusieurs Hz : il ne mesure pas la dispersion de cette distance. **3a non
 tenu** ; suite à décider.
+
+**Décision (2026-11-23, François) : seuil de 3a tiré de la dispersion de PyTorch `f32`.** Écrit avant les calculs :
+cinq calculs de PyTorch `f32`, graine 0, dont chaque poids initial du réseau du champ est multiplié par 1 + r · 2⁻²⁴
+(r = ±1 tiré par une graine de perturbation k = 1 … 5) avant le passage en `f32` (`graines_b.py --perturbations 5`,
+`b_f32_p<k>.npz`). Seuil de 3a = 2 × la plus grande distance (RMS dans l'objet) à PyTorch `f64` graine 0 parmi ces cinq
+calculs et le calcul `f32` non perturbé. Le B0 de Rust jugé est celui du calcul `1123-134919-medoxide-b-3a` (après le
+correctif). 3b est refait avec le correctif (graines 0 … 9 de Rust, mêmes règles).
