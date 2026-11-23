@@ -814,3 +814,22 @@ cinq calculs de PyTorch `f32`, graine 0, dont chaque poids initial du réseau du
 `b_f32_p<k>.npz`). Seuil de 3a = 2 × la plus grande distance (RMS dans l'objet) à PyTorch `f64` graine 0 parmi ces cinq
 calculs et le calcul `f32` non perturbé. Le B0 de Rust jugé est celui du calcul `1123-134919-medoxide-b-3a` (après le
 correctif). 3b est refait avec le correctif (graines 0 … 9 de Rust, mêmes règles).
+
+**Résultat (2026-11-23) : 3a, 3b et 3c tenus.** Calcul `1123-140416-medoxide-b-3ab` (RTX, d767785) : graines 0 … 9 de
+Rust `f32` CUDA après le correctif, et les cinq perturbations d'un ulp de PyTorch `f32` ; jugé par
+`scripts/compare_b3_p1.py` (seuil de 3a mis à jour). En Hz, RMS dans l'objet :
+
+| plan | 3a Rust | PyTorch `f32` non perturbé | max perturbés et non perturbé | seuil 3a | 3b LNCC médiane Rust [min, max PyTorch] | 3b paires Rust / PyTorch | 3b moyennes | 3c (seuil) |
+|---|---|---|---|---|---|---|---|---|
+| sub000_xy | 9,84 ok | 2,98 | 7,22 | 14,44 | 0,8309 [0,8303, 0,8318] ok | 11,71 / 12,80 ok | 3,98 ok | 2,63 (5,96) ok |
+| sub000_yz | 7,56 ok | 3,64 | 7,67 | 15,33 | 0,7976 [0,7777, 0,7995] ok | 94,08 / 94,98 ok | 19,41 ok | 2,56 (7,28) ok |
+| sub000_zx | 10,41 ok | 1,50 | 12,03 | 24,06 | 0,8203 [0,8187, 0,8212] ok | 11,06 / 10,85 ok | 3,54 ok | 0,13 (2,99) ok |
+| subB_xy | 0,31 ok | 0,22 | 3,87 | 7,75 | 0,6229 [0,6223, 0,6241] ok | 6,50 / 7,37 ok | 2,61 ok | 0,01 (0,43) ok |
+| subB_yz | 5,59 ok | 1,57 | 28,18 | 56,37 | 0,6375 [0,6348, 0,6391] ok | 23,55 / 22,82 ok | 10,69 ok | 1,09 (3,13) ok |
+| subB_zx | 0,66 ok | 0,34 | 9,28 | 18,56 | 0,6252 [0,6226, 0,6269] ok | 10,86 / 10,21 ok | 3,55 ok | 0,17 (0,68) ok |
+
+Une perturbation d'un ulp des poids initiaux éloigne PyTorch `f32` de son `f64` de 3,9 à 28 Hz selon le plan, soit 2 à
+18 fois l'écart du calcul non perturbé : le seuil précédent sous-estimait la sensibilité de la trajectoire à l'arrondi.
+Rust à même initialisation reste partout sous la plus grande de ces distances, sauf sub000_xy (9,84 contre 7,22, sous
+le seuil de 14,44). LNCC à même initialisation à ≤ 8e-4 de PyTorch `f64`. 3b reste tenu avec le correctif sur les trois
+règles. **Critère 3 tenu.** Suite : critère 4 (chaîne B → jointe) refait avec le correctif.

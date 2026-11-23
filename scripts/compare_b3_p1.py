@@ -7,7 +7,8 @@ plans de P1, à initialisation égale (3a), sur dix graines de chaque côté (3b
 
 - `--rust` : sorties de `methode_b_p1` sur la RTX : `<plan>_meme_init_cuda.h5` (`--poids`, 3a) et
   `<plan>_cuda.h5`, `<plan>_cuda_s<g>.h5` (g = 1 … 9) ;
-- `--graines` : `<sujet>/<plan>/b.npz` (f64, graine 0), `b_f32.npz` et `b_f32_s<g>.npz` (g = 1 … 9) de `graines_b.py` ;
+- `--graines` : `<sujet>/<plan>/b.npz` (f64, graine 0), `b_f32.npz`, `b_f32_s<g>.npz` (g = 1 … 9) et
+  `b_f32_p<k>.npz` (k = 1 … 5, seuil de 3a) de `graines_b.py` ;
 - `--p1` : `<sujet>/<plan>/inputs.npz` de P1.
 """
 
@@ -23,6 +24,7 @@ import compare_methods as cm
 
 PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 N_GRAINES = 10
+N_PERTURBATIONS = 5
 
 
 def rms(a, b, m):
@@ -55,12 +57,16 @@ def plan(args, nom):
         return cm.pair_criteria(k_reg, k_inv, t, torch.tensor(b0), mask, esp)["lncc"]
 
     ref_f32 = rms(py32[0], py64, m)
+    # seuil de 3a (décision du 2026-11-23) : plus grande distance à PyTorch f64 parmi le f32 non perturbé et les
+    # f32 dont les poids initiaux sont perturbés d'un ulp (`graines_b.py --perturbations`)
+    ref_pert = max([ref_f32] + [rms(lire_py(f"b_f32_p{k}"), py64, m) for k in range(1, N_PERTURBATIONS + 1)])
     lncc_py, lncc_ru = [lncc(b) for b in py32], [lncc(b) for b in ru]
     p_py, p_ru = paires(py32, m), paires(ru, m)
     med = float(np.median(p_py))
     r = {
         "3a_rms_hz": rms(meme, py64, m),
-        "3a_seuil_hz": 2 * ref_f32,
+        "3a_seuil_hz": 2 * ref_pert,
+        "3a_pytorch_f32_hz": ref_f32,
         "3a_lncc": lncc(meme),
         "3a_lncc_pytorch_f64": lncc(py64),
         "3b_lncc_rust": lncc_ru,
