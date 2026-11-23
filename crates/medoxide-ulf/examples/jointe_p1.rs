@@ -3,12 +3,15 @@
 //!
 //!     cargo run --release -p medoxide-ulf --example jointe_p1 [--features cuda] -- \
 //!         <entrées.h5> <sortie.h5> [--dispositif cpu|wgpu|cuda] [--f64] [--graine n] [--poids <cas_jointe.h5>]
+//!         [--b0-init <sortie de methode_b_p1.h5>]
 //!
 //! Entrées (HDF5, écrites par `scripts/cas_jointe.py entrees`) : `k_reg`, `k_inv` (complexes bruts), `temps`,
 //! `espacement_mm`, `b0_init` (champ de départ), `bornes_b0`. Sortie : `b0_hz`, `u` (complexe, à l'échelle des
-//! données), attributs `secondes`, `dispositif`, `precision`, `graine`.
+//! données), attributs `secondes`, `dispositif`, `precision`, `graine`. `--b0-init` remplace le `b0_init` des entrées par
+//! le `b0_hz` d'une sortie de `methode_b_p1` : la chaîne méthode B → jointe tourne alors entièrement en Rust (critère 4
+//! de P5).
 //!
-//! Le modèle CPR tourne sur CPU dans la précision choisie ; les réseaux et les pertes sur le dispositif choisi.
+//! Le modèle CPR, les réseaux et les pertes tournent sur le dispositif choisi (P4 ter).
 
 use std::time::Instant;
 
@@ -29,6 +32,8 @@ struct Options {
     graine: u64,
     /// Poids initiaux lus dans un cas de `scripts/cas_jointe.py p1` (état 0, initialisation de fmi) au lieu de Burn.
     poids: Option<String>,
+    /// Champ de départ lu dans une sortie de `methode_b_p1` au lieu des entrées.
+    b0_init: Option<String>,
 }
 
 fn options() -> Options {
@@ -40,6 +45,7 @@ fn options() -> Options {
         f64: false,
         graine: 0,
         poids: None,
+        b0_init: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -47,6 +53,7 @@ fn options() -> Options {
             "--f64" => o.f64 = true,
             "--graine" => o.graine = args.next().expect("graine").parse().expect("entier"),
             "--poids" => o.poids = Some(args.next().expect("cas.h5")),
+            "--b0-init" => o.b0_init = Some(args.next().expect("methode_b.h5")),
             _ => panic!("option inconnue : {a}"),
         }
     }
@@ -97,7 +104,15 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     let (k_reg, k_inv) = (c("k_reg"), c("k_inv"));
     let temps = f.dataset("temps").unwrap().read::<f64, Ix1>().unwrap();
     let e = f.dataset("espacement_mm").unwrap().read_raw::<f64>().unwrap();
-    let b0_init: Array3<f64> = f.dataset("b0_init").unwrap().read::<f64, Ix3>().unwrap();
+    let b0_init: Array3<f64> = match &o.b0_init {
+        Some(chemin) => hdf5::File::open(chemin)
+            .unwrap()
+            .dataset("b0_hz")
+            .unwrap()
+            .read::<f64, Ix3>()
+            .unwrap(),
+        None => f.dataset("b0_init").unwrap().read::<f64, Ix3>().unwrap(),
+    };
     let bornes = f.dataset("bornes_b0").unwrap().read_raw::<f64>().unwrap();
     let device = dispositif(&o.dispositif);
     device.seed(o.graine);
@@ -170,6 +185,7 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     attr("secondes_jointe", du.jointe);
     attr("secondes_operateur", du.operateur);
     attr("poids_fmi", if o.poids.is_some() { 1.0 } else { 0.0 });
+    attr("b0_init_rust", if o.b0_init.is_some() { 1.0 } else { 0.0 });
     let texte = |nom: &str, v: &str| {
         let v: hdf5::types::VarLenUnicode = v.parse().unwrap();
         s.new_attr::<hdf5::types::VarLenUnicode>()
