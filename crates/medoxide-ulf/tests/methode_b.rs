@@ -8,8 +8,10 @@
 //! Seuils : à l'état initial, terme b0 et lissage à ≤ 1e-10 (écart relatif), gradient de b0 + W_SMOOTH · lissage par
 //! rapport à b0 à ≤ 1e-8 (écart relatif L2) ; après chacun des deux premiers pas, chaque paramètre à ≤ 1e-10 de
 //! PyTorch, ou sous deux fois l'écart de PyTorch à lui-même entre un thread et le nombre de threads par défaut
-//! (`plancher_pytorch/…`), comme l'amendement du critère 4 de P4 bis. Les termes de la perte avant le second pas sont
-//! aussi vérifiés (≤ 1e-10).
+//! (`plancher_pytorch/…`), comme l'amendement du critère 4 de P4 bis. Amendement du 2026-11-23 (docs/ULF.md, P5,
+//! critère 2) : ou sous deux fois l'écart de PyTorch à lui-même quand la sortie du réseau du champ est perturbée de 4 ulp
+//! (`sensibilite_pytorch/…`, `scripts/cas_jointe.py sensibilite_b`) : à l'initialisation, cette sortie est presque
+//! constante et son centrage amplifie l'arrondi. Les termes de la perte avant chaque pas sont aussi vérifiés (≤ 1e-10).
 
 use std::path::Path;
 
@@ -192,9 +194,11 @@ fn verifier(chemin: &Path) -> Vec<String> {
         );
         let ge = f.group(&format!("etat_{}/champ", p + 1)).unwrap();
         for (nom, v) in noms.iter().zip(parametres_rust(&champ)) {
-            let plancher = f
-                .dataset(&format!("plancher_pytorch/etat_{}/champ/{nom}", p + 1))
-                .map_or(0.0, |d| d.read_scalar::<f64>().unwrap());
+            let lu = |groupe: &str| {
+                f.dataset(&format!("{groupe}/etat_{}/champ/{nom}", p + 1))
+                    .map_or(0.0, |d| d.read_scalar::<f64>().unwrap())
+            };
+            let plancher = lu("plancher_pytorch").max(lu("sensibilite_pytorch"));
             noter(
                 format!("pas {} {nom}", p + 1),
                 ecart(&v, &lire(&ge, nom).0),

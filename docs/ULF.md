@@ -699,3 +699,8 @@ biais de la couche 1 (sensibilité d'un seul tirage).
 4 ulp sur la sortie du réseau (`sensibilite_pytorch/…`), en plus du plancher des threads ; le terme, le gradient et la
 perte avant chaque pas gardent leurs seuils. Avec cette règle, les six plans passent (pire rapport : 0,89 du seuil
 amendé).
+
+**Décision (2026-11-23, François) : amendement adopté.** `tests/methode_b.rs` prend pour limite de chaque paramètre le
+plus grand de 1e-10, deux fois le plancher des threads et deux fois la sensibilité à 4 ulp. Les six plans de P1 et le
+cas synthétique passent. Mutation : le signe de la contribution de inv dans `CoupureB0::gradient` (− → +) fait échouer
+le cas synthétique (gradient à 1,4, paramètres jusqu'à 3e-4). **Critère 2 tenu, amendé.**
