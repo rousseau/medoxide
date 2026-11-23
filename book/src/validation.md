@@ -61,6 +61,32 @@ Quand on compare deux variantes de la reconstruction, un écart de score ne veut
 
 **Lecture.** Pour `s2s`, un écart entre deux variantes plus petit que ces étendues moyennes n'est pas un gain ; plus petit que l'étendue maximale, ce n'est pas un gain pour le sujet le plus variable. Les trois sujets calmes varient peu (juge ≤ 0,0015, concordance ≤ 0,0016, Dice ≥ 0,976) ; la variabilité vient des sujets agités, et c'est l'étendue maximale qu'il faut citer pour eux. L'étendue de chaque sujet ne vient que de trois graines : c'est une étendue observée, pas un intervalle de confiance. La base ne vaut que pour ce binaire et ces défauts ; elle est à refaire si un défaut change.
 
+## Consensus de graines : gain non établi (F4.1.3)
+
+**Question.** Puisque `s2s` dépend de la graine, fusionner plusieurs lancements retire-t-il ce bruit ? L'option `--s2s-consensus median` (voir [Reconstruction SVR](svr.md)) fait K = 3 lancements complets du coupe-coupe, les met dans un même repère, puis prend coupe par coupe la médiane des poses. Elle ne peut retirer que la part de l'erreur qui change d'une graine à l'autre, pas une erreur commune à toutes les graines.
+
+**Protocole, fixé avant la mesure.** Les trois sujets agités de la section précédente, tous les stacks, défauts. Trois consensus à graines disjointes par sujet (A : graines 1, 2, 3 ; B : 4, 5, 6 ; C : 7, 8, 9), chacun avec un volume complet et un repliement par stack mis de côté. La référence est le lancement simple des graines 1, 2 et 3 de la section précédente (même binaire en mode `none`, vérifié identique au bit près). Le sujet est l'unité statistique. Critères :
+
+- **G1**, reproductibilité : Dice BOUNTI entre consensus à graines disjointes, au même repli, d'au moins 0,95 sur les trois agités ;
+- **G2**, qualité entre replis : Dice moyen entre les segmentations de deux replis, plus haut d'au moins 0,01 que celui du lancement simple, sur au moins deux agités sur trois ;
+- **R1**, garde-fous : la concordance aux intersections (toutes paires et sans le stack 0) et le Dice entre replis ne perdent pas plus que la tolérance du sujet (0,01, élargie à son étendue entre graines) ; netteté `S` à ±3 % ; aucun échec.
+
+Lecture écrite avant la mesure : **retenu** si R1, G1 et G2 tiennent ; **gain non établi** si R1 tient mais que G1 ou G2 échoue ; **rejeté** si R1 échoue sur deux sujets ou plus.
+
+| | agité 1 | agité 2 | agité 3 | |
+|---|---|---|---|---|
+| G1 : Dice entre consensus (lancement simple) | 0,960 (0,961) | 0,891 (0,859) | 0,823 (0,800) | **non tenu** |
+| G2 : Dice entre replis, consensus − simple | −0,004 | +0,037 | +0,034 | tenu |
+| R1 : concordance, toutes paires, consensus − simple (tolérance) | −0,001 (0,019) | −0,019 (0,025) | −0,006 (0,053) | tenu |
+| R1 : concordance sans le stack 0 | −0,002 | −0,014 | −0,013 | tenu |
+| R1 : netteté `S` | +0,15 % | −0,04 % | +0,14 % | tenu |
+
+**Verdict : gain non établi.** Le consensus rend les deux sujets les plus agités un peu plus reproductibles (Dice entre exécutions 0,86 → 0,89 et 0,80 → 0,82 ; entre replis +0,03), sans rien coûter en concordance ni en netteté, mais il reste loin de 0,95. Le bruit de graine n'est donc qu'une partie de l'écart entre exécutions sur ces sujets ; le reste vient d'une erreur commune aux graines. L'option reste disponible, **désactivée par défaut**. Le temps de calcul n'a pas été mesuré sur une machine au repos : cette mesure ne servait qu'à une recommandation d'usage, sans objet ici (à titre indicatif, un repliement en consensus coûte environ trois fois le temps CPU d'un repliement simple).
+
+**Mesurer sur les mêmes coupes.** La concordance aux intersections ne compte que les coupes gardées par toutes les méthodes comparées ; mesurés séparément, le lancement simple et le consensus de l'agité 3 portaient sur 64 et 67 coupes. Elle a donc été recalculée en mettant les dix variantes (trois lancements simples, trois consensus `median`, trois `best`) dans un seul calcul, sur 64 coupes communes : l'écart passe de +0,000 à −0,006, et le verdict ne change pas.
+
+**Rapportés, sans valeur de décision.** Juge hors échantillon, consensus − simple : +0,001, +0,006 et +0,002. Le témoin `best` (garder le lancement le plus central, sans fusion) a une meilleure concordance que la médiane sur les trois sujets (toutes paires, écart au lancement simple : +0,001, −0,005 et +0,010) ; il n'a pas de mesure de Dice, et cet écart, vu après la mesure, n'est pas une conclusion.
+
 **(iv) Accord avec une notation humaine en aveugle.** Un seul noteur (la personne qui développe l'outil, qui connaît les méthodes : l'aveugle est imparfait) a noté la qualité globale de 1 à 4 de 29 volumes (cinq méthodes par sujet, quatre pour un sujet sans volume complet de NiftyMIC), présentés dans un ordre mélangé, sans nom de méthode ni de sujet. Corrélation de Spearman entre score et note, par sujet (`scripts/accord_notation.py`), puis moyenne des six sujets : **0,54**. Entre les deux seuils écrits avant la mesure (0,5 et 0,8) : le score **ne déciderait pas seul**. Les corrélations par sujet vont de −0,56 à 0,89, sur quatre ou cinq points aux notes très groupées (beaucoup d'égalités). Cette mesure ne rétablit pas le score : (ii) reste non tenu. Une image de la grille commune est restée noire pour une méthode sur un sujet, parce que son volume est placé loin des autres dans l'espace de l'image (vérifié sur les coordonnées) : la note de ce couple ne juge pas la reconstruction ; l'écarter donne 0,55.
 
 ## Limites
