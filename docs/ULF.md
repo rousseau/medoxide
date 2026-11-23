@@ -754,3 +754,30 @@ qui le jugent (seul le contrôle P1 est fixé après avoir vu ses valeurs, ci-de
 - **3c. Contrôle P1** : RMS(PyTorch `f64` graine 0 − `b0_warm_start` de P1) ≤ 2 × RMS(PyTorch `f32` − PyTorch `f64`,
   graine 0) : le cache de P1 vient du même code, à l'ordre des calculs près. Seuil fixé après les valeurs ci-dessus
   (rapports 0,06 à 0,88) ; il est donc tenu, et ne sert qu'à le consigner.
+
+### Résultat du critère 3 amendé de P5 (2026-11-23) : 3b et 3c tenus, 3a non tenu
+
+Calcul `1123-092624-medoxide-b-crit3` (RTX) ; `scripts/compare_b3_p1.py`.
+
+| plan | 3a : Rust même init − PyTorch `f64` (seuil) | LNCC 3a / PyTorch `f64` | 3b : médianes des paires Rust / PyTorch | 3b : moyennes (≤ m) | 3c (seuil) |
+|---|---|---|---|---|---|
+| sub000_xy | 6,09 (5,96) hors | 0,8309 / 0,8308 | 11,7 / 12,8 ok | 4,1 ok | 2,63 (5,96) ok |
+| sub000_yz | 7,40 (7,28) hors | 0,7983 / 0,7979 | 93,3 / 95,0 ok | 19,5 ok | 2,56 (7,28) ok |
+| sub000_zx | 2,75 (2,99) ok | 0,8186 / 0,8186 | 11,3 / 10,9 ok | 2,9 ok | 0,13 (2,99) ok |
+| subB_xy | 4,28 (0,43) hors | 0,6223 / 0,6223 | 6,5 / 7,4 ok | 2,2 ok | 0,01 (0,43) ok |
+| subB_yz | 28,4 (3,13) hors | 0,6364 / 0,6359 | 28,1 / 22,8 ok | 12,4 ok | 1,09 (3,13) ok |
+| subB_zx | 1,59 (0,68) hors | 0,6236 / 0,6237 | 10,4 / 10,2 ok | 3,7 ok | 0,17 (0,68) ok |
+
+La médiane des LNCC de Rust est dans l'enveloppe de PyTorch sur les six plans (3b). En Hz, RMS dans l'objet.
+
+**Diagnostic de 3a.**
+- Rust `f32` s'écarte autant de PyTorch `f32` que de PyTorch `f64` (subB_yz : 29,1 et 28,4 Hz), alors que les deux
+  PyTorch sont à 1,6 Hz l'un de l'autre : c'est Rust `f32` qui s'écarte.
+- **Rust `f64`** (CPU du Mac, mêmes poids, 400 pas, 1 122 s) sur subB_yz : à **1,02 Hz** de PyTorch `f64` (sous le
+  seuil 3a de 3,13 Hz), terme b0 final −0,33948 contre −0,33947. L'implémentation suit PyTorch sur 400 pas.
+- Pas 0 en `f32`, subB_yz : le terme b0 (LNCC) de Rust s'écarte de **1,9e-4** de sa valeur `f64` (−0,23002 contre
+  −0,229977), celui de PyTorch `f32` de **2,6e-6** ; les lissages s'écartent de 1,5 % (Rust) et 3 % (PyTorch, sortie
+  presque constante du réseau). La perte de précision de Rust `f32` est donc dans le chemin du terme b0 (opérateur CPR
+  adjoint, module, LNCC), 70 fois plus forte que celle de PyTorch `f32`.
+
+**Critère 3 non tenu (3a)** : défaut de précision `f32` à localiser et corriger, puis 3a à refaire.
