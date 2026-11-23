@@ -704,3 +704,36 @@ amendé).
 plus grand de 1e-10, deux fois le plancher des threads et deux fois la sensibilité à 4 ulp. Les six plans de P1 et le
 cas synthétique passent. Mutation : le signe de la contribution de inv dans `CoupureB0::gradient` (− → +) fait échouer
 le cas synthétique (gradient à 1,4, paramètres jusqu'à 3e-4). **Critère 2 tenu, amendé.**
+
+### Résultat du critère 3 de P5 (2026-11-23) : non tenu
+
+Calculs sur la RTX : graines de PyTorch (`scripts/graines_b.py`, `1123-065430-medoxide-graines-b`), méthode B de Rust
+`f32` CUDA, graines 0, 1, 2, et chaîne B → jointe (`1123-084228-medoxide-b-rust`) ; comparaison
+`scripts/compare_b_p1.py`.
+
+| plan | B0 Rust − PyTorch (seuil) | LNCC Rust [enveloppe PyTorch] | paires Rust / PyTorch (Hz) | moyennes | contrôle P1 |
+|---|---|---|---|---|---|
+| sub000_xy | 11,1 (12,3) ok | 0,8309 [0,8303 ; 0,8308] hors | 11–16 / 8–12 | 5,1 ok | 2,6 Hz (5e-2) hors |
+| sub000_yz | 96,5 (97,0) ok | 0,7797 [0,7784 ; 0,7981] ok | 16–97 / 14–97 | 5,3 ok | 2,6 Hz (6e-2) hors |
+| sub000_zx | 16,3 (12,4) hors | 0,8202 [0,8186 ; 0,8196] hors | 11–14 / 9–12 | 6,4 ok | 0,13 Hz (4e-3) hors |
+| subB_xy | 8,5 (8,0) hors | 0,6225 [0,6223 ; 0,6226] ok | 4–5 / 6–8 | 4,6 ok | 0,01 Hz (8e-4) hors |
+| subB_yz | 38,4 (20,0) hors | 0,6395 [0,6350 ; 0,6360] hors | 19–21 / 9–20 | 27,8 hors | 1,1 Hz (3e-2) hors |
+| subB_zx | 9,9 (8,0) hors | 0,6256 [0,6232 ; 0,6248] hors | 9–11 / 7–8 | 6,0 ok | 0,17 Hz (4e-2) hors |
+
+Contrôle P1 : écart relatif maximal de la graine 0 de PyTorch au `b0_warm_start` de P1 (seuil 1e-6).
+
+**Lecture.**
+- Le paysage est multimodal : d'une graine à l'autre, PyTorch s'écarte de 7 à 97 Hz (deux bassins sur `sub000_yz`),
+  alors que PyTorch `f32` reste à 0,2–3,6 Hz de PyTorch `f64` à la même graine. Trois graines par côté estiment mal
+  cette dispersion, et le seuil « plus grand écart entre trois graines » est bruité.
+- La LNCC de Rust n'est jamais sous l'enveloppe ; quand elle en sort, c'est vers le haut (jusqu'à +0,0035). Le terme
+  b0 final est dans la plage de PyTorch, ou meilleur (`subB_yz` : −0,3416 pour Rust, de −0,3393 à −0,3398 pour PyTorch).
+  Ce n'est pas le signe d'un défaut grossier, mais trois graines ne distinguent pas un écart systématique du hasard du
+  tirage initial (Rust tire ses poids avec Burn : mêmes lois que fmi, autres nombres).
+- Contrôle : la graine 0 de PyTorch sur la RTX ne redonne pas le `b0_warm_start` de P1 à 1e-6. Les écarts (0,01–2,6 Hz
+  RMS) sont de l'ordre de PyTorch `f32` contre `f64`, ce qui évoque une autre machine ou un autre ordre des calculs
+  plutôt qu'un autre code. Le seuil 1e-6 supposait un calcul reproductible d'une machine à l'autre ; il ne l'est pas.
+- Durées sur la RTX : 48 s par plan pour la méthode B de Rust `f32`, contre 77 s pour PyTorch `f32` et 330 s pour
+  PyTorch `f64` (avec recalcul au retour).
+
+**Critère 3 non tenu** (B0 sur 4 plans, LNCC sur 4, moyennes sur 1, contrôle sur 6). Suite à décider par François.
