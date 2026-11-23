@@ -602,3 +602,63 @@ réseaux (complexes en paires réel / imaginaire) :
      pas établi.
    - Mac, Metal : pas de mesure valable (Mac chargé par d'autres travaux pendant l'essai : 623 s, démarrage à chaud
      compris, deux fois plus lent qu'à vide). À refaire sur un Mac libre.
+
+## P5 : méthode B, champ INR seul (conception, 2026-11-23)
+
+### Ce qu'on porte
+
+`compare_methods.estimate_inr` (référence `cb7174b`), qui fournit le `b0_init` de l'estimation jointe. Dans P1, il
+est appelé par `denoise_joint.run_pipeline` **hors** des surcharges de `b0_sensitivity` : le champ garde donc
+`B0_INR_CONFIG` par défaut.
+
+- **Champ** : `INRField` comme en P4 bis, mais avec une résolution de 2 → **16** (facteur (16/2)^(1/7)), et non 32.
+  Mêmes bornes `b0_bounds_hz`, même forme (tanh, centrage, RMS 1, `offset + amplitude · forme`).
+- **Perte** : −LNCC(|Aᴴ(+b0)k_reg|, |Aᴴ(−b0)k_inv|) (fenêtre de 4 mm, c'est le terme `b0` de P4 bis)
+  \+ **1e-2** · lissage + 1e-5 · (s² + o²). Pas d'image, pas de fidélité, pas de démarrage à chaud.
+- **Optimisation** : 400 itérations d'Adam (β = 0,9 / 0,999, ε = 1e-8), lr 1e-3 (réseau) et 1e-2 (s, o), décroissance
+  cosinus sur 400 itérations jusqu'à 1e-2 · lr.
+- **Graine** : `INRField` fait `torch.manual_seed(0)` dans son constructeur ; le `b0_warm_start` de P1 est donc la
+  graine 0, à condition que le cache de P1 date bien de `cb7174b` (vérifié par le contrôle du critère 3).
+
+### Conception
+
+Presque tout existe déjà ; il reste :
+- `ConfigGrille::champ_b()` (16 au lieu de 32) ;
+- dans `pertes`, une évaluation réduite au terme `b0`, au lissage et aux scalaires : deux passes `Aᴴ` (et `Aₜᴴ` pour le
+  gradient) par itération, sans `A` ni l'image, sur l'`OperateurCpr` de P4 ter ;
+- dans `jointe` (ou un module `methode_b`), la boucle de 400 pas, avec l'Adam et la décroissance cosinus déjà écrits ;
+- l'exemple `methode_b_p1` (même interface que `jointe_p1`), et une option de `jointe_p1` qui prend le `b0_init` dans
+  une sortie de `methode_b_p1` au lieu de P1 : la chaîne B → jointe tourne alors entièrement en Rust ;
+- côté Python, `scripts/cas_jointe.py` gagne un mode `methode_b` (états du réseau du champ avant et après un pas, à
+  partir des poids de fmi) et un mode `graines_b` (méthode B de PyTorch, graines 0, 1, 2 en `f64` et graine 0 en
+  `f32`, sur les six plans, à lancer sur la RTX ; le `f32` reprend la mise en simple précision de
+  `b0_bases_lisses.py --float32`).
+
+### Critères (écrits avant le code)
+
+1. **Grille du champ de la méthode B** (cas synthétique et plans de P1) : indices de table identiques à PyTorch, entier
+   pour entier ; sortie du champ à ≤ 1e-12 (`f64`) / 1e-6 (`f32`) ; gradient d'une fonctionnelle linéaire aléatoire à
+   ≤ 1e-10 / 1e-5.
+2. **Perte et un pas** (plans de P1, `f64`, poids de fmi) :
+   - perte de la méthode B à ≤ 1e-10 et son gradient par rapport à b0 à ≤ 1e-8 ;
+   - paramètres après un pas d'Adam à ≤ 1e-10 de PyTorch, avec le même plancher par paramètre qu'en P4 bis (écart
+     entre deux exécutions de PyTorch à nombres de fils différents) s'il est plus haut.
+3. **Bout en bout, `f32` sur GPU, initialisation de Burn, graines 0, 1, 2 de Rust**, sur les six plans :
+   - B0 de la graine 0 de Rust à moins du plus grand écart entre les graines 0, 1, 2 de PyTorch (RMS dans l'objet) de
+     la graine 0 de PyTorch en `f64` ;
+   - LNCC de la paire corrigée (critère d'évaluation de `pair_criteria`) dans l'enveloppe des graines 0, 1, 2 en
+     `f64` et du calcul `f32` de PyTorch ;
+   - dispersion : écarts entre graines de Rust du même ordre que ceux de PyTorch (au plus le double du plus grand), et
+     écart entre les moyennes des graines de Rust et de PyTorch sous le plus grand écart entre deux graines de
+     PyTorch (leçon du critère 5 de P4 bis : une seule graine ne distingue pas un biais du bruit) ;
+   - contrôle : la graine 0 de PyTorch en `f64` redonne le `b0_warm_start` de P1 à la précision `f32` de son stockage
+     (sinon le cache de P1 ne date pas de `cb7174b`, et on le dit).
+4. **Chaîne B → jointe en Rust**, `f32` sur la RTX : la jointe partant du B0 de la méthode B de Rust (graine 0) donne
+   un B0 sous le seuil des graines de la jointe (critère 5 amendé de P4 bis) et une LNCC et un écart aux données dans
+   leur enveloppe. Le seuil est celui de graines à `b0_init` fixé : un dépassement ne serait donc pas forcément un
+   défaut, mais il serait rapporté et discuté avant d'aller plus loin.
+5. **Durées** rapportées, sans critère : méthode B et chaîne complète par plan sur la RTX, le Mac (Metal, machine
+   libre) et le CPU ; référence : la méthode B de PyTorch `f32` sur la RTX, mesurée par `graines_b`.
+
+Ordre : 1 → 2 → 3 → 4 → 5, avec les mutations qui font échouer chaque test notées. La chaîne qui va du fichier
+ISMRMRD (P3) aux entrées (fenêtre de Tukey autour de l'écho, normalisation) reste à part et vient après.
