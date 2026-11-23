@@ -857,3 +857,17 @@ seuil, fait de graines à `b0_init` fixé, ne contient pas cette variabilité, c
 LNCC et les écarts aux données sortent de l'enveloppe dans les deux sens : meilleur que les trois graines sur sub000_zx,
 subB_xy, subB_yz (LNCC) et sub000_zx, subB_xy, subB_zx (écart aux données), moins bon sur sub000_yz. Durée de la
 jointe : 108 s par plan sur la RTX. **Critère 4 non tenu tel qu'écrit ; dépassement rapporté, suite à décider.**
+
+**Décision (2026-11-23, François) : critère 4 jugé contre une référence PyTorch chaînée.** Écrit avant les calculs.
+Le seuil de graines à `b0_init` fixé ne contient pas la variabilité de la méthode B ; la référence devient la chaîne
+complète de PyTorch :
+- **PyTorch** : cinq chaînes `f32` sur la RTX ; la chaîne g (g = 0 … 4) part du B0 de la méthode B de PyTorch `f32`
+  graine g (`b_f32.npz`, `b_f32_s<g>.npz`, déjà calculés) et fait la jointe de `b0_bases_lisses.py --configs inr32
+  --float32 --seed g` (fmi `main`), ce B0 remplaçant le `b0_warm_start` de P1 (`scripts/chaine_b_pytorch.py`) ;
+- **Rust** : cinq chaînes `f32` CUDA, la chaîne g part du B0 de la méthode B de Rust graine g (calcul
+  `1123-140416-medoxide-b-3ab`) et fait `jointe_p1 --graine g` (la chaîne 0 est celle du calcul
+  `1123-174030-medoxide-medoxide-b-chaine`) ;
+- avec m = médiane des dix RMS (dans l'objet) entre deux chaînes de PyTorch, sur chacun des six plans :
+  - 4a : B0 de la chaîne 0 de Rust à moins du plus grand de ces dix RMS de la chaîne 0 de PyTorch ;
+  - 4b : LNCC et écart aux données médians des chaînes de Rust dans [min, max] des chaînes de PyTorch ; médiane des
+    RMS entre deux chaînes de Rust dans [m/2, 2m] ; RMS entre les B0 moyens des deux côtés ≤ m.
