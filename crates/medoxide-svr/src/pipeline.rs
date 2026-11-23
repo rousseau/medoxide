@@ -10,8 +10,9 @@ use burn::prelude::Device;
 use ndarray::Array3;
 use nifti::{writer::WriterOptions, NiftiHeader};
 
-use crate::align::{reconstruct_with_motion_correction, LoopConfig, SliceReport};
+use crate::align::{reconstruct_with_motion_correction, AlignmentReport, LoopConfig, SliceReport};
 use crate::bias::{estimate_bias_fields, BiasConfig, BiasFields};
+use crate::consensus::{fuse_runs, S2sConsensus};
 use crate::diff::RobustConfig;
 use crate::recon::{reconstruction_grid, GridSpec, ReconstructionProblem, SlicePoses};
 use crate::s2s::{phase, register_slices_s2s, S2sConfig};
@@ -149,6 +150,11 @@ pub struct ReconstructionConfig {
     pub s2s_update: crate::s2s::S2sUpdate,
     /// Coupe-coupe : graine de l'ordre aléatoire des coupes de chaque balayage (Gauss–Seidel ; sans effet avec Jacobi, dont le résultat ne dépend pas de l'ordre). Défaut 1.
     pub s2s_seed: u64,
+    /// Coupe-coupe : consensus de graines (F4.1.3, voir [`crate::consensus`]) : `s2s_consensus_runs` lancements complets du coupe-coupe (avec leurs tours de biais), de graines `s2s_seed`, `s2s_seed + 1`…, en
+    /// parallèle, fusionnés en un seul jeu de poses ; le reste de la chaîne est fait une fois. Défaut `None` : un seul lancement, chemin de code inchangé (option à l'essai, non retenue par défaut).
+    pub s2s_consensus: S2sConsensus,
+    /// Coupe-coupe : nombre de lancements du consensus (au moins 2, au moins 3 pour `Median` : avec deux, la médiane n'est pas unique) ; sans effet avec `s2s_consensus = None`.
+    pub s2s_consensus_runs: usize,
     /// Coupe-coupe, alignement par blocs : gradient calculé coupe par coupe en parallèle (voir [`crate::s2s::S2sConfig::block_parallel_gradient`]).
     pub s2s_block_parallel_gradient: bool,
     /// Coupe-volume : nombre de cycles « recaler puis reconstruire ».
@@ -197,6 +203,8 @@ impl Default for ReconstructionConfig {
             s2s_update: crate::s2s::S2sUpdate::GaussSeidel,
             s2s_seed: 1,
             s2s_block_parallel_gradient: false,
+            s2s_consensus: S2sConsensus::None,
+            s2s_consensus_runs: 3,
             s2s_coarse_sigma_pixels: 1.0,
             s2s_coarse_sweeps: 3,
             s2s_coarse_levels: 2,
@@ -400,12 +408,13 @@ pub fn reconstruct(
     if stacks.len() < 2 {
         return Err(SvrError::NotEnoughStacks);
     }
+    check_consensus(config)?;
     let grid = reconstruction_grid(stacks, config.resolution_mm, config.margin_mm)?;
     let header_poses = SlicePoses::identity(stacks);
     match config.motion {
         Motion::SliceToSlice => {
             if config.s2s_bias_rounds == 0 {
-                let rapport = register_slices_s2s(stacks, &header_poses, &s2s_config(config), device)?;
+                let rapport = s2s_motion(stacks, config, device)?;
                 let (poses, slices) =
                     refine_with_slice_to_volume(stacks, rapport.poses, rapport.slices, config, device)?;
                 let volume = reconstruct_with_poses(
@@ -431,22 +440,8 @@ pub fn reconstruct(
                     excluded,
                 });
             }
-            // alternances : champ de biais estimé aux poses courantes (celles de l'en-tête au départ), stacks corrigés, recalage depuis les poses courantes ; puis une dernière estimation aux poses finales pour la reconstruction
             let biais = BiasConfig::default();
-            let (mut poses, mut slices) = (header_poses, Vec::new());
-            for _ in 0..config.s2s_bias_rounds {
-                let corriges = phase("champ de biais (avant recalage)", || -> Result<_, SvrError> {
-                    Ok(correct_stacks(
-                        stacks,
-                        &estimate_bias_fields(stacks, &poses, &biais)?,
-                        config.s2s_bias_min_reduction,
-                    ))
-                })?;
-                let rapport = phase("recalage coupe-coupe (total)", || {
-                    register_slices_s2s(&corriges, &poses, &s2s_config(config), device)
-                })?;
-                (poses, slices) = (rapport.poses, rapport.slices);
-            }
+            let AlignmentReport { poses, slices } = s2s_motion(stacks, config, device)?;
             let corriges = phase("champ de biais (aux poses finales)", || -> Result<_, SvrError> {
                 Ok(correct_stacks(
                     stacks,
@@ -504,6 +499,98 @@ pub fn reconstruct(
             })
         }
     }
+}
+
+/// Refuse les réglages de consensus incohérents : consensus avec le coupe-volume, moins de deux lancements, médiane à deux lancements.
+///
+/// # Erreurs
+/// [`SvrError::InvalidConsensus`].
+pub fn check_consensus(config: &ReconstructionConfig) -> Result<(), SvrError> {
+    match config.s2s_consensus {
+        S2sConsensus::None => Ok(()),
+        _ if config.motion != Motion::SliceToSlice => Err(SvrError::InvalidConsensus(
+            "le consensus de graines n'existe que pour le coupe-coupe (--motion s2s)",
+        )),
+        _ if config.s2s_consensus_runs < 2 => Err(SvrError::InvalidConsensus("au moins deux lancements requis")),
+        S2sConsensus::Median if config.s2s_consensus_runs < 3 => Err(SvrError::InvalidConsensus(
+            "la médiane demande au moins trois lancements (à deux, elle n'est pas unique)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Un lancement complet de l'estimation du mouvement coupe-coupe, depuis les poses d'en-tête : sans correction de biais (`s2s_bias_rounds = 0`) un recalage sur les stacks bruts ; sinon les alternances
+/// « champ de biais estimé aux poses courantes (celles de l'en-tête au départ), stacks corrigés, recalage depuis les poses courantes ».
+fn s2s_chain(stacks: &[Stack], config: &ReconstructionConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    let header_poses = SlicePoses::identity(stacks);
+    if config.s2s_bias_rounds == 0 {
+        return register_slices_s2s(stacks, &header_poses, &s2s_config(config), device);
+    }
+    let biais = BiasConfig::default();
+    let mut rapport = AlignmentReport {
+        poses: header_poses,
+        slices: Vec::new(),
+    };
+    for _ in 0..config.s2s_bias_rounds {
+        let corriges = phase("champ de biais (avant recalage)", || -> Result<_, SvrError> {
+            Ok(correct_stacks(
+                stacks,
+                &estimate_bias_fields(stacks, &rapport.poses, &biais)?,
+                config.s2s_bias_min_reduction,
+            ))
+        })?;
+        rapport = phase("recalage coupe-coupe (total)", || {
+            register_slices_s2s(&corriges, &rapport.poses, &s2s_config(config), device)
+        })?;
+    }
+    Ok(rapport)
+}
+
+/// **Mouvement coupe-coupe**, avec ou sans consensus de graines. Sans consensus : un lancement de [`s2s_chain`] (chemin historique). Avec : `s2s_consensus_runs` lancements de graines `s2s_seed + j`, chacun dans
+/// son propre fil (`std::thread::scope`) et son propre pool rayon de ⌊N / K⌋ fils (N : fils du pool courant), pour qu'ils ne se disputent pas le pool global ; puis [`fuse_runs`] dans l'ordre des graines.
+/// Le résultat ne dépend pas de l'ordonnancement : chaque lancement est déterministe à graine fixée (ses boucles parallèles rendent leurs résultats dans l'ordre), et la fusion lit les lancements dans
+/// l'ordre des graines.
+///
+/// # Erreurs
+/// Celles de [`s2s_chain`] (la première dans l'ordre des graines) et de [`fuse_runs`].
+fn s2s_motion(stacks: &[Stack], config: &ReconstructionConfig, device: &Device) -> Result<AlignmentReport, SvrError> {
+    if config.s2s_consensus == S2sConsensus::None {
+        return s2s_chain(stacks, config, device);
+    }
+    let k = config.s2s_consensus_runs;
+    let fils = (rayon::current_num_threads() / k).max(1);
+    let lancements: Vec<Result<AlignmentReport, SvrError>> = std::thread::scope(|portee| {
+        let taches: Vec<_> = (0..k)
+            .map(|j| {
+                let config_j = ReconstructionConfig {
+                    s2s_seed: config.s2s_seed + j as u64,
+                    ..config.clone()
+                };
+                portee.spawn(move || {
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(fils)
+                        .build()
+                        .expect("pool rayon du consensus");
+                    pool.install(|| s2s_chain(stacks, &config_j, device))
+                })
+            })
+            .collect();
+        taches
+            .into_iter()
+            .map(|t| t.join().unwrap_or_else(|panique| std::panic::resume_unwind(panique)))
+            .collect()
+    });
+    let lancements = lancements.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let consensus = phase("consensus de graines (fusion)", || {
+        fuse_runs(stacks, &lancements, config.s2s_consensus)
+    })?;
+    if !consensus.flagged.is_empty() {
+        eprintln!(
+            "consensus de graines : {} coupe(s) dont les lancements s'écartent de plus de 90°, pose du lancement central gardée",
+            consensus.flagged.len()
+        );
+    }
+    Ok(consensus.report)
 }
 
 /// Stacks et poses de départ de la boucle coupe-volume selon `config.s2v_init` : `Header` rend les `stacks` et les poses de l'en-tête tels quels ; `Stacks` et `StacksBias` font d'abord l'alignement par stack entier du coupe-coupe (`block_levels = 1`, aucun balayage par coupe, grossier compris), `StacksBias` sur des stacks corrigés du biais, estimé aux poses de l'en-tête puis réestimé aux poses alignées (les stacks rendus sont alors corrigés). Le gradient des blocs y est toujours calculé en parallèle, quel que soit `s2s_block_parallel_gradient`.

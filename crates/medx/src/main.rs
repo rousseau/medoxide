@@ -65,6 +65,27 @@ impl From<UpdateArg> for medoxide_svr::s2s::S2sUpdate {
     }
 }
 
+/// Consensus de graines du coupe-coupe, tel qu'écrit sur la ligne de commande (`--s2s-consensus`).
+#[derive(Clone, Copy, ValueEnum)]
+enum ConsensusArg {
+    /// Un seul lancement
+    None,
+    /// Médiane, coupe par coupe, des poses de plusieurs lancements à graines différentes
+    Median,
+    /// Poses du lancement le plus central, sans fusion (témoin)
+    Best,
+}
+
+impl From<ConsensusArg> for medoxide_svr::consensus::S2sConsensus {
+    fn from(c: ConsensusArg) -> Self {
+        match c {
+            ConsensusArg::None => Self::None,
+            ConsensusArg::Median => Self::Median,
+            ConsensusArg::Best => Self::Best,
+        }
+    }
+}
+
 /// Départ de la boucle coupe-volume, tel qu'écrit sur la ligne de commande (`--s2v-init`).
 #[derive(Clone, Copy, ValueEnum)]
 enum S2vInitArg {
@@ -240,6 +261,12 @@ enum SvrAction {
         /// Avec `--motion s2s` : graine de l'ordre aléatoire des coupes (sans effet avec `--s2s-update jacobi`)
         #[arg(long, default_value_t = ReconstructionConfig::default().s2s_seed)]
         s2s_seed: u64,
+        /// Avec `--motion s2s` : consensus de graines (expérimental) : plusieurs lancements du coupe-coupe à graines `--s2s-seed`, `--s2s-seed` + 1…, en parallèle, fusionnés coupe par coupe
+        #[arg(long, value_enum, default_value_t = ConsensusArg::None)]
+        s2s_consensus: ConsensusArg,
+        /// Avec `--s2s-consensus` : nombre de lancements (défaut 3 ; au moins 2, au moins 3 pour `median`)
+        #[arg(long)]
+        s2s_consensus_runs: Option<usize>,
         /// Avec `--motion s2s` : alignement par blocs, gradient calculé coupe par coupe en parallèle (expérimental)
         #[arg(long)]
         s2s_block_parallel_gradient: bool,
@@ -977,6 +1004,8 @@ fn main() -> ExitCode {
                     s2s_sweeps,
                     s2s_update,
                     s2s_seed,
+                    s2s_consensus,
+                    s2s_consensus_runs,
                     s2s_block_parallel_gradient,
                     s2s_coarse_sigma,
                     s2s_coarse_sweeps,
@@ -1014,6 +1043,8 @@ fn main() -> ExitCode {
                 s2s_sweeps,
                 s2s_update: s2s_update.into(),
                 s2s_seed,
+                s2s_consensus: s2s_consensus.into(),
+                s2s_consensus_runs: s2s_consensus_runs.unwrap_or(ReconstructionConfig::default().s2s_consensus_runs),
                 s2s_block_parallel_gradient,
                 s2s_coarse_sigma_pixels: s2s_coarse_sigma,
                 s2s_coarse_sweeps,
@@ -1041,6 +1072,15 @@ fn main() -> ExitCode {
                 s2v_cycles,
                 ..Default::default()
             };
+            // refus avant toute lecture : nombre de lancements sans consensus actif, puis réglages incohérents
+            if s2s_consensus_runs.is_some() && matches!(s2s_consensus, ConsensusArg::None) {
+                eprintln!("medx svr recon : --s2s-consensus-runs demande --s2s-consensus median ou best");
+                return ExitCode::FAILURE;
+            }
+            if let Err(e) = medoxide_svr::pipeline::check_consensus(&config) {
+                eprintln!("medx svr recon : {e}");
+                return ExitCode::FAILURE;
+            }
             let (entrees, masques, destination) = match (&bids, output) {
                 (Some(racine), _) => {
                     match svr_recon_bids(

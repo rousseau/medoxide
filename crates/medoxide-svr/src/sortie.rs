@@ -106,6 +106,15 @@ fn reglages(c: &ReconstructionConfig) -> Json {
         ("s2s_seed", Json::Entier(c.s2s_seed as i64)),
         ("s2s_block_parallel_gradient", Json::Bool(c.s2s_block_parallel_gradient)),
         (
+            "s2s_consensus",
+            Json::texte(match c.s2s_consensus {
+                crate::consensus::S2sConsensus::None => "none",
+                crate::consensus::S2sConsensus::Median => "median",
+                crate::consensus::S2sConsensus::Best => "best",
+            }),
+        ),
+        ("s2s_consensus_runs", entier(c.s2s_consensus_runs)),
+        (
             "s2s_update",
             Json::texte(match c.s2s_update {
                 crate::s2s::S2sUpdate::GaussSeidel => "gauss-seidel",

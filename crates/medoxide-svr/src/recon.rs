@@ -741,6 +741,7 @@ impl EdgeWeights {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::AlignmentReport;
     use nalgebra::{Rotation3, Vector4};
     use nifti::{writer::WriterOptions, NiftiHeader};
     use std::path::{Path, PathBuf};
@@ -5273,6 +5274,289 @@ mod tests {
         use crate::pipeline::{default_device_kind, DeviceKind, Motion};
         assert_eq!(default_device_kind(Motion::SliceToSlice), DeviceKind::Cpu);
         assert_eq!(default_device_kind(Motion::SliceToVolume), DeviceKind::Cpu);
+    }
+
+    /// Empreinte SHA-256 des poses et du volume rendus par `pipeline::reconstruct` en coupe-coupe (jeu de blobs à 3 stacks, réglages allégés pour la durée du test), avec et sans correction de biais. Écrite AVANT le
+    /// consensus de graines (F4.1.3) sur le code de `main` : le défaut (`s2s_consensus = None`) doit rendre exactement les mêmes octets ; toute modification du chemin par défaut fait échouer ce test.
+    #[test]
+    fn the_default_slice_to_slice_output_is_bit_identical() {
+        use crate::pipeline::{reconstruct, Motion, ReconstructionConfig};
+        use sha2::{Digest, Sha256};
+        let t = Temp::new("empreinte_defaut");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let empreinte = |biais: usize| {
+            let config = ReconstructionConfig {
+                motion: Motion::SliceToSlice,
+                resolution_mm: 2.0,
+                cg_max_iterations: 7,
+                s2s_sweeps: 1,
+                s2s_coarse_sweeps: 1,
+                s2s_coarse_levels: 1,
+                s2s_block_sweeps: 1,
+                s2s_bias_rounds: biais,
+                ..Default::default()
+            };
+            let sortie = reconstruct(&stacks, &config, &device).unwrap();
+            let mut h = Sha256::new();
+            for (si, s) in stacks.iter().enumerate() {
+                for k in 0..s.dim().2 {
+                    for v in sortie.poses.get(si, k).iter() {
+                        h.update(v.to_le_bytes());
+                    }
+                }
+            }
+            for v in sortie.volume.iter() {
+                h.update(v.to_le_bytes());
+            }
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let (sans, avec) = (empreinte(0), empreinte(1));
+        eprintln!("empreintes : sans biais {sans}, avec biais {avec}");
+        // Les calculs en virgule flottante ne donnent pas les mêmes octets d'une plateforme à l'autre (fonctions
+        // mathématiques de la bibliothèque du système, instructions disponibles) : une empreinte par plateforme, chacune
+        // mesurée sur le code d'avant le consensus (medoxide@4a61691) puis retrouvée identique après. Sur la PGX, la
+        // garde du biais écarte la correction (même empreinte avec et sans) ; sur les deux autres, elle l'applique.
+        // `std::env::consts::{OS, ARCH}` disent pour quelle plateforme le test a été compilé.
+        let attendues = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "aarch64") => (
+                "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b",
+                "59ecf1c387cad49289f434326758bda9eea8e8e6cf149e04230a5c7a601e864b",
+            ),
+            ("linux", "x86_64") => (
+                "d2c376b1a852e4927be01b5c0d8a75e3d64847b74aac7791b1bdb59854f24cbf",
+                "2840fbf04482ae187a7f430e9b11cb802a9cc8780467f73a2ef9dfc3efed19bf",
+            ),
+            ("macos", "aarch64") => (
+                "f67683ab2ca345b4c9f5119a8b3b8be9068e6a0fdd8bdad656b26172dfd6a4a0",
+                "120ea97e7ff0a055a036aeef1cd71e40e3f46607befee94aa25abf838258b327",
+            ),
+            (os, arch) => panic!("pas d'empreinte de référence pour {os} {arch} : la mesurer sur medoxide@4a61691"),
+        };
+        assert_eq!((sans.as_str(), avec.as_str()), attendues);
+    }
+
+    /// Un lancement fictif du coupe-coupe : les poses `base` perturbées coupe par coupe (±`degres`, ±`mm`, graine `graine` ; 0 : aucune perturbation), un rapport par coupe qui porte le numéro du lancement
+    /// dans `runs` (pour savoir de quel lancement vient le rapport rendu).
+    fn lancement_fictif(
+        stacks: &[Stack],
+        base: &SlicePoses,
+        degres: f64,
+        mm: f64,
+        graine: u64,
+        numero: usize,
+    ) -> AlignmentReport {
+        let bruit = poses_aleatoires(stacks, degres, mm, graine);
+        let mut poses = base.clone();
+        let mut slices = Vec::new();
+        for (si, s) in stacks.iter().enumerate() {
+            for k in 0..s.dim().2 {
+                if degres > 0.0 || mm > 0.0 {
+                    poses.set(si, k, bruit.get(si, k) * base.get(si, k));
+                }
+                slices.push(align::SliceReport {
+                    stack: si,
+                    slice: k,
+                    registered: true,
+                    ncc_first: 0.0,
+                    ncc_final: 0.0,
+                    runs: numero,
+                    correction_rms_mm: 0.0,
+                });
+            }
+        }
+        AlignmentReport { poses, slices }
+    }
+
+    /// Le même mouvement rigide `g` appliqué à toutes les poses d'un lancement.
+    fn deplacer_lancement(stacks: &[Stack], g: &Matrix4<f64>, lancement: &AlignmentReport) -> AlignmentReport {
+        let mut poses = lancement.poses.clone();
+        for (si, s) in stacks.iter().enumerate() {
+            for k in 0..s.dim().2 {
+                poses.set(si, k, g * lancement.poses.get(si, k));
+            }
+        }
+        AlignmentReport {
+            poses,
+            slices: lancement.slices.clone(),
+        }
+    }
+
+    fn ecart_max_poses(stacks: &[Stack], p: &SlicePoses, q: &SlicePoses) -> f64 {
+        stacks
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| (0..s.dim().2).map(move |k| (si, k)))
+            .map(|(si, k)| (p.get(si, k) - q.get(si, k)).abs().max())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Consensus de graines (F4.1.3), tests (1), (3), (4) et (5) sur les stacks de blobs (masques réels, 3 stacks) :
+    /// (1) trois lancements identiques : poses rendues ÉGALES au bit près ; (3) un mouvement rigide commun (≈ 9°, 8 mm) ajouté à un lancement autre que le premier ne change pas les poses et l'alignement
+    /// retrouve son inverse (1e-9) ; (4) le même mouvement ajouté au premier lancement (la référence) déplace les poses rendues de ce mouvement. Tolérance des poses en (3) et (4) : 1e-9 en (4) (la médiane est
+    /// équivariante à l'arrondi près), 1e-6 en (3) (l'alignement de Kabsch du lancement déplacé n'est égal à l'autre qu'à l'arrondi près, et Weiszfeld propage cet écart jusqu'à son arrêt) ;
+    /// (5) `best` rend le médoïde (lancement 1, le moins perturbé, placé au milieu), et le rapport de chaque coupe vient du lancement le plus proche de la pose rendue.
+    #[test]
+    fn the_seed_consensus_is_exact_aligned_and_equivariant() {
+        use crate::consensus::{fuse_runs, S2sConsensus};
+        let t = Temp::new("consensus");
+        let (stacks, vraies) = jeu_de_blobs_pour_s2s(&t);
+        let g = mouvement_rigide(
+            &Vector3::new(0.1, -0.12, 0.05),
+            &Vector3::new(8.0, -3.0, 2.0),
+            &Vector3::new(1.0, 2.0, 3.0),
+        );
+        // (1)
+        let meme = lancement_fictif(&stacks, &vraies, 0.0, 0.0, 0, 0);
+        let c = fuse_runs(
+            &stacks,
+            &[meme.clone(), meme.clone(), meme.clone()],
+            S2sConsensus::Median,
+        )
+        .unwrap();
+        assert_eq!(ecart_max_poses(&stacks, &c.report.poses, &vraies), 0.0);
+        assert!(c.flagged.is_empty());
+        // trois lancements différents
+        let runs = [
+            lancement_fictif(&stacks, &vraies, 1.0, 1.0, 5, 0),
+            lancement_fictif(&stacks, &vraies, 0.1, 0.1, 6, 1),
+            lancement_fictif(&stacks, &vraies, 3.0, 3.0, 7, 2),
+        ];
+        let reference = fuse_runs(&stacks, &runs, S2sConsensus::Median).unwrap();
+        // la médiane diffère de chaque lancement (elle fusionne) mais en reste proche
+        for r in &runs {
+            assert!(ecart_max_poses(&stacks, &reference.report.poses, &r.poses) > 1e-6);
+        }
+        // (3)
+        let deplace = [
+            runs[0].clone(),
+            deplacer_lancement(&stacks, &g, &runs[1]),
+            runs[2].clone(),
+        ];
+        let c = fuse_runs(&stacks, &deplace, S2sConsensus::Median).unwrap();
+        let e = ecart_max_poses(&stacks, &c.report.poses, &reference.report.poses);
+        let ea = (c.alignments[1] * g - reference.alignments[1]).abs().max();
+        eprintln!("(3) écart des poses {e:.2e}, de l'alignement {ea:.2e}");
+        assert!(e < 1e-6, "mouvement commun non retiré : {e:.2e}");
+        assert!(ea < 1e-9, "alignement : {ea:.2e}");
+        // (4)
+        let deplace = [
+            deplacer_lancement(&stacks, &g, &runs[0]),
+            runs[1].clone(),
+            runs[2].clone(),
+        ];
+        let c = fuse_runs(&stacks, &deplace, S2sConsensus::Median).unwrap();
+        let mut attendues = reference.report.poses.clone();
+        for (si, s) in stacks.iter().enumerate() {
+            for k in 0..s.dim().2 {
+                attendues.set(si, k, g * reference.report.poses.get(si, k));
+            }
+        }
+        let e = ecart_max_poses(&stacks, &c.report.poses, &attendues);
+        eprintln!("(4) écart à g · consensus {e:.2e}");
+        assert!(e < 1e-9, "consensus non équivariant : {e:.2e}");
+        // (5)
+        let b = fuse_runs(&stacks, &runs, S2sConsensus::Best).unwrap();
+        assert_eq!(b.medoid_run, 1);
+        assert_eq!(reference.medoid_run, 1);
+        let alignee_1 = deplacer_lancement(&stacks, &b.alignments[1], &runs[1]);
+        assert_eq!(ecart_max_poses(&stacks, &b.report.poses, &alignee_1.poses), 0.0);
+        assert!(b.report.slices.iter().all(|r| r.runs == 1));
+        // le rapport d'une coupe vient du lancement le plus proche de la médiane : jamais du plus perturbé quand les deux autres l'encadrent mieux
+        let venus: Vec<usize> = reference.report.slices.iter().map(|r| r.runs).collect();
+        assert!(venus.iter().filter(|&&j| j == 2).count() < venus.len() / 4, "{venus:?}");
+    }
+
+    /// Câblage du consensus dans `pipeline::reconstruct` (blobs, réglages allégés) : avec `Median`, K = 3, graine 4, les poses rendues sont ÉGALES au bit près à `fuse_runs` des trois lancements du coupe-coupe
+    /// faits directement (un seul fil chacun) avec les graines 4, 5 et 6 : le chemin est pris, les graines sont les bonnes, et ni la taille des pools ni l'ordonnancement des fils ne changent le résultat ;
+    /// deux appels donnent le même volume ; `Best` rend les poses du médoïde ; les réglages incohérents sont refusés.
+    #[test]
+    fn the_pipeline_runs_and_fuses_the_seed_consensus() {
+        use crate::consensus::{fuse_runs, S2sConsensus};
+        use crate::pipeline::{check_consensus, reconstruct, Motion, ReconstructionConfig};
+        let t = Temp::new("consensus_pipeline");
+        let (stacks, _) = jeu_de_blobs_pour_s2s(&t);
+        let device = burn::tensor::Device::flex().autodiff();
+        let config = ReconstructionConfig {
+            motion: Motion::SliceToSlice,
+            resolution_mm: 2.0,
+            cg_max_iterations: 7,
+            s2s_sweeps: 1,
+            s2s_coarse_sweeps: 1,
+            s2s_coarse_levels: 1,
+            s2s_block_sweeps: 1,
+            slice_scale_rounds: 0,
+            s2s_seed: 4,
+            s2s_consensus: S2sConsensus::Median,
+            s2s_consensus_runs: 3,
+            ..Default::default()
+        };
+        let sortie = reconstruct(&stacks, &config, &device).unwrap();
+        let un_fil = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let directs: Vec<AlignmentReport> = (4..7)
+            .map(|graine| {
+                let simple = ReconstructionConfig {
+                    s2s_seed: graine,
+                    s2s_consensus: S2sConsensus::None,
+                    ..config.clone()
+                };
+                // un lancement simple passe par le même code que le consensus : on ne garde que ses poses et son rapport
+                un_fil.install(|| {
+                    let r = reconstruct(&stacks, &simple, &device).unwrap();
+                    AlignmentReport {
+                        poses: r.poses,
+                        slices: r.slices,
+                    }
+                })
+            })
+            .collect();
+        let attendu = fuse_runs(&stacks, &directs, S2sConsensus::Median).unwrap();
+        assert_eq!(ecart_max_poses(&stacks, &sortie.poses, &attendu.report.poses), 0.0);
+        assert_eq!(sortie.slices, attendu.report.slices);
+        // les graines comptent : le consensus diffère d'un lancement simple
+        assert!(ecart_max_poses(&stacks, &sortie.poses, &directs[0].poses) > 0.0);
+        let encore = reconstruct(&stacks, &config, &device).unwrap();
+        assert_eq!(encore.volume, sortie.volume);
+        let best = ReconstructionConfig {
+            s2s_consensus: S2sConsensus::Best,
+            ..config.clone()
+        };
+        let sortie_b = reconstruct(&stacks, &best, &device).unwrap();
+        let attendu_b = fuse_runs(&stacks, &directs, S2sConsensus::Best).unwrap();
+        assert_eq!(ecart_max_poses(&stacks, &sortie_b.poses, &attendu_b.report.poses), 0.0);
+        // refus
+        let refuse = |c: ReconstructionConfig| {
+            assert!(matches!(check_consensus(&c), Err(SvrError::InvalidConsensus(_))));
+            assert!(matches!(
+                reconstruct(&stacks, &c, &device),
+                Err(SvrError::InvalidConsensus(_))
+            ));
+        };
+        refuse(ReconstructionConfig {
+            s2s_consensus_runs: 2,
+            ..config.clone()
+        });
+        refuse(ReconstructionConfig {
+            s2s_consensus: S2sConsensus::Best,
+            s2s_consensus_runs: 1,
+            ..config.clone()
+        });
+        refuse(ReconstructionConfig {
+            motion: Motion::SliceToVolume,
+            ..config.clone()
+        });
+        assert!(check_consensus(&ReconstructionConfig {
+            s2s_consensus: S2sConsensus::Best,
+            s2s_consensus_runs: 2,
+            ..config.clone()
+        })
+        .is_ok());
+        assert!(check_consensus(&ReconstructionConfig {
+            s2s_consensus_runs: 1,
+            s2s_consensus: S2sConsensus::None,
+            ..config
+        })
+        .is_ok());
     }
 
     /// Câblage de `pipeline::reconstruct` (critères fixés avant, jeu de blobs à 3 stacks) : (a) coupe-coupe : poses de sortie égales au bit près à celles de `register_slices_s2s` appelé directement avec les

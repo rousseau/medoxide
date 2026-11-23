@@ -27,6 +27,7 @@
 
 pub mod align;
 pub mod bias;
+pub mod consensus;
 pub mod diff;
 pub mod optimizers;
 pub mod pipeline;
@@ -89,6 +90,8 @@ pub enum SvrError {
     NotEnoughStacks,
     /// Aucune paire de coupes de stacks différents ne se croise assez : le champ de biais n'est pas estimable.
     NoIntersections,
+    /// Réglages du consensus de graines du coupe-coupe incohérents (voir [`crate::consensus`]) ; le texte dit lequel.
+    InvalidConsensus(&'static str),
     /// `pixdim` et les normes des colonnes de l'affine diffèrent de plus de 1e-3 mm.
     InconsistentSpacing {
         path: PathBuf,
@@ -138,6 +141,7 @@ impl std::fmt::Display for SvrError {
                 "aucune paire de coupes de stacks différents ne se croise assez : champ de biais non estimable"
             ),
             SvrError::NoStacks => write!(f, "aucun stack : la grille de reconstruction n'a pas d'étendue"),
+            SvrError::InvalidConsensus(raison) => write!(f, "consensus de graines invalide : {raison}"),
             SvrError::InvalidGrid => write!(
                 f,
                 "grille invalide : résolution > 0 et marge >= 0, toutes deux finies, requises"

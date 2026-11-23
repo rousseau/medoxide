@@ -16,6 +16,10 @@ nifti = { workspace = true }
 # `flex` : backend CPU de Burn (Rust pur), déterministe, sans GPU ; utilisé par les tests et par `--device cpu`.
 burn = { workspace = true, features = ["autodiff", "optim", "flex"] }
 
+[dev-dependencies]
+# Empreinte SHA-256 des sorties (test « défaut identique au bit près », F4.1.3) ; déjà dans le workspace (medoxide-core).
+sha2 = { workspace = true }
+
 [features]
 # GPU NVIDIA par CUDA (`--device cuda`) ; le recalage reste sur CPU par défaut (voir `pipeline::default_device_kind`).
 cuda = ["burn/cuda"]
