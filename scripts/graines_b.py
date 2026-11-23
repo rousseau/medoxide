@@ -5,7 +5,8 @@ référence cb7174b) sur les plans de P1, graines 0, 1, 2 en float64 et graine 0
     PYTHONPATH=. uv run python <medoxide>/scripts/graines_b.py --p1 <dossier> --sortie <dossier> [--plans sub000_xy,…]
 
 `--p1` : `<sujet>/<plan>/inputs.npz` de P1. Sortie : `<sujet>/<plan>/b{,_s1,_s2,_f32}.npz` (`b0_hz`) et `.json`
-(`secondes`, perte finale).
+(`secondes`, perte finale). Avec `--f32-seulement n` (critère 3b amendé) : graines 1 … n en float32 seulement,
+`b_f32_s<g>.npz`.
 
 `INRField` fait `torch.manual_seed(seed)` dans son constructeur, avec 0 par défaut, et `estimate_inr` ne lui passe pas de
 graine : la graine est passée explicitement (comme `b0_bases_lisses.py --seed`). Le float32 reprend
@@ -75,6 +76,7 @@ def main():
     p.add_argument("--p1", required=True)
     p.add_argument("--sortie", required=True)
     p.add_argument("--plans", default=",".join(PLANS))
+    p.add_argument("--f32-seulement", type=int)
     args = p.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     originaux = (cprmod.time_segmented_cpr, cprmod.time_segmented_cpr_adjoint)
@@ -82,7 +84,10 @@ def main():
         sujet, q = plan.split("_")
         d = Path(args.sortie) / sujet / q
         d.mkdir(parents=True, exist_ok=True)
-        for nom, graine, f32 in (("b_f32", 0, True), ("b", 0, False), ("b_s1", 1, False), ("b_s2", 2, False)):
+        calculs = (("b_f32", 0, True), ("b", 0, False), ("b_s1", 1, False), ("b_s2", 2, False))
+        if args.f32_seulement:
+            calculs = [(f"b_f32_s{g}", g, True) for g in range(1, args.f32_seulement + 1)]
+        for nom, graine, f32 in calculs:
             # recalcul au retour pour le float64 seulement (mémoire) ; le float32, mesure de durée de référence, sans
             cprmod.time_segmented_cpr, cprmod.time_segmented_cpr_adjoint = originaux
             if not f32:

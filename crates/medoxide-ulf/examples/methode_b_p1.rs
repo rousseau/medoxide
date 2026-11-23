@@ -2,10 +2,12 @@
 //! (docs/ULF.md). 400 pas, champ initialisé par Burn.
 //!
 //!     cargo run --release -p medoxide-ulf --example methode_b_p1 [--features cuda] -- \
-//!         <entrées.h5> <sortie.h5> [--dispositif cpu|wgpu|cuda] [--f64] [--graine n]
+//!         <entrées.h5> <sortie.h5> [--dispositif cpu|wgpu|cuda] [--f64] [--graine n] [--poids <cas.h5>]
 //!
 //! Entrées : celles de `jointe_p1` (`scripts/cas_jointe.py entrees` ; `b0_init` n'est pas lu). Sortie : `b0_hz`,
-//! attributs `secondes`, `graine`, `dispositif`, `precision`. Elle peut servir de `--b0-init` à `jointe_p1`.
+//! attributs `secondes`, `graine`, `dispositif`, `precision`, `poids_fmi`. Elle peut servir de `--b0-init` à
+//! `jointe_p1`. `--poids` : champ initial lu dans `etat_0/champ` d'un fichier de `scripts/cas_jointe.py methode_b`
+//! (poids de la graine 0 de fmi, critère 3a amendé) au lieu d'être tiré par Burn.
 
 use std::time::Instant;
 
@@ -24,6 +26,7 @@ struct Options {
     dispositif: String,
     f64: bool,
     graine: u64,
+    poids: Option<String>,
 }
 
 fn options() -> Options {
@@ -34,12 +37,14 @@ fn options() -> Options {
         dispositif: "cpu".into(),
         f64: false,
         graine: 0,
+        poids: None,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dispositif" => o.dispositif = args.next().expect("cpu, wgpu ou cuda"),
             "--f64" => o.f64 = true,
             "--graine" => o.graine = args.next().expect("graine").parse().expect("entier"),
+            "--poids" => o.poids = Some(args.next().expect("cas.h5")),
             _ => panic!("option inconnue : {a}"),
         }
     }
@@ -54,6 +59,37 @@ fn dispositif(nom: &str) -> Device {
         "cuda" => Device::cuda(0).autodiff(),
         _ => panic!("dispositif {nom} indisponible (cuda : compiler avec --features cuda)"),
     }
+}
+
+/// Champ au format de `cas_jointe.py` (tables, couches au format PyTorch, scalaires s et o, nuls à l'état initial).
+fn lire_champ(g: &hdf5::Group, device: &Device, dtype: DType) -> InrHachage {
+    let lire = |nom: &str| {
+        let d = g.dataset(nom).unwrap();
+        (d.read_raw::<f64>().unwrap(), d.shape())
+    };
+    let compter = |prefixe: &str| {
+        g.member_names()
+            .unwrap()
+            .iter()
+            .filter(|n| n.starts_with(prefixe))
+            .count()
+    };
+    for nom in ["s", "o"] {
+        assert_eq!(lire(nom).0, vec![0.0], "{nom} initial non nul");
+    }
+    let tables = (0..compter("niveau_"))
+        .map(|l| {
+            let (v, f) = lire(&format!("niveau_{l}/table"));
+            (v, [f[0], f[1]])
+        })
+        .collect();
+    let couches = (0..compter("couche_"))
+        .map(|c| {
+            let (w, f) = lire(&format!("couche_{c}/poids"));
+            (w, [f[0], f[1]], lire(&format!("couche_{c}/biais")).0)
+        })
+        .collect();
+    InrHachage::depuis_poids(tables, couches, device, dtype)
 }
 
 fn lancer<T: Reel>(o: &Options, dtype: DType) {
@@ -75,11 +111,20 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     );
     let cfg = ConfigGrille::champ_b();
     let enc = Encodage::nouveau(&cfg, d.dims, &device, dtype);
-    let champ = ChampB0::nouveau(
-        InrHachage::nouveau(&cfg, 1, 64, 2, &device, dtype),
-        bornes[0],
-        bornes[1],
-    );
+    let reseau = match &o.poids {
+        Some(cas) => {
+            let f = hdf5::File::open(cas).unwrap();
+            let g = f.group("champ_config").unwrap();
+            let facteur = g.attr("per_level_scale").unwrap().read_scalar::<f64>().unwrap();
+            assert!(
+                (facteur - cfg.facteur).abs() < 1e-12,
+                "{cas} : grille autre que champ_b()"
+            );
+            lire_champ(&f.group("etat_0/champ").unwrap(), &device, dtype)
+        }
+        None => InrHachage::nouveau(&cfg, 1, 64, 2, &device, dtype),
+    };
+    let champ = ChampB0::nouveau(reseau, bornes[0], bornes[1]);
     let reglages = ReglagesB::default();
     let mut debut = Instant::now();
     let (b0, _) = estimer_b(&d, champ, &enc, &reglages, |it, b| {
@@ -102,6 +147,7 @@ fn lancer<T: Reel>(o: &Options, dtype: DType) {
     let attr = |nom: &str, v: f64| s.new_attr::<f64>().create(nom).unwrap().write_scalar(&v).unwrap();
     attr("secondes", secondes);
     attr("graine", o.graine as f64);
+    attr("poids_fmi", if o.poids.is_some() { 1.0 } else { 0.0 });
     let texte = |nom: &str, v: &str| {
         let v: hdf5::types::VarLenUnicode = v.parse().unwrap();
         s.new_attr::<hdf5::types::VarLenUnicode>()
