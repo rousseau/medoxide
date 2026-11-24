@@ -1066,6 +1066,13 @@ Corrections sans effet sur les résultats rapportés plus haut :
 - **Module dans les pertes** : |z| = √(re² + im²) avait un gradient NaN en z = 0 (√′(0) · 0). |z|² a désormais un plancher
   au plus petit `f32` normal : gradient nul en z = 0 comme `torch.abs`, valeur changée seulement pour |z| < 1,1e-19 (les
   données sont normalisées à un maximum de 1). Test `module_de_gradient_nul_en_zero` ; sans plancher, il trouve NaN.
+  Vérifié de bout en bout (`ulf_paire`, CUDA, six plans) : calcul avec plancher (`1124-145332-medoxide-p6-plancher`)
+  et témoin du même commit sans plancher (`1124-151310-medoxide-p6-temoin`), comparés au calcul P6 du matin (sans
+  plancher). Deux exécutions sans plancher diffèrent déjà de 0,6 à 4,9 Hz sur le B0 de la méthode B et de 1,2 à 7,0 Hz
+  sur le B0 final (RMS dans l'objet, additions atomiques sur GPU) ; le calcul avec plancher s'écarte des deux autres
+  de 0,6 à 5,2 Hz et de 1,5 à 10,5 Hz : pas d'effet mesurable au-delà de ce bruit. Au critère 4 de P6, chaque
+  exécution sort d'une enveloppe sur 18 valeurs, toujours du côté meilleur : LNCC de sub000_xy (matin), écart aux
+  données de sub000_zx (témoin, +0,004 au-dessus du maximum), de subB_zx (plancher, 0,015 sous le minimum).
 - **Maximum des écarts dans les tests** : `fold(0.0, f64::max)` rendait 0 pour un écart NaN, qui passait alors le seuil
   (`tests/gradients.rs`, `ecart_rel` de `tests/entrees.rs`). Le maximum propage désormais NaN.
 - **Paquets de l'opérateur** : les grilles des tests de P4 ter tenaient en un seul paquet le long de la lecture, si bien
