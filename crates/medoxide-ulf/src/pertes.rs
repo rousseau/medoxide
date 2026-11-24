@@ -2,11 +2,12 @@
 //! `compare_methods.estimate_joint`, de `bending_penalty` et de la pénalité hors support), et coupure du graphe autour du
 //! modèle CPR ; critères et résultats : docs/ULF.md (P4 bis, critère 3).
 //!
-//! **Coupure du graphe.** Le modèle CPR tourne sur CPU ([`ModeleCpr`], `rustfft`), hors de l'autodiff de Burn. [`evaluer`]
-//! lit u et b0, calcule les images du modèle et les place dans des feuilles de l'autodiff ; les pertes partent de ces
-//! feuilles et de u, b0. Après `backward`, [`Coupure::gradients`] ramène les gradients des feuilles sur u et b0 par les
-//! gradients écrits du modèle ([`ModeleCpr::gradient_direct`], [`ModeleCpr::gradient_adjoint_b0`]) ; ils s'ajoutent aux
-//! gradients que Burn a calculés directement pour u et b0.
+//! **Coupure du graphe.** Le modèle CPR ([`OperateurCpr`], sur le dispositif depuis P4 ter) est appelé hors de l'autodiff
+//! de Burn, sur des tenseurs détachés. [`evaluer`] lit u et b0, calcule les images du modèle et les place dans des
+//! feuilles de l'autodiff ; les pertes partent de ces feuilles et de u, b0. Après `backward`, [`Coupure::gradients`]
+//! ramène les gradients des feuilles sur u et b0 par les gradients écrits du modèle ([`OperateurCpr::gradient_direct`],
+//! [`OperateurCpr::gradient_adjoint_b0`]) ; ils s'ajoutent aux gradients que Burn a calculés directement pour u et b0.
+//! [`ModeleCpr`] (CPU, `rustfft`) reste la référence validée contre fmi.
 //!
 //! Termes, non pondérés (u à l'échelle des données normalisées, k divisé par `echelle`) :
 //! - `fidelite` = moyenne((|F⁻¹k_reg| − |F⁻¹A(+b0)u|)²) + même terme pour inv avec −b0 ;
@@ -125,8 +126,12 @@ pub fn depuis_tenseur<T: Reel>(t: Tensor<3>) -> Array3<T> {
     Array3::from_shape_vec((n0, n1, n2), v.into_iter().map(|x| T::from_f64(x).unwrap()).collect()).unwrap()
 }
 
+/// Plancher de |z|² dans [`module`] : le plus petit `f32` normal (|z| < 1,1e-19 vaut 1,1e-19).
+const PLANCHER_MODULE2: f64 = f32::MIN_POSITIVE as f64;
+
+/// |z|, de gradient nul en z = 0 comme `torch.abs` (sans plancher : √′(0) · 0 donne NaN).
 fn module(re: Tensor<3>, im: Tensor<3>) -> Tensor<3> {
-    (re.clone() * re + im.clone() * im).sqrt()
+    (re.clone() * re + im.clone() * im).clamp_min(PLANCHER_MODULE2).sqrt()
 }
 
 fn aplatir(x: Tensor<3>) -> Tensor<1> {
@@ -418,5 +423,30 @@ impl CoupureB0 {
         let [g_reg, g_inv] = self.feuilles.each_ref().map(lire);
         let op = &d.operateur;
         op.gradient_adjoint_b0(&self.atk_reg, &g_reg) - op.gradient_adjoint_b0(&self.atk_inv, &g_inv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_de_gradient_nul_en_zero() {
+        let device = Device::flex().autodiff();
+        let t = |v: [f64; 3]| {
+            Tensor::<3>::from_data(TensorData::new(v.to_vec(), [3, 1, 1]), (&device, DType::F64)).require_grad()
+        };
+        let (re, im) = (t([0.0, 3.0, -1e-30]), t([0.0, 4.0, 0.0]));
+        let m = module(re.clone(), im.clone());
+        let grads = aplatir(m.clone()).sum().backward();
+        let v = |x: Tensor<3>| x.try_into_data_dtype(DType::F64).unwrap().try_to_vec::<f64>().unwrap();
+        let g = |x: &Tensor<3>| v(Tensor::from_inner(x.grad(&grads).unwrap()));
+        let (m, g_re, g_im) = (v(m), g(&re), g(&im));
+        assert!((m[1] - 5.0).abs() < 1e-15 && m[0] < 1.2e-19, "{m:?}");
+        let proche = |g: &[f64], r: [f64; 3]| g.iter().zip(r).all(|(a, b)| (a - b).abs() < 1e-15);
+        assert!(
+            proche(&g_re, [0.0, 0.6, 0.0]) && proche(&g_im, [0.0, 0.8, 0.0]),
+            "{g_re:?} {g_im:?}"
+        );
     }
 }

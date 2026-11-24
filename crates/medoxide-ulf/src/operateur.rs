@@ -140,6 +140,14 @@ impl OperateurCpr {
         }
     }
 
+    /// Même opérateur, sommes le long de la lecture par paquets de `paquet` échantillons au plus (les grilles des tests
+    /// tiennent en un seul paquet par défaut).
+    pub fn avec_paquet(mut self, paquet: usize) -> Self {
+        assert!(paquet >= 1, "paquet vide");
+        self.paquet = paquet.min(self.dims[0]);
+        self
+    }
+
     pub fn dims(&self) -> [usize; 3] {
         self.dims
     }

@@ -4071,6 +4071,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "hdf5-metno",
+ "medoxide-ismrmrd",
  "ndarray 0.17.2",
  "rayon",
  "rustfft",

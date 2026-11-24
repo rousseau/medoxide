@@ -28,8 +28,8 @@ import numpy as np
 import torch
 
 import compare_methods as cm
+from plans_ulf import option_plans
 
-PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 
 
 def rms(a, b, m):
@@ -87,7 +87,7 @@ def main():
     p.add_argument("--graines", required=True)
     p.add_argument("--p1", required=True)
     p.add_argument("--suffixes", default="_cuda,_cuda_s1,_cuda_s2")
-    p.add_argument("--plans", default=",".join(PLANS))
+    option_plans(p)
     p.add_argument("--sortie")
     args = p.parse_args()
     tout = {}

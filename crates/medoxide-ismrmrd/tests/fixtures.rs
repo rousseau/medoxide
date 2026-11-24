@@ -114,3 +114,58 @@ fn refuse_un_fichier_d_un_autre_format() {
     assert!(erreur.to_string().contains("ni dataset/data"), "{erreur}");
     std::fs::remove_dir_all(&dossier).unwrap();
 }
+
+/// Copie de `fmi.h5` dont la ligne `invert_ro_polarity` de l'en-tête est remplacée par `parametres` (lignes XML).
+fn fmi_modifie(nom: &str, parametres: &str) -> (PathBuf, Acquisition) {
+    let source = lire(&donnees("fmi.h5")).unwrap();
+    let ligne = "  <userParameterString><name>invert_ro_polarity</name><value>True</value></userParameterString>\n";
+    assert!(source.xml.contains(ligne));
+    let xml: hdf5::types::VarLenUnicode = source.xml.replace(ligne, parametres).parse().unwrap();
+    let dossier = std::env::temp_dir().join(format!("medoxide-ismrmrd-{}-{nom}", std::process::id()));
+    std::fs::create_dir_all(&dossier).unwrap();
+    let chemin = dossier.join("fmi.h5");
+    let f = hdf5::File::create(&chemin).unwrap();
+    f.new_dataset::<hdf5::types::VarLenUnicode>()
+        .create("xml_header")
+        .unwrap()
+        .write_scalar(&xml)
+        .unwrap();
+    f.new_dataset_builder()
+        .with_data(&source.kspace)
+        .create("kspace")
+        .unwrap();
+    drop(f);
+    (dossier, source)
+}
+
+/// Paramètres absents : faux, comme l'écrivain de fmi (`inv_arr_ro.size > 0 else False`).
+#[test]
+fn fmi_polarites_absentes_valent_faux() {
+    let (dossier, source) = fmi_modifie("absent", "");
+    let a = lire(&dossier.join("fmi.h5")).unwrap();
+    assert_eq!(a.polarite_lecture, Some(Polarite::Normale));
+    assert!(!a.lecture_retournee_a_l_ecriture);
+    assert!(!a.phases_retournees_a_l_ecriture);
+    assert_eq!(a.kspace, source.kspace);
+    std::fs::remove_dir_all(&dossier).unwrap();
+}
+
+/// `invert_ph_polarity` = True : l'écrivain a retourné les axes de phase, signalé ; valeur inconnue refusée.
+#[test]
+fn fmi_phases_retournees_signalees() {
+    let ligne =
+        |n: &str, v: &str| format!("  <userParameterString><name>{n}</name><value>{v}</value></userParameterString>\n");
+    let (dossier, _) = fmi_modifie(
+        "phases",
+        &(ligne("invert_ro_polarity", "False") + &ligne("invert_ph_polarity", "True")),
+    );
+    let a = lire(&dossier.join("fmi.h5")).unwrap();
+    assert_eq!(a.polarite_lecture, Some(Polarite::Normale));
+    assert!(a.phases_retournees_a_l_ecriture);
+    std::fs::remove_dir_all(&dossier).unwrap();
+
+    let (dossier, _) = fmi_modifie("inconnu", &ligne("invert_ph_polarity", "peut-être"));
+    let e = lire(&dossier.join("fmi.h5")).unwrap_err();
+    assert!(e.to_string().contains("invert_ph_polarity"), "{e}");
+    std::fs::remove_dir_all(&dossier).unwrap();
+}

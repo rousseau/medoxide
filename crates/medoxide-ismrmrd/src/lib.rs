@@ -58,6 +58,9 @@ pub struct Acquisition {
     /// Vrai si l'écrivain a retourné le k-space le long de la lecture pour le ramener à la polarité normale (fmi, lecture
     /// inversée) : les échantillons ne sont alors plus dans l'ordre d'acquisition.
     pub lecture_retournee_a_l_ecriture: bool,
+    /// Vrai si l'écrivain a retourné les deux axes de phase (fmi, `invert_ph_polarity` = True : `np.flip` sur les axes 1
+    /// et 2) : les lignes ne sont alors plus dans l'ordre d'acquisition. Toujours faux pour Spinloop.
+    pub phases_retournees_a_l_ecriture: bool,
     /// Axes de la machine `[lecture, phase 1, phase 2]` (Spinloop, paramètre `axes`, ex. « yzx »).
     pub axes: Option<String>,
     /// Plan d'acquisition au sens de fmi (paramètre `plane`, ex. « yz »).
@@ -168,6 +171,15 @@ fn parametre_requis<'a>(entete: &'a Entete, nom: &str) -> Result<&'a str, Erreur
         .ok_or_else(|| ErreurLecture::Incoherence(format!("paramètre utilisateur « {nom} » absent")))
 }
 
+/// Paramètre booléen de fmi (`True` / `False`) ; absent : faux, comme `fmi.io.writers.write_hdf5_file`.
+fn parametre_booleen(entete: &Entete, nom: &str) -> Result<bool, ErreurLecture> {
+    match entete.parametres.get(nom).map(String::as_str) {
+        None | Some("False") => Ok(false),
+        Some("True") => Ok(true),
+        Some(autre) => Err(ErreurLecture::Incoherence(format!("{nom} = « {autre} »"))),
+    }
+}
+
 // --- fmi --------------------------------------------------------------------------------------------------------------
 
 fn lire_fmi(fichier: &hdf5::File) -> Result<Acquisition, ErreurLecture> {
@@ -189,11 +201,9 @@ fn lire_fmi(fichier: &hdf5::File) -> Result<Acquisition, ErreurLecture> {
     let lectures_par_ligne = kspace.map_axis(ndarray::Axis(0), |ligne| {
         u16::from(ligne.iter().any(|z| z.re != 0.0 || z.im != 0.0))
     });
-    let inversee = match parametre_requis(&entete, "invert_ro_polarity")? {
-        "True" => true,
-        "False" => false,
-        autre => return Err(ErreurLecture::Incoherence(format!("invert_ro_polarity = « {autre} »"))),
-    };
+    // l'écrivain retourne la lecture si `invert_ro_polarity`, les deux axes de phase si `invert_ph_polarity`
+    let inversee = parametre_booleen(&entete, "invert_ro_polarity")?;
+    let phases_retournees = parametre_booleen(&entete, "invert_ph_polarity")?;
     let dwell_ms: f64 = parametre_requis(&entete, "dwellTime")?
         .parse()
         .map_err(|_| ErreurLecture::Incoherence("dwellTime n'est pas un nombre".into()))?;
@@ -209,6 +219,7 @@ fn lire_fmi(fichier: &hdf5::File) -> Result<Acquisition, ErreurLecture> {
             Polarite::Normale
         }),
         lecture_retournee_a_l_ecriture: inversee,
+        phases_retournees_a_l_ecriture: phases_retournees,
         axes: None,
         plan,
         entete,
@@ -315,6 +326,7 @@ fn lire_spinloop(fichier: &hdf5::File) -> Result<Acquisition, ErreurLecture> {
         dwell_us,
         polarite_lecture,
         lecture_retournee_a_l_ecriture: false,
+        phases_retournees_a_l_ecriture: false,
         axes,
         plan: None,
         entete,

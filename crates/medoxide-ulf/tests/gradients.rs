@@ -115,7 +115,10 @@ fn ecart_differences_finies(cas: &Cas) -> f64 {
         ecarts.push(((fd - s) / s).abs());
     }
     println!("  différences finies : {ecarts:?}");
-    ecarts.into_iter().fold(0.0, f64::max)
+    // NaN propagé (f64::max le laisserait passer)
+    ecarts
+        .into_iter()
+        .fold(0.0, |m, e| if e.is_nan() || e > m { e } else { m })
 }
 
 #[test]

@@ -12,6 +12,9 @@ critère chiffré **écrit avant le code**.
 - Référence Python : fmi `feat/seg-sr` @ `cb7174b` ; sorties de l'étape 1 (méthode jointe B0 + image, réglage
   finest32, fantôme sub000 et subB) sur Garage (`spinloop/references/`), dont des opérateurs de test en
   complex128.
+- Sujets : `sub000` (fantôme) et `subB` sont des libellés de ce document ; les identifiants des données
+  restent hors dépôt. Les scripts de comparaison les lisent dans `MEDOXIDE_ULF_SUJETS` (séparés par des virgules,
+  `scripts/plans_ulf.py`), ou prennent `--plans`.
 - Précision mesurée : en complex64, le modèle direct et son adjoint s'écartent de 2,3–2,8e-7 du complex128 ; l'étape 1
   peut tourner en `f32` (wgpu, Metal).
 - Essais hors medoxide (`oxide/bench/ulf-essais.md`) : FFT 3D de toute taille sur GPU par Bluestein au-dessus de
@@ -71,6 +74,17 @@ provenance. Les axes (`axes`, `plane`) sont rendus tels quels : la convention co
   compte des lignes, le temps d'échantillonnage, la porteuse, les axes ou le plan, la polarité et le TR. Aucun fichier Spinloop réel à lecture inversée (`read_sign` = -1) n'existe encore : ce cas n'est vérifié que sur le fichier synthétique. Le critère 1
   demandait 1e-6 : l'égalité exacte tient parce que la moyenne est faite comme en Python (somme en `f64`, division,
   conversion en `f32`).
+
+### Correction après relecture (2026-11-24)
+
+L'écrivain de fmi (`write_hdf5_file`) lit deux paramètres, chacun faux s'il est absent : `invert_ro_polarity` (retourne
+la lecture) et `invert_ph_polarity` (retourne les deux axes de phase, `np.flip(axis=(1, 2))`). Le lecteur refusait un
+fichier sans `invert_ro_polarity` et ignorait `invert_ph_polarity`. Désormais, un paramètre absent vaut faux, une valeur
+autre que `True` / `False` est refusée, et `Acquisition::phases_retournees_a_l_ecriture` signale le retournement des
+phases ; les entrées de l'étape 1 (P6) refusent une paire où un seul des deux fichiers l'a subi. Aucun des fichiers réels
+de P1 ne porte `invert_ph_polarity`. Tests : `tests/fixtures.rs` (paramètres absents, phases retournées, valeur
+inconnue) et `paire_incoherente_refusee` de medoxide-ulf, qui vérifie aussi le motif du refus ; trois mutations
+(absent refusé, phases ignorées, contrôle de paire retiré) les font échouer.
 
 ## P4 : étape 1, modèle direct et adjoint (`medoxide-ulf`)
 
@@ -526,6 +540,9 @@ critère devient :
 l'écart aux données de sub000 xy (+0,5 %, 3,2 écarts-types sur trois graines), noté. Les LNCC hors enveloppe de 1e-4 au
 plus restent notées.
 
+Recalcul du point 2 : `scripts/compare_jointe_p1.py --dispersion _cuda,_wgpu_g1,_wgpu_g2` (différence des moyennes
+rapportée à √(s²_Rust/3 + s²_PyTorch/3), jugée à moins de 2 écarts-types).
+
 ### Résultat du critère 6 (2026-11-22) : durées
 
 Plan sub000 xy (subB yz pour la seconde mesure CUDA), méthode complète en `f32` (`jointe_p1`, durées par phase dans
@@ -902,7 +919,8 @@ décider.**
 **Décision (2026-11-23, François) : critère 4 tenu, avec réserves.** L'amendement a été décidé après la mesure. 4a est
 jugé sur la médiane des 25 paires croisées Rust × PyTorch, rapportée à la médiane des paires de PyTorch : tenu sur les
 six plans (5,4–17,7 Hz contre 5,1–20,3). L'écart aux données est jugé sur la différence des moyennes des chaînes
-rapportée à son écart-type : à moins d'un écart-type sur cinq plans.
+rapportée à son écart-type : à moins d'un écart-type sur cinq plans. Recalcul : lignes « retenu » de
+`scripts/compare_b4_p1.py` (4a : médiane des paires croisées dans [m/2, 2m] ; écart-type √(s²_Rust/5 + s²_PyTorch/5)).
 
 Réserves notées :
 - sur sub000_zx, Rust colle mieux aux données que PyTorch (−0,29 %, −2,6 écarts-types) ;
@@ -935,3 +953,131 @@ Lecture :
   il faudrait revenir à `ModeleCpr` quand le dispositif est le CPU. Cette piste est notée, pas faite.
 
 **Critère 5 rapporté** (sans seuil). P5 est terminée : critères 1, 2 (amendé), 3 (amendé), 4 (tenu avec réserves) et 5.
+
+## P6 : entrées de l'étape 1 depuis les fichiers ISMRMRD (conception, 2026-11-24)
+
+### Ce qu'on porte
+
+Construction des entrées de la méthode à partir d'une paire de fichiers (référence : fmi `cb7174b`, `mo_joint.context`
+→ `utils_io.load_pair` et `denoise_joint.Context`). C'est ce que P1 a écrit dans `inputs.npz` :
+- **Lecture** : le k-space brut de reg et de inv (format fmi, inv déjà retourné le long de la lecture à l'écriture),
+  avec le lecteur de P3 (`medoxide-ismrmrd`, identique au bit près à h5py), passé en `f64`.
+- **Écho** (`echo_position`) : énergie moyenne |k|² par échantillon de lecture (moyenne sur les deux axes de phase),
+  maximum de son logarithme, affiné par une parabole sur les trois points autour du maximum (position sous-pixel).
+- **Fenêtre de Tukey** (`symmetric_readout_window`, `readout_window`) :
+  - demi-largeur commune h = min sur reg et inv de min(e, n − 1 − e), où e est la position de l'écho ;
+  - pour chaque acquisition, w(i) = ½ − ½ cos(π · clamp((h − |i − e|) / 6, 0, 1)) ;
+  - k fenêtré = k · w le long de la lecture.
+- **Temps** (`tse_time_array`, `symmetric_time=True`, `readout_padding` = 500 µs) :
+  - pas = dwell + 500e-6 / n ;
+  - t_i = i · pas − t_{n/2} ;
+  - dwell = `dwellTime` (ms) · 1e-3, lu dans l'en-tête de reg.
+- **Bornes de l'amplitude de B0** (`b0_bounds_hz`) : min = 1 / (2π (t_{n−1} − t_0 + dwell)), max = 1 / (2 dwell).
+- **Espacement** : 1e3 · FOV / n par axe. FOV = `encodedSpace/fieldOfView_mm` · 1e-3, en **`f32`** comme dans fmi,
+  arrondi qu'on reproduit.
+- **Masque de l'objet** (évaluation, pas la méthode) : moyenne des magnitudes de Aᴴ(0) k_reg et Aᴴ(0) k_inv,
+  seuillée à 0,2 × son maximum. Le masque de support des pertes est déjà porté (`pertes::masque_support`).
+- **Champ de départ** : la méthode B de Rust (P5), à la place du `b0_warm_start` de P1.
+
+Le code va dans un module `medoxide-ulf::entrees`, et `medoxide-ulf` dépend désormais de `medoxide-ismrmrd`. Un
+exemple `ulf_paire <reg.h5> <inv.h5> <sortie.h5>` enchaîne la lecture, les entrées, la méthode B et la jointe. Il
+vérifie que les deux fichiers ont le même plan, la même matrice, le même FOV et le même dwell, et des polarités
+opposées ; sinon, il refuse.
+
+Hors de P6 :
+- le format Spinloop à lecture inversée (aucun fichier réel ; le retournement serait à faire à la lecture) ;
+- le modèle GNL ;
+- le modèle de bruit (σ, sert à l'évaluation) ;
+- l'orientation entre plans (étape 2).
+
+### Critères (écrits avant le code)
+
+Références :
+- les `inputs.npz` de P1 (six plans, sub000 et subB, calculés à `cb7174b` depuis les fichiers du catalogue `mo_data`) ;
+- les positions d'écho et la demi-largeur, recalculées par `utils_io` sur ces mêmes fichiers (script
+  `scripts/cas_entrees.py`).
+
+1. **Écho et fenêtre** :
+   - positions d'écho à ≤ 1e-9 échantillon ;
+   - demi-largeur égale à ≤ 1e-9 ;
+   - k-space fenêtré à ≤ 1e-12 (écart relatif L2) de `k_reg` et `k_inv` des `inputs.npz`, en `f64`.
+2. **Temps, bornes, espacement** : `time_array`, `b0_bounds` et `spacing_mm` à ≤ 1e-12 (relatif) des `inputs.npz`.
+3. **Masque de l'objet** : identique voxel pour voxel au `mask` des `inputs.npz`. Un voxel qui diffère n'est toléré
+   que si sa valeur est à moins de 1e-9 (relatif) du seuil ; chaque cas toléré est rapporté.
+4. **Bout en bout** (`ulf_paire`, `f32`, CUDA sur la RTX, six plans) : les données qui entrent dans `Donnees`
+   (k-space en `f32`, temps, espacement, bornes) sont égales à celles qu'on obtient depuis les `inputs.npz`, à
+   l'arrondi `f32` près (≤ 1e-6 relatif). Le B0 final de la chaîne doit être dans la dispersion des cinq chaînes de
+   Rust du critère 4 de P5 : à moins du plus grand écart entre deux d'entre elles, de leur moyenne. Sa LNCC et son
+   écart aux données doivent être dans leur [min, max].
+5. **Tests sans données réelles** (dépôt public) : une paire synthétique écrite par l'écrivain de fmi
+   (`write_hdf5_file`, un fichier inv retourné), versionnée avec les valeurs attendues de `utils_io`. Les critères 1
+   à 3 sur données réelles s'activent avec une variable d'environnement (`MEDOXIDE_ULF_P1_ENTREES` : fichiers et
+   `inputs.npz` hors dépôt). Aucun fichier de subB dans le dépôt.
+6. **Plateformes** : compilation et tests sur macOS arm64 et Linux x86_64 (RTX).
+
+Mutations à noter : demi-largeur prise sur une seule acquisition ; parabole omise ; padding du temps omis ; FOV en `f64`.
+
+### Résultat de P6 (2026-11-24)
+
+**Critères 1, 2, 3 et 5 : tenus** (`tests/entrees.rs` ; références recalculées par `scripts/cas_entrees.py`, qui
+redonne les `inputs.npz` de P1 à 8e-16 près, masques identiques, depuis les fichiers du catalogue rapatriés de la
+RTX). Sur les six plans de P1 et le cas synthétique :
+- positions d'écho et demi-largeur à 1,4e-14 échantillon au plus ;
+- k-space fenêtré à 6e-16 (écart relatif L2) au plus ;
+- temps, bornes et espacement égaux au bit près (arrondi `f32` de l'espacement compris) ;
+- masques identiques voxel pour voxel, sans voxel toléré au seuil.
+
+Les quatre mutations prévues font échouer le cas synthétique et les plans réels : demi-largeur prise sur reg seul,
+parabole omise, remplissage du temps omis, FOV en `f64`. Une paire incohérente (deux reg, reg et inv échangés) est
+refusée. Le cas synthétique compte peu de voxels dans l'objet (6 sur 960) : le masque y est faiblement testé ; il
+l'est pleinement sur les plans réels (34 000 à 85 000 voxels).
+
+**Critère 4 : tenu sauf la LNCC de sub000_xy, plus haute de 1e-4 que la meilleure des cinq chaînes.** Calcul
+`1124-090126-medoxide-p6-paires` (RTX, CUDA, `ulf_paire --ecrire-entrees`, 16686186 ; Garage arrêté, sorties
+rapatriées par `scp`), jugé par `scripts/compare_p6_p1.py` :
+
+| plan | entrées (écart `f32`) | B0 − moyenne des 5 chaînes (seuil) | LNCC [min, max des chaînes] | écart aux données [min, max] | durée (B + jointe) |
+|---|---|---|---|---|---|
+| sub000_xy | 0 | 5,32 Hz (9,42) ok | 0,8284 [0,8275, 0,8283] hors | 1,2814 [1,2762, 1,2930] ok | 47 + 102 s |
+| sub000_yz | 0 | 15,63 Hz (32,79) ok | 0,7903 [0,7881, 0,7947] ok | 2,1819 [2,1311, 2,2060] ok | 47 + 102 s |
+| sub000_zx | 0 | 4,29 Hz (7,42) ok | 0,8147 [0,8142, 0,8148] ok | 1,5827 [1,5760, 1,5828] ok | 48 + 102 s |
+| subB_xy | 0 | 3,06 Hz (6,86) ok | 0,6252 [0,6250, 0,6257] ok | 2,6541 [2,6358, 2,6803] ok | 48 + 102 s |
+| subB_yz | 0 | 9,37 Hz (21,24) ok | 0,6502 [0,6496, 0,6505] ok | 2,3775 [2,3609, 2,4039] ok | 47 + 102 s |
+| subB_zx | 0 | 4,61 Hz (10,07) ok | 0,6419 [0,6417, 0,6424] ok | 2,4021 [2,3983, 2,4523] ok | 48 + 102 s |
+
+Les entrées de la méthode sont identiques à celles des `inputs.npz` une fois en `f32`, et le masque l'est aussi : la
+chaîne depuis les fichiers ne change rien à ce que reçoit la méthode. Le calcul est une sixième chaîne, indépendante des
+cinq autres : `ulf_paire` fixe la graine une seule fois, avant la méthode B, si bien que les poids initiaux de la jointe
+ne sont pas ceux de la chaîne de graine 0 (où `jointe_p1` refixe la graine) ; l'ordre des additions atomiques sur GPU
+diffère en outre d'une exécution à l'autre. Sa LNCC sur sub000_xy dépasse de 1e-4 le
+maximum des cinq autres, dans le sens d'une meilleure correction. **Non tenu tel qu'écrit sur ce seul point ; suite à
+décider.**
+
+**Critère 6 : tenu.** Tests de `tests/entrees.rs` passés sur macOS arm64 et sur Linux x86_64 (RTX, calcul
+`1124-091938-medoxide-p6-tests`, cas synthétique ; les fichiers réels n'y ont servi qu'au critère 4).
+
+**Décision (2026-11-24, François) : critère 4 de P6 tenu, LNCC de sub000_xy notée.** La LNCC de ce plan dépasse de
+1e-4 le maximum de cinq chaînes, dans le sens d'une meilleure correction ; une étendue de cinq valeurs est étroite, et
+ce calcul en est une sixième. P6 est terminée : critères 1 à 6 tenus.
+
+## Relecture de la pile P3 – P6 (2026-11-24) : points mineurs
+
+Corrections sans effet sur les résultats rapportés plus haut :
+- **Module dans les pertes** : |z| = √(re² + im²) avait un gradient NaN en z = 0 (√′(0) · 0). |z|² a désormais un plancher
+  au plus petit `f32` normal : gradient nul en z = 0 comme `torch.abs`, valeur changée seulement pour |z| < 1,1e-19 (les
+  données sont normalisées à un maximum de 1). Test `module_de_gradient_nul_en_zero` ; sans plancher, il trouve NaN.
+  Vérifié de bout en bout (`ulf_paire`, CUDA, six plans) : calcul avec plancher (`1124-145332-medoxide-p6-plancher`)
+  et témoin du même commit sans plancher (`1124-151310-medoxide-p6-temoin`), comparés au calcul P6 du matin (sans
+  plancher). Deux exécutions sans plancher diffèrent déjà de 0,6 à 4,9 Hz sur le B0 de la méthode B et de 1,2 à 7,0 Hz
+  sur le B0 final (RMS dans l'objet, additions atomiques sur GPU) ; le calcul avec plancher s'écarte des deux autres
+  de 0,6 à 5,2 Hz et de 1,5 à 10,5 Hz : pas d'effet mesurable au-delà de ce bruit. Au critère 4 de P6, chaque
+  exécution sort d'une enveloppe sur 18 valeurs, toujours du côté meilleur : LNCC de sub000_xy (matin), écart aux
+  données de sub000_zx (témoin, +0,004 au-dessus du maximum), de subB_zx (plancher, 0,015 sous le minimum).
+- **Maximum des écarts dans les tests** : `fold(0.0, f64::max)` rendait 0 pour un écart NaN, qui passait alors le seuil
+  (`tests/gradients.rs`, `ecart_rel` de `tests/entrees.rs`). Le maximum propage désormais NaN.
+- **Paquets de l'opérateur** : les grilles des tests de P4 ter tenaient en un seul paquet le long de la lecture, si bien
+  que le découpage n'était pas testé. `OperateurCpr::avec_paquet` fixe la taille ; `tests/operateur.rs` refait les
+  comparaisons en paquets de 3 (dernier paquet incomplet), sous les mêmes seuils. Un décalage d'indice dans `direct` ou
+  dans les adjoints n'est détecté qu'ainsi.
+- Commentaires : la coupure du graphe et `Bilan::secondes_operateur` décrivaient encore le modèle CPR sur CPU (avant
+  P4 ter) ; la phrase sur la graine du critère 4 de P6 est précisée.
