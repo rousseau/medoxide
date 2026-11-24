@@ -12,6 +12,8 @@ ndarray = { workspace = true }
 rayon = { workspace = true }
 # INR (grille de hachage + MLP) et pertes de l'estimation jointe, avec gradients ; `flex` : backend CPU (tests, f64).
 burn = { workspace = true, features = ["autodiff", "optim", "flex"] }
+# Lecture des paires d'acquisitions (P6, `entrees`).
+medoxide-ismrmrd = { path = "../medoxide-ismrmrd" }
 
 [dev-dependencies]
 # Lecture des cas de test (HDF5 écrits par h5py, complexes compris) ; déjà dans le workspace (medoxide-ismrmrd).
