@@ -1035,3 +1035,7 @@ décider.**
 
 **Critère 6 : tenu.** Tests de `tests/entrees.rs` passés sur macOS arm64 et sur Linux x86_64 (RTX, calcul
 `1124-091938-medoxide-p6-tests`, cas synthétique ; les fichiers réels n'y ont servi qu'au critère 4).
+
+**Décision (2026-11-24, François) : critère 4 de P6 tenu, LNCC de sub000_xy notée.** La LNCC de ce plan dépasse de
+1e-4 le maximum de cinq chaînes, dans le sens d'une meilleure correction ; une étendue de cinq valeurs est étroite, et
+ce calcul en est une sixième. P6 est terminée : critères 1 à 6 tenus.
