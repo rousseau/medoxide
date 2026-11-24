@@ -267,7 +267,8 @@ pub struct Bilan {
     pub support: f64,
     pub scalaires: f64,
     pub totale: f64,
-    /// Durée (s) du modèle CPR et de son gradient (CPU), transferts vers et depuis le dispositif compris.
+    /// Durée (s) du modèle CPR et de son gradient (sur le dispositif depuis P4 ter), attente de la file du dispositif
+    /// comprise.
     pub secondes_operateur: f64,
 }
 

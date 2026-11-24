@@ -1046,8 +1046,10 @@ rapatriées par `scp`), jugé par `scripts/compare_p6_p1.py` :
 | subB_zx | 0 | 4,61 Hz (10,07) ok | 0,6419 [0,6417, 0,6424] ok | 2,4021 [2,3983, 2,4523] ok | 48 + 102 s |
 
 Les entrées de la méthode sont identiques à celles des `inputs.npz` une fois en `f32`, et le masque l'est aussi : la
-chaîne depuis les fichiers ne change rien à ce que reçoit la méthode. Le calcul est une sixième chaîne (graine 0, mais
-l'ordre des additions atomiques sur GPU diffère d'une exécution à l'autre). Sa LNCC sur sub000_xy dépasse de 1e-4 le
+chaîne depuis les fichiers ne change rien à ce que reçoit la méthode. Le calcul est une sixième chaîne, indépendante des
+cinq autres : `ulf_paire` fixe la graine une seule fois, avant la méthode B, si bien que les poids initiaux de la jointe
+ne sont pas ceux de la chaîne de graine 0 (où `jointe_p1` refixe la graine) ; l'ordre des additions atomiques sur GPU
+diffère en outre d'une exécution à l'autre. Sa LNCC sur sub000_xy dépasse de 1e-4 le
 maximum des cinq autres, dans le sens d'une meilleure correction. **Non tenu tel qu'écrit sur ce seul point ; suite à
 décider.**
 
@@ -1057,3 +1059,18 @@ décider.**
 **Décision (2026-11-24, François) : critère 4 de P6 tenu, LNCC de sub000_xy notée.** La LNCC de ce plan dépasse de
 1e-4 le maximum de cinq chaînes, dans le sens d'une meilleure correction ; une étendue de cinq valeurs est étroite, et
 ce calcul en est une sixième. P6 est terminée : critères 1 à 6 tenus.
+
+## Relecture de la pile P3 – P6 (2026-11-24) : points mineurs
+
+Corrections sans effet sur les résultats rapportés plus haut :
+- **Module dans les pertes** : |z| = √(re² + im²) avait un gradient NaN en z = 0 (√′(0) · 0). |z|² a désormais un plancher
+  au plus petit `f32` normal : gradient nul en z = 0 comme `torch.abs`, valeur changée seulement pour |z| < 1,1e-19 (les
+  données sont normalisées à un maximum de 1). Test `module_de_gradient_nul_en_zero` ; sans plancher, il trouve NaN.
+- **Maximum des écarts dans les tests** : `fold(0.0, f64::max)` rendait 0 pour un écart NaN, qui passait alors le seuil
+  (`tests/gradients.rs`, `ecart_rel` de `tests/entrees.rs`). Le maximum propage désormais NaN.
+- **Paquets de l'opérateur** : les grilles des tests de P4 ter tenaient en un seul paquet le long de la lecture, si bien
+  que le découpage n'était pas testé. `OperateurCpr::avec_paquet` fixe la taille ; `tests/operateur.rs` refait les
+  comparaisons en paquets de 3 (dernier paquet incomplet), sous les mêmes seuils. Un décalage d'indice dans `direct` ou
+  dans les adjoints n'est détecté qu'ainsi.
+- Commentaires : la coupure du graphe et `Bilan::secondes_operateur` décrivaient encore le modèle CPR sur CPU (avant
+  P4 ter) ; la phrase sur la graine du critère 4 de P6 est précisée.

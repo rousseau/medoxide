@@ -1,6 +1,7 @@
 //! Critère 1 de P4 ter (docs/ULF.md) : `OperateurCpr` (tenseurs sur le dispositif) contre `ModeleCpr` (CPU, validé
 //! contre fmi) : direct, adjoint, adjoint pondéré, transformées sans champ, deux gradients. Grilles paires et impaires ;
-//! taille P1 (115 × 115 × 45) si `MEDOXIDE_ULF_OP_P1` est défini. Seuils (écarts relatifs L2) : ≤ 1e-12 en `f64` (CPU),
+//! taille P1 (115 × 115 × 45) si `MEDOXIDE_ULF_OP_P1` est défini. Petites grilles aussi en paquets de 3 échantillons
+//! (dernier paquet incomplet), qu'elles ne forment pas d'elles-mêmes. Seuils (écarts relatifs L2) : ≤ 1e-12 en `f64` (CPU),
 //! ≤ 1e-5 en `f32` (CPU ; wgpu si `MEDOXIDE_ULF_GPU` ; CUDA si `MEDOXIDE_ULF_CUDA` avec la feature `cuda`).
 
 use burn::prelude::*;
@@ -52,12 +53,17 @@ fn ecart_r<T: Reel>(a: &Tensor<3>, r: &Array3<T>) -> f64 {
     (num / den).sqrt()
 }
 
-/// Écarts des sept quantités, calculées dans la précision T par les deux opérateurs.
-fn ecarts<T: Reel>(dims: [usize; 3], device: &Device, dtype: DType) -> Vec<(&'static str, f64)> {
+/// Écarts des sept quantités, calculées dans la précision T par les deux opérateurs (`paquet` : taille des paquets de
+/// l'opérateur sur le dispositif, sinon celle par défaut).
+fn ecarts<T: Reel>(dims: [usize; 3], paquet: Option<usize>, device: &Device, dtype: DType) -> Vec<(&'static str, f64)> {
     let temps: Vec<f64> = (0..dims[0]).map(|i| -3.6e-3 + 6.25e-5 * i as f64).collect();
     let temps_t: Vec<T> = temps.iter().map(|&t| T::from_f64(t).unwrap()).collect();
     let cpu = ModeleCpr::<T>::new(dims, &temps_t);
     let op = OperateurCpr::new(dims, &temps, device, dtype);
+    let op = match paquet {
+        Some(p) => op.avec_paquet(p),
+        None => op,
+    };
     let (ure, uim, kre, kim, gre, gim) = (
         aleatoire(dims, 1),
         aleatoire(dims, 2),
@@ -99,15 +105,24 @@ fn ecarts<T: Reel>(dims: [usize; 3], device: &Device, dtype: DType) -> Vec<(&'st
 }
 
 fn verifier<T: Reel>(nom: &str, device: &Device, dtype: DType, seuil: f64) {
-    let mut grilles = vec![[7, 6, 5], [8, 5, 4], [16, 12, 9]];
+    let mut cas: Vec<_> = [[7, 6, 5], [8, 5, 4], [16, 12, 9]]
+        .into_iter()
+        .flat_map(|g| [(g, None), (g, Some(3))])
+        .collect();
     if std::env::var("MEDOXIDE_ULF_OP_P1").is_ok() {
-        grilles.push([115, 115, 45]);
+        cas.push(([115, 115, 45], None));
     }
-    for dims in grilles {
-        let e = ecarts::<T>(dims, device, dtype);
-        let pire = e.iter().map(|x| x.1).fold(0.0, f64::max);
-        println!("{nom} {dims:?} : {pire:.2e}  {e:?}");
-        assert!(e.iter().all(|x| x.1 <= seuil), "{nom} {dims:?} : {e:?}");
+    for (dims, paquet) in cas {
+        let e = ecarts::<T>(dims, paquet, device, dtype);
+        let pire = e
+            .iter()
+            .map(|x| x.1)
+            .fold(0.0, |m, v| if v.is_nan() || v > m { v } else { m });
+        println!("{nom} {dims:?} paquet {paquet:?} : {pire:.2e}  {e:?}");
+        assert!(
+            e.iter().all(|x| x.1 <= seuil),
+            "{nom} {dims:?} paquet {paquet:?} : {e:?}"
+        );
     }
 }
 

@@ -26,7 +26,7 @@ fn ecart_rel(a: &[f64], r: &[f64]) -> f64 {
     a.iter()
         .zip(r)
         .map(|(x, y)| (x - y).abs() / y.abs().max(f64::MIN_POSITIVE))
-        .fold(0.0, f64::max)
+        .fold(0.0, |m, e| if e.is_nan() || e > m { e } else { m }) // NaN propagé
 }
 
 fn verifier(attendu: &Path, fichiers: &Path) -> Vec<String> {
