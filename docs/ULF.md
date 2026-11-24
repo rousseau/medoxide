@@ -998,3 +998,37 @@ Références :
 6. **Plateformes** : compilation et tests sur macOS arm64 et Linux x86_64 (RTX).
 
 Mutations à noter : demi-largeur prise sur une seule acquisition ; parabole omise ; padding du temps omis ; FOV en `f64`.
+
+### Résultat de P6 (2026-11-24)
+
+**Critères 1, 2, 3 et 5 : tenus** (`tests/entrees.rs` ; références recalculées par `scripts/cas_entrees.py`, qui
+redonne les `inputs.npz` de P1 à 8e-16 près, masques identiques, depuis les fichiers du catalogue rapatriés de la
+RTX). Sur les six plans de P1 et le cas synthétique :
+- positions d'écho et demi-largeur à 1,4e-14 échantillon au plus ;
+- k-space fenêtré à 6e-16 (écart relatif L2) au plus ;
+- temps, bornes et espacement égaux au bit près (arrondi `f32` de l'espacement compris) ;
+- masques identiques voxel pour voxel, sans voxel toléré au seuil.
+
+Les quatre mutations prévues font échouer le cas synthétique et les plans réels : demi-largeur prise sur reg seul,
+parabole omise, remplissage du temps omis, FOV en `f64`. Une paire incohérente (deux reg, reg et inv échangés) est
+refusée. Le cas synthétique compte peu de voxels dans l'objet (6 sur 960) : le masque y est faiblement testé ; il
+l'est pleinement sur les plans réels (34 000 à 85 000 voxels).
+
+**Critère 4 : tenu sauf la LNCC de sub000_xy, plus haute de 1e-4 que la meilleure des cinq chaînes.** Calcul
+`1124-090126-medoxide-p6-paires` (RTX, CUDA, `ulf_paire --ecrire-entrees`, 16686186 ; Garage arrêté, sorties
+rapatriées par `scp`), jugé par `scripts/compare_p6_p1.py` :
+
+| plan | entrées (écart `f32`) | B0 − moyenne des 5 chaînes (seuil) | LNCC [min, max des chaînes] | écart aux données [min, max] | durée (B + jointe) |
+|---|---|---|---|---|---|
+| sub000_xy | 0 | 5,32 Hz (9,42) ok | 0,8284 [0,8275, 0,8283] hors | 1,2814 [1,2762, 1,2930] ok | 47 + 102 s |
+| sub000_yz | 0 | 15,63 Hz (32,79) ok | 0,7903 [0,7881, 0,7947] ok | 2,1819 [2,1311, 2,2060] ok | 47 + 102 s |
+| sub000_zx | 0 | 4,29 Hz (7,42) ok | 0,8147 [0,8142, 0,8148] ok | 1,5827 [1,5760, 1,5828] ok | 48 + 102 s |
+| subB_xy | 0 | 3,06 Hz (6,86) ok | 0,6252 [0,6250, 0,6257] ok | 2,6541 [2,6358, 2,6803] ok | 48 + 102 s |
+| subB_yz | 0 | 9,37 Hz (21,24) ok | 0,6502 [0,6496, 0,6505] ok | 2,3775 [2,3609, 2,4039] ok | 47 + 102 s |
+| subB_zx | 0 | 4,61 Hz (10,07) ok | 0,6419 [0,6417, 0,6424] ok | 2,4021 [2,3983, 2,4523] ok | 48 + 102 s |
+
+Les entrées de la méthode sont identiques à celles des `inputs.npz` une fois en `f32`, et le masque l'est aussi : la
+chaîne depuis les fichiers ne change rien à ce que reçoit la méthode. Le calcul est une sixième chaîne (graine 0, mais
+l'ordre des additions atomiques sur GPU diffère d'une exécution à l'autre). Sa LNCC sur sub000_xy dépasse de 1e-4 le
+maximum des cinq autres, dans le sens d'une meilleure correction. **Non tenu tel qu'écrit sur ce seul point ; suite à
+décider.**
