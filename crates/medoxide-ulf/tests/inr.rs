@@ -131,7 +131,7 @@ fn verifier_indices(f: &hdf5::File, dims: [usize; 3]) {
             assert_eq!(c[d].to_bits(), axes[d][i[d]].to_bits(), "coordonnée {p}, axe {d}");
         }
     }
-    for nom in ["champ", "image"] {
+    for nom in ["champ", "image"].into_iter().filter(|n| f.group(n).is_ok()) {
         let g = f.group(nom).unwrap();
         let cfg = config(&g);
         for l in 0..cfg.n_niveaux {
@@ -170,7 +170,7 @@ fn verifier_reseaux(f: &hdf5::File, dims: [usize; 3], dtype: DType, device: &Dev
     let device = device.clone();
     let opts = (&device, dtype);
     let mut e = Ecarts::nouveau(dtype);
-    for nom in ["champ", "image"] {
+    for nom in ["champ", "image"].into_iter().filter(|n| f.group(n).is_ok()) {
         println!("{nom} ({dtype:?}, {device:?})");
         let g = f.group(nom).unwrap();
         let plancher = |cle: &str| {
@@ -298,6 +298,20 @@ fn inr_comme_pytorch_reglages_p1() {
         eprintln!("MEDOXIDE_ULF_INR non défini : cas aux réglages de P1 sauté");
         return;
     };
+    verifier(Path::new(&chemin));
+}
+
+/// Critère 1 de P5 (docs/ULF.md) : grille du champ de la méthode B (résolution 2 → 16) sur 115 × 115 × 45, champ seul ;
+/// fichier écrit par `scripts/cas_inr.py p1_b`, désigné par `MEDOXIDE_ULF_INR_B`.
+#[test]
+fn inr_comme_pytorch_methode_b() {
+    let Ok(chemin) = std::env::var("MEDOXIDE_ULF_INR_B") else {
+        eprintln!("MEDOXIDE_ULF_INR_B non défini : cas de la méthode B sauté");
+        return;
+    };
+    let f = hdf5::File::open(&chemin).unwrap();
+    assert_eq!(config(&f.group("champ").unwrap()), ConfigGrille::champ_b());
+    assert!(f.group("image").is_err());
     verifier(Path::new(&chemin));
 }
 

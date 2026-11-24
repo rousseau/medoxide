@@ -602,3 +602,336 @@ réseaux (complexes en paires réel / imaginaire) :
      pas établi.
    - Mac, Metal : pas de mesure valable (Mac chargé par d'autres travaux pendant l'essai : 623 s, démarrage à chaud
      compris, deux fois plus lent qu'à vide). À refaire sur un Mac libre.
+
+## P5 : méthode B, champ INR seul (conception, 2026-11-23)
+
+### Ce qu'on porte
+
+`compare_methods.estimate_inr` (référence `cb7174b`), qui fournit le `b0_init` de l'estimation jointe. Dans P1, il
+est appelé par `denoise_joint.run_pipeline` **hors** des surcharges de `b0_sensitivity` : le champ garde donc
+`B0_INR_CONFIG` par défaut.
+
+- **Champ** : `INRField` comme en P4 bis, mais avec une résolution de 2 → **16** (facteur (16/2)^(1/7)), et non 32.
+  Mêmes bornes `b0_bounds_hz`, même forme (tanh, centrage, RMS 1, `offset + amplitude · forme`).
+- **Perte** : −LNCC(|Aᴴ(+b0)k_reg|, |Aᴴ(−b0)k_inv|) (fenêtre de 4 mm, c'est le terme `b0` de P4 bis)
+  \+ **1e-2** · lissage + 1e-5 · (s² + o²). Pas d'image, pas de fidélité, pas de démarrage à chaud.
+- **Optimisation** : 400 itérations d'Adam (β = 0,9 / 0,999, ε = 1e-8), lr 1e-3 (réseau) et 1e-2 (s, o), décroissance
+  cosinus sur 400 itérations jusqu'à 1e-2 · lr.
+- **Graine** : `INRField` fait `torch.manual_seed(0)` dans son constructeur ; le `b0_warm_start` de P1 est donc la
+  graine 0, à condition que le cache de P1 date bien de `cb7174b` (vérifié par le contrôle du critère 3).
+
+### Conception
+
+Presque tout existe déjà ; il reste :
+- `ConfigGrille::champ_b()` (16 au lieu de 32) ;
+- dans `pertes`, une évaluation réduite au terme `b0`, au lissage et aux scalaires : deux passes `Aᴴ` (et `Aₜᴴ` pour le
+  gradient) par itération, sans `A` ni l'image, sur l'`OperateurCpr` de P4 ter ;
+- dans `jointe` (ou un module `methode_b`), la boucle de 400 pas, avec l'Adam et la décroissance cosinus déjà écrits ;
+- l'exemple `methode_b_p1` (même interface que `jointe_p1`), et une option de `jointe_p1` qui prend le `b0_init` dans
+  une sortie de `methode_b_p1` au lieu de P1 : la chaîne B → jointe tourne alors entièrement en Rust ;
+- côté Python, `scripts/cas_jointe.py` gagne un mode `methode_b` (états du réseau du champ avant et après un pas, à
+  partir des poids de fmi) et un mode `graines_b` (méthode B de PyTorch, graines 0, 1, 2 en `f64` et graine 0 en
+  `f32`, sur les six plans, à lancer sur la RTX ; le `f32` reprend la mise en simple précision de
+  `b0_bases_lisses.py --float32`).
+
+### Critères (écrits avant le code)
+
+1. **Grille du champ de la méthode B** (cas synthétique et plans de P1) : indices de table identiques à PyTorch, entier
+   pour entier ; sortie du champ à ≤ 1e-12 (`f64`) / 1e-6 (`f32`) ; gradient d'une fonctionnelle linéaire aléatoire à
+   ≤ 1e-10 / 1e-5.
+2. **Perte et un pas** (plans de P1, `f64`, poids de fmi) :
+   - perte de la méthode B à ≤ 1e-10 et son gradient par rapport à b0 à ≤ 1e-8 ;
+   - paramètres après un pas d'Adam à ≤ 1e-10 de PyTorch, avec le même plancher par paramètre qu'en P4 bis (écart
+     entre deux exécutions de PyTorch à nombres de fils différents) s'il est plus haut.
+3. **Bout en bout, `f32` sur GPU, initialisation de Burn, graines 0, 1, 2 de Rust**, sur les six plans :
+   - B0 de la graine 0 de Rust à moins du plus grand écart entre les graines 0, 1, 2 de PyTorch (RMS dans l'objet) de
+     la graine 0 de PyTorch en `f64` ;
+   - LNCC de la paire corrigée (critère d'évaluation de `pair_criteria`) dans l'enveloppe des graines 0, 1, 2 en
+     `f64` et du calcul `f32` de PyTorch ;
+   - dispersion : écarts entre graines de Rust du même ordre que ceux de PyTorch (au plus le double du plus grand), et
+     écart entre les moyennes des graines de Rust et de PyTorch sous le plus grand écart entre deux graines de
+     PyTorch (leçon du critère 5 de P4 bis : une seule graine ne distingue pas un biais du bruit) ;
+   - contrôle : la graine 0 de PyTorch en `f64` redonne le `b0_warm_start` de P1 à la précision `f32` de son stockage
+     (sinon le cache de P1 ne date pas de `cb7174b`, et on le dit).
+4. **Chaîne B → jointe en Rust**, `f32` sur la RTX : la jointe partant du B0 de la méthode B de Rust (graine 0) donne
+   un B0 sous le seuil des graines de la jointe (critère 5 amendé de P4 bis) et une LNCC et un écart aux données dans
+   leur enveloppe. Le seuil est celui de graines à `b0_init` fixé : un dépassement ne serait donc pas forcément un
+   défaut, mais il serait rapporté et discuté avant d'aller plus loin.
+5. **Durées** rapportées, sans critère : méthode B et chaîne complète par plan sur la RTX, le Mac (Metal, machine
+   libre) et le CPU ; référence : la méthode B de PyTorch `f32` sur la RTX, mesurée par `graines_b`.
+
+Ordre : 1 → 2 → 3 → 4 → 5, avec les mutations qui font échouer chaque test notées. La chaîne qui va du fichier
+ISMRMRD (P3) aux entrées (fenêtre de Tukey autour de l'écho, normalisation) reste à part et vient après.
+
+### Résultat du critère 1 de P5 (2026-11-23) : grille du champ de la méthode B
+
+`ConfigGrille::champ_b()` (facteur 8^(1/7)), `scripts/cas_inr.py p1_b` (champ seul, 115 × 115 × 45, poids tirés comme
+en P4 bis), test `inr_comme_pytorch_methode_b` (`MEDOXIDE_ULF_INR_B`) : configuration du fichier égale à `champ_b()`,
+géométrie des niveaux bit pour bit, indices identiques entier pour entier ; sorties ≤ 4,5e-15 et gradients ≤ 6,3e-13 en
+`f64` ; en `f32` (CPU et Metal) sorties ≤ 1,4e-6 et gradients ≤ 1,7e-4, sauf le biais de la dernière couche (6,9e-2 :
+la forme est centrée, ce gradient est une somme qui s'annule ; PyTorch `f32` s'écarte de 7,1e-2 sur le même cas, il
+passe par l'amendement du 2026-11-22). Tenu.
+
+### Résultat du critère 2 de P5 (2026-11-23) : non tenu tel qu'écrit sur deux plans, amendement proposé
+
+`scripts/cas_jointe.py methode_b` (cas synthétique versionné et six plans de P1), test `tests/methode_b.rs`
+(`MEDOXIDE_ULF_P1_B`) :
+- terme b0 et lissage à l'état initial ≤ 1,1e-14 et 1,0e-13 ; gradient par rapport à b0 ≤ 1,6e-11 ; perte avant
+  chaque pas ≤ 9,2e-14 : **tenu** partout ;
+- paramètres après un et deux pas : ≤ 5e-11 sur quatre plans et sur le cas synthétique, **hors seuil sur `sub000_yz`**
+  (jusqu'à 2,0e-10) **et `subB_yz`** (jusqu'à 4,1e-8 au second pas). Les planchers mesurés entre un et plusieurs
+  threads de PyTorch sont ≤ 1e-11 et n'en rendent pas compte.
+
+**Cause.** À l'initialisation de fmi, la sortie du réseau du champ est presque constante (écart-type 2e-6 pour une
+moyenne de 0,12 après `tanh`) ; le centrage de `INRField.b0` amplifie environ 1e5 fois l'arrondi de chaque valeur. La
+moyenne elle-même est exacte (identique à `math.fsum`) : ce sont les sorties du MLP, qui diffèrent d'un ulp entre Rust
+et PyTorch (ordre des produits, `tanh`), qui donnent le b0 initial à 1,5e-11 sur les six plans. Les premiers pas d'Adam
+amplifient ensuite les composantes du gradient de l'ordre de ε.
+
+**Mesure** (`cas_jointe.py sensibilite_b`) : PyTorch contre lui-même, la sortie du réseau étant multipliée par
+1 + 4 r · 2⁻⁵³ (r = ±1) — b0 initial écarté de 2,7e-11, un peu plus que Rust. Écart des paramètres après les pas :
+7,6e-10 sur `sub000_yz`, 9,2e-8 sur `subB_yz`, ≤ 8,8e-11 ailleurs. Les mêmes deux plans sortent, dans le même ordre de
+grandeur. Sur `subB_yz`, l'écart de Rust vaut **0,44 fois** cette sensibilité sur chacun des dix paramètres hors seuil
+(même direction, amplitude proportionnelle) ; sur `sub000_yz`, 0,26 fois pour la table du niveau 7 et 1,8 fois pour le
+biais de la couche 1 (sensibilité d'un seul tirage).
+
+**Amendement proposé** (à décider) : un paramètre passe aussi s'il reste sous deux fois la sensibilité de PyTorch à
+4 ulp sur la sortie du réseau (`sensibilite_pytorch/…`), en plus du plancher des threads ; le terme, le gradient et la
+perte avant chaque pas gardent leurs seuils. Avec cette règle, les six plans passent (pire rapport : 0,89 du seuil
+amendé).
+
+**Décision (2026-11-23, François) : amendement adopté.** `tests/methode_b.rs` prend pour limite de chaque paramètre le
+plus grand de 1e-10, deux fois le plancher des threads et deux fois la sensibilité à 4 ulp. Les six plans de P1 et le
+cas synthétique passent. Mutation : le signe de la contribution de inv dans `CoupureB0::gradient` (− → +) fait échouer
+le cas synthétique (gradient à 1,4, paramètres jusqu'à 3e-4). **Critère 2 tenu, amendé.**
+
+### Résultat du critère 3 de P5 (2026-11-23) : non tenu
+
+Calculs sur la RTX : graines de PyTorch (`scripts/graines_b.py`, `1123-065430-medoxide-graines-b`), méthode B de Rust
+`f32` CUDA, graines 0, 1, 2, et chaîne B → jointe (`1123-084228-medoxide-b-rust`) ; comparaison
+`scripts/compare_b_p1.py`.
+
+| plan | B0 Rust − PyTorch (seuil) | LNCC Rust [enveloppe PyTorch] | paires Rust / PyTorch (Hz) | moyennes | contrôle P1 |
+|---|---|---|---|---|---|
+| sub000_xy | 11,1 (12,3) ok | 0,8309 [0,8303 ; 0,8308] hors | 11–16 / 8–12 | 5,1 ok | 2,6 Hz (5e-2) hors |
+| sub000_yz | 96,5 (97,0) ok | 0,7797 [0,7784 ; 0,7981] ok | 16–97 / 14–97 | 5,3 ok | 2,6 Hz (6e-2) hors |
+| sub000_zx | 16,3 (12,4) hors | 0,8202 [0,8186 ; 0,8196] hors | 11–14 / 9–12 | 6,4 ok | 0,13 Hz (4e-3) hors |
+| subB_xy | 8,5 (8,0) hors | 0,6225 [0,6223 ; 0,6226] ok | 4–5 / 6–8 | 4,6 ok | 0,01 Hz (8e-4) hors |
+| subB_yz | 38,4 (20,0) hors | 0,6395 [0,6350 ; 0,6360] hors | 19–21 / 9–20 | 27,8 hors | 1,1 Hz (3e-2) hors |
+| subB_zx | 9,9 (8,0) hors | 0,6256 [0,6232 ; 0,6248] hors | 9–11 / 7–8 | 6,0 ok | 0,17 Hz (4e-2) hors |
+
+Contrôle P1 : écart relatif maximal de la graine 0 de PyTorch au `b0_warm_start` de P1 (seuil 1e-6).
+
+**Lecture.**
+- Le paysage est multimodal : d'une graine à l'autre, PyTorch s'écarte de 7 à 97 Hz (deux bassins sur `sub000_yz`),
+  alors que PyTorch `f32` reste à 0,2–3,6 Hz de PyTorch `f64` à la même graine. Trois graines par côté estiment mal
+  cette dispersion, et le seuil « plus grand écart entre trois graines » est bruité.
+- La LNCC de Rust n'est jamais sous l'enveloppe ; quand elle en sort, c'est vers le haut (jusqu'à +0,0035). Le terme
+  b0 final est dans la plage de PyTorch, ou meilleur (`subB_yz` : −0,3416 pour Rust, de −0,3393 à −0,3398 pour PyTorch).
+  Ce n'est pas le signe d'un défaut grossier, mais trois graines ne distinguent pas un écart systématique du hasard du
+  tirage initial (Rust tire ses poids avec Burn : mêmes lois que fmi, autres nombres).
+- Contrôle : la graine 0 de PyTorch sur la RTX ne redonne pas le `b0_warm_start` de P1 à 1e-6. Les écarts (0,01–2,6 Hz
+  RMS) sont de l'ordre de PyTorch `f32` contre `f64`, ce qui évoque une autre machine ou un autre ordre des calculs
+  plutôt qu'un autre code. Le seuil 1e-6 supposait un calcul reproductible d'une machine à l'autre ; il ne l'est pas.
+- Durées sur la RTX : 48 s par plan pour la méthode B de Rust `f32`, contre 77 s pour PyTorch `f32` et 330 s pour
+  PyTorch `f64` (avec recalcul au retour).
+
+**Critère 3 non tenu** (B0 sur 4 plans, LNCC sur 4, moyennes sur 1, contrôle sur 6). Suite à décider par François.
+
+**Décision (2026-11-23, François) : critère 3 amendé, « même initialisation + graines ».** Écrit avant les calculs
+qui le jugent (seul le contrôle P1 est fixé après avoir vu ses valeurs, ci-dessus) :
+
+- **3a. Même initialisation** (six plans) : `methode_b_p1 --poids <cas>` part des poids de la graine 0 de fmi
+  (`etat_0/champ` des fichiers de `cas_jointe.py methode_b`, ramenés en `f32`, comme le fait `graines_b` pour PyTorch
+  `f32`) et fait les 400 pas en `f32` sur la RTX. B0 à ≤ 2 × RMS(PyTorch `f32` − PyTorch `f64`, graine 0) de PyTorch
+  `f64` graine 0 (RMS dans l'objet). C'est la partie qui juge l'implémentation : à poids initiaux égaux, Rust `f32`
+  doit s'écarter de PyTorch `f64` comme PyTorch `f32` le fait.
+- **3b. Graines** (six plans, `f32` sur la RTX, initialisation propre à chaque côté) : graines 0 … 9 de Rust (Burn) et
+  graines 0 … 9 de PyTorch `f32`. Avec `m` la médiane des 45 RMS entre deux graines de PyTorch :
+  - médiane des LNCC de Rust dans [min, max] des LNCC de PyTorch ;
+  - médiane des 45 RMS entre deux graines de Rust dans [m / 2, 2 m] ;
+  - RMS entre le B0 moyen de Rust et celui de PyTorch ≤ m (pour des tirages de même loi, il vaut environ m / √10).
+- **3c. Contrôle P1** : RMS(PyTorch `f64` graine 0 − `b0_warm_start` de P1) ≤ 2 × RMS(PyTorch `f32` − PyTorch `f64`,
+  graine 0) : le cache de P1 vient du même code, à l'ordre des calculs près. Seuil fixé après les valeurs ci-dessus
+  (rapports 0,06 à 0,88) ; il est donc tenu, et ne sert qu'à le consigner.
+
+### Résultat du critère 3 amendé de P5 (2026-11-23) : 3b et 3c tenus, 3a non tenu
+
+Calcul `1123-092624-medoxide-b-crit3` (RTX) ; `scripts/compare_b3_p1.py`.
+
+| plan | 3a : Rust même init − PyTorch `f64` (seuil) | LNCC 3a / PyTorch `f64` | 3b : médianes des paires Rust / PyTorch | 3b : moyennes (≤ m) | 3c (seuil) |
+|---|---|---|---|---|---|
+| sub000_xy | 6,09 (5,96) hors | 0,8309 / 0,8308 | 11,7 / 12,8 ok | 4,1 ok | 2,63 (5,96) ok |
+| sub000_yz | 7,40 (7,28) hors | 0,7983 / 0,7979 | 93,3 / 95,0 ok | 19,5 ok | 2,56 (7,28) ok |
+| sub000_zx | 2,75 (2,99) ok | 0,8186 / 0,8186 | 11,3 / 10,9 ok | 2,9 ok | 0,13 (2,99) ok |
+| subB_xy | 4,28 (0,43) hors | 0,6223 / 0,6223 | 6,5 / 7,4 ok | 2,2 ok | 0,01 (0,43) ok |
+| subB_yz | 28,4 (3,13) hors | 0,6364 / 0,6359 | 28,1 / 22,8 ok | 12,4 ok | 1,09 (3,13) ok |
+| subB_zx | 1,59 (0,68) hors | 0,6236 / 0,6237 | 10,4 / 10,2 ok | 3,7 ok | 0,17 (0,68) ok |
+
+La médiane des LNCC de Rust est dans l'enveloppe de PyTorch sur les six plans (3b). En Hz, RMS dans l'objet.
+
+**Diagnostic de 3a.**
+- Rust `f32` s'écarte autant de PyTorch `f32` que de PyTorch `f64` (subB_yz : 29,1 et 28,4 Hz), alors que les deux
+  PyTorch sont à 1,6 Hz l'un de l'autre : c'est Rust `f32` qui s'écarte.
+- **Rust `f64`** (CPU du Mac, mêmes poids, 400 pas, 1 122 s) sur subB_yz : à **1,02 Hz** de PyTorch `f64` (sous le
+  seuil 3a de 3,13 Hz), terme b0 final −0,33948 contre −0,33947. L'implémentation suit PyTorch sur 400 pas.
+- Pas 0 en `f32`, subB_yz : le terme b0 (LNCC) de Rust s'écarte de **1,9e-4** de sa valeur `f64` (−0,23002 contre
+  −0,229977), celui de PyTorch `f32` de **2,6e-6** ; les lissages s'écartent de 1,5 % (Rust) et 3 % (PyTorch, sortie
+  presque constante du réseau). La perte de précision de Rust `f32` est donc dans le chemin du terme b0 (opérateur CPR
+  adjoint, module, LNCC), 70 fois plus forte que celle de PyTorch `f32`.
+
+**Critère 3 non tenu (3a)** : défaut de précision `f32` à localiser et corriger, puis 3a à refaire.
+
+### Correctif `f32` de la moyenne et nouvel essai de 3a (2026-11-23)
+
+**Cause trouvée.** Au pas 0 en `f32`, le B0 initial de Rust était à 0,35 Hz de son `f64` (PyTorch `f32` : 0,007 Hz), et
+presque tout cet écart est un décalage constant (−0,348 Hz, écart-type 3e-3 Hz) : la moyenne `f32` de la sortie presque
+constante du réseau (0,12 ± 2e-6) était fausse de 5e-7, et le centrage de `ChampB0::b0` divise par 2e-6. Le terme b0
+lui-même est exact en `f32` (1,9e-7 sur un B0 final). **Correctif** (981a3df) : en `f32`, `moyenne(x) = x₀ +
+moyenne(x − x₀)`, x₀ détaché ; B0 initial à 3,4e-3 Hz du `f64` (PyTorch `f32` : 7,3e-3). Le `f64` est inchangé bit pour
+bit : avec le décalage aussi en `f64`, le pas joint de P4 bis sur sub000_yz sortait à deux fois son plancher (même
+conditionnement). Tous les tests passent, plans de P1 compris.
+
+**3a refait** (`1123-134919-medoxide-b-3a`), B0 de Rust à même initialisation − PyTorch `f64` (seuil), en Hz :
+
+| plan | avant | après | seuil |
+|---|---|---|---|
+| sub000_xy | 6,09 | 9,84 hors | 5,96 |
+| sub000_yz | 7,40 | 7,56 hors | 7,28 |
+| sub000_zx | 2,75 | 10,41 hors | 2,99 |
+| subB_xy | 4,28 | 0,31 ok | 0,43 |
+| subB_yz | 28,43 | 5,59 hors | 3,13 |
+| subB_zx | 1,59 | 0,66 ok | 0,68 |
+
+Les plans de subB se rapprochent nettement ; ceux de sub000 bougent dans les deux sens (sub000_zx : 2,75 → 10,41)
+pour un changement d'arrondi de quelques ulp. Le seuil repose sur un seul tirage (PyTorch `f32` contre `f64`) d'une
+trajectoire que l'arrondi `f32` déplace de plusieurs Hz : il ne mesure pas la dispersion de cette distance. **3a non
+tenu** ; suite à décider.
+
+**Décision (2026-11-23, François) : seuil de 3a tiré de la dispersion de PyTorch `f32`.** Écrit avant les calculs :
+cinq calculs de PyTorch `f32`, graine 0, dont chaque poids initial du réseau du champ est multiplié par 1 + r · 2⁻²⁴
+(r = ±1 tiré par une graine de perturbation k = 1 … 5) avant le passage en `f32` (`graines_b.py --perturbations 5`,
+`b_f32_p<k>.npz`). Seuil de 3a = 2 × la plus grande distance (RMS dans l'objet) à PyTorch `f64` graine 0 parmi ces cinq
+calculs et le calcul `f32` non perturbé. Le B0 de Rust jugé est celui du calcul `1123-134919-medoxide-b-3a` (après le
+correctif). 3b est refait avec le correctif (graines 0 … 9 de Rust, mêmes règles).
+
+**Résultat (2026-11-23) : 3a, 3b et 3c tenus.** Calcul `1123-140416-medoxide-b-3ab` (RTX, d767785) : graines 0 … 9 de
+Rust `f32` CUDA après le correctif, et les cinq perturbations d'un ulp de PyTorch `f32` ; jugé par
+`scripts/compare_b3_p1.py` (seuil de 3a mis à jour). En Hz, RMS dans l'objet :
+
+| plan | 3a Rust | PyTorch `f32` non perturbé | max perturbés et non perturbé | seuil 3a | 3b LNCC médiane Rust [min, max PyTorch] | 3b paires Rust / PyTorch | 3b moyennes | 3c (seuil) |
+|---|---|---|---|---|---|---|---|---|
+| sub000_xy | 9,84 ok | 2,98 | 7,22 | 14,44 | 0,8309 [0,8303, 0,8318] ok | 11,71 / 12,80 ok | 3,98 ok | 2,63 (5,96) ok |
+| sub000_yz | 7,56 ok | 3,64 | 7,67 | 15,33 | 0,7976 [0,7777, 0,7995] ok | 94,08 / 94,98 ok | 19,41 ok | 2,56 (7,28) ok |
+| sub000_zx | 10,41 ok | 1,50 | 12,03 | 24,06 | 0,8203 [0,8187, 0,8212] ok | 11,06 / 10,85 ok | 3,54 ok | 0,13 (2,99) ok |
+| subB_xy | 0,31 ok | 0,22 | 3,87 | 7,75 | 0,6229 [0,6223, 0,6241] ok | 6,50 / 7,37 ok | 2,61 ok | 0,01 (0,43) ok |
+| subB_yz | 5,59 ok | 1,57 | 28,18 | 56,37 | 0,6375 [0,6348, 0,6391] ok | 23,55 / 22,82 ok | 10,69 ok | 1,09 (3,13) ok |
+| subB_zx | 0,66 ok | 0,34 | 9,28 | 18,56 | 0,6252 [0,6226, 0,6269] ok | 10,86 / 10,21 ok | 3,55 ok | 0,17 (0,68) ok |
+
+Une perturbation d'un ulp des poids initiaux éloigne PyTorch `f32` de son `f64` de 3,9 à 28 Hz selon le plan, soit 2 à
+18 fois l'écart du calcul non perturbé : le seuil précédent sous-estimait la sensibilité de la trajectoire à l'arrondi.
+Rust à même initialisation reste partout sous la plus grande de ces distances, sauf sub000_xy (9,84 contre 7,22, sous
+le seuil de 14,44). LNCC à même initialisation à ≤ 8e-4 de PyTorch `f64`. 3b reste tenu avec le correctif sur les trois
+règles. **Critère 3 tenu.** Suite : critère 4 (chaîne B → jointe) refait avec le correctif.
+
+### Résultat du critère 4 de P5 (2026-11-23) : chaîne B → jointe, non tenu tel qu'écrit
+
+Calcul `1123-174030-medoxide-medoxide-b-chaine` (RTX, 9d3c1e4) : `jointe_p1 --b0-init` à partir du B0 de la méthode B
+de Rust, graine 0, après le correctif (calcul `1123-140416-medoxide-b-3ab`). Jugé par `scripts/compare_jointe_p1.py
+--suffixe _chaine_cuda` contre les graines de la jointe de PyTorch (`b0_init` = `b0_warm_start` de P1). Contrôles : LNCC
+retrouvée à 1e-16, σ à 4e-9. En Hz, RMS dans l'objet :
+
+| plan | B0 fin − graine 0 (seuil) | LNCC (enveloppe) | écart aux données (enveloppe) | départ B Rust − `b0_warm_start` | graine 0 jointe − `b0_warm_start` |
+|---|---|---|---|---|---|
+| sub000_xy | 8,34 (2,71) hors | 0,8281 (0,8277–0,8281) ok | 1,2872 (1,2832–1,2893) ok | 11,08 | 41,70 |
+| sub000_yz | 16,68 (2,55) hors | 0,7927 (0,7947–0,7948) hors | 2,1570 (2,1344–2,1421) hors | 96,31 | 101,51 |
+| sub000_zx | 10,42 (3,11) hors | 0,8146 (0,8135–0,8139) hors | 1,5798 (1,5810–1,5876) hors | 16,23 | 91,60 |
+| subB_xy | 7,19 (3,10) hors | 0,6257 (0,6250–0,6254) hors | 2,6358 (2,6463–2,6604) hors | 8,58 | 29,07 |
+| subB_yz | 23,82 (8,62) hors | 0,6504 (0,6497–0,6503) hors | 2,3721 (2,3431–2,3896) ok | 35,91 | 108,82 |
+| subB_zx | 5,68 (6,08) ok | 0,6417 (0,6419–0,6427) hors | 2,3983 (2,4213–2,4993) hors | 10,79 | 73,39 |
+
+Lecture. La chaîne ne part pas du même B0 que les graines : le départ de Rust est à 8,6–96 Hz du `b0_warm_start`, ce qui
+correspond à la dispersion entre graines de la méthode B mesurée en 3b (médiane des paires de 6,5 à 94 Hz), et non à un
+défaut. La jointe réduit cet écart (fin à 5,7–24 Hz de la graine 0, partout sous l'écart de départ) sans l'effacer ; le
+seuil, fait de graines à `b0_init` fixé, ne contient pas cette variabilité, comme le texte du critère l'annonçait. Les
+LNCC et les écarts aux données sortent de l'enveloppe dans les deux sens : meilleur que les trois graines sur sub000_zx,
+subB_xy, subB_yz (LNCC) et sub000_zx, subB_xy, subB_zx (écart aux données), moins bon sur sub000_yz. Durée de la
+jointe : 108 s par plan sur la RTX. **Critère 4 non tenu tel qu'écrit ; dépassement rapporté, suite à décider.**
+
+**Décision (2026-11-23, François) : critère 4 jugé contre une référence PyTorch chaînée.** Écrit avant les calculs.
+Le seuil de graines à `b0_init` fixé ne contient pas la variabilité de la méthode B ; la référence devient la chaîne
+complète de PyTorch :
+- **PyTorch** : cinq chaînes `f32` sur la RTX ; la chaîne g (g = 0 … 4) part du B0 de la méthode B de PyTorch `f32`
+  graine g (`b_f32.npz`, `b_f32_s<g>.npz`, déjà calculés) et fait la jointe de `b0_bases_lisses.py --configs inr32
+  --float32 --seed g` (fmi `main`), ce B0 remplaçant le `b0_warm_start` de P1 (`scripts/chaine_b_pytorch.py`) ;
+- **Rust** : cinq chaînes `f32` CUDA, la chaîne g part du B0 de la méthode B de Rust graine g (calcul
+  `1123-140416-medoxide-b-3ab`) et fait `jointe_p1 --graine g` (la chaîne 0 est celle du calcul
+  `1123-174030-medoxide-medoxide-b-chaine`) ;
+- avec m = médiane des dix RMS (dans l'objet) entre deux chaînes de PyTorch, sur chacun des six plans :
+  - 4a : B0 de la chaîne 0 de Rust à moins du plus grand de ces dix RMS de la chaîne 0 de PyTorch ;
+  - 4b : LNCC et écart aux données médians des chaînes de Rust dans [min, max] des chaînes de PyTorch ; médiane des
+    RMS entre deux chaînes de Rust dans [m/2, 2m] ; RMS entre les B0 moyens des deux côtés ≤ m.
+
+**Résultat (2026-11-23) : 4b tenu sur la dispersion et les moyennes ; 4a et l'écart aux données médian hors sur trois
+plans chacun, de peu.** Calcul `1123-180309-medoxide-b-chaines` (RTX, f86e739 ; fmi bea6efb, dont `notebooks/francois`
+est identique au 5697306 des graines de la jointe), jugé par `scripts/compare_b4_p1.py`. En Hz, RMS dans l'objet :
+
+| plan | 4a chaîne 0 Rust − PyTorch (seuil) | 4b LNCC médiane [min, max PyTorch] | 4b écart aux données médian [min, max] | 4b paires Rust / PyTorch (médianes) | 4b moyennes (≤ m) |
+|---|---|---|---|---|---|
+| sub000_xy | 8,41 (8,63) ok | 0,8281 [0,8277, 0,8283] ok | 1,2910 [1,2813, 1,2867] hors | 7,21 / 6,20 ok | 2,93 ok |
+| sub000_yz | 16,48 (22,58) ok | 0,7945 [0,7902, 0,7948] ok | 2,1435 [2,1389, 2,1987] ok | 17,14 / 20,26 ok | 4,71 ok |
+| sub000_zx | 10,16 (7,91) hors | 0,8145 [0,8137, 0,8146] ok | 1,5798 [1,5806, 1,5869] hors (meilleur) | 5,64 / 5,06 ok | 3,43 ok |
+| subB_xy | 7,29 (7,27) hors | 0,6252 [0,6250, 0,6254] ok | 2,6689 [2,6521, 2,6655] hors | 5,63 / 5,62 ok | 2,36 ok |
+| subB_yz | 24,06 (20,90) hors | 0,6502 [0,6498, 0,6505] ok | 2,3745 [2,3589, 2,3958] ok | 12,73 / 17,40 ok | 9,14 ok |
+| subB_zx | 6,01 (7,08) ok | 0,6422 [0,6418, 0,6424] ok | 2,4382 [2,3947, 2,4910] ok | 5,67 / 5,63 ok | 2,60 ok |
+
+Lecture (contrôles hors critère) :
+- **4a** compare une paire (chaîne 0 contre chaîne 0, initialisations sans lien) au maximum de dix paires de PyTorch.
+  Sur les 25 paires croisées Rust × PyTorch, la médiane est celle des paires de PyTorch (5,4–17,7 Hz contre 5,1–20,3) et
+  2 à 5 dépassent le maximum de PyTorch : si les chaînes des deux côtés sont interchangeables, on en attend environ
+  2/11 (≈ 4,5 sur 25). Sur les trois plans hors seuil, la paire de 4a est la plus éloignée des 25 ou presque.
+- **Écart aux données** : la différence des moyennes est de −0,5 % à +0,24 %, à moins d'un écart-type (des moyennes de
+  cinq chaînes) sauf sub000_zx, où Rust colle mieux aux données (−0,29 %, −2,6 écarts-types). Avec cinq valeurs de
+  chaque côté, l'étendue de PyTorch est étroite (0,4 % sur sub000_xy). La LNCC médiane est dans l'étendue partout, à
+  1,2 écart-type au plus.
+- La jointe seule prend 108 s par plan en Rust contre environ 208 s pour PyTorch `f32` sur la RTX.
+
+**Critère 4 non tenu tel qu'écrit (4a et écart aux données sur trois plans), sans écart systématique visible ; suite à
+décider.**
+
+**Décision (2026-11-23, François) : critère 4 tenu, avec réserves.** L'amendement a été décidé après la mesure. 4a est
+jugé sur la médiane des 25 paires croisées Rust × PyTorch, rapportée à la médiane des paires de PyTorch : tenu sur les
+six plans (5,4–17,7 Hz contre 5,1–20,3). L'écart aux données est jugé sur la différence des moyennes des chaînes
+rapportée à son écart-type : à moins d'un écart-type sur cinq plans.
+
+Réserves notées :
+- sur sub000_zx, Rust colle mieux aux données que PyTorch (−0,29 %, −2,6 écarts-types) ;
+- sur sub000_xy et subB_xy, l'écart aux données de Rust est plus haut de 0,2 %, sous un écart-type. Cela rappelle les
+  +0,5 % de sub000_xy au critère 5 de P4 bis ;
+- la version de fmi utilisée est bea6efb ; `src/fmi` y diffère de 5697306, et la dépendance de la jointe à `src/fmi`
+  n'a pas été vérifiée.
+
+Suite : critère 5 (durées).
+
+### Résultat du critère 5 de P5 (2026-11-24) : durées
+
+Plan sub000_xy, `f32`, méthode B (`methode_b_p1`, 400 pas) puis jointe à partir de ce B0 (`jointe_p1 --b0-init`) ;
+RTX : calculs `1123-140416-medoxide-b-3ab` et `1123-180309-medoxide-b-chaines` (GPU seul utilisé) ; Mac : machine
+libre (charge 1,1 avant, 1,5 après ; une première mesure CPU, faite pendant d'autres calculs, a été arrêtée et refaite).
+
+| dispositif | méthode B | jointe : total | démarrage champ + image | boucle jointe (200 pas) | dont opérateur CPR | chaîne B → jointe |
+|---|---|---|---|---|---|---|
+| RTX, CUDA | 48 s | 108 s | 16 + 26 s | 61 s | 15 s | 156 s |
+| Mac, Metal | 106,5 s | 259 s | 40 + 61 s | 156 s | 56 s | 366 s |
+| Mac, CPU seul | 696 s | 1 756 s | 211 + 396 s | 1 146 s | 644 s | 2 452 s |
+| référence : PyTorch `f32`, RTX | 77 s | 208 s | | | | 285 s |
+
+Lecture :
+- Sur la RTX, la méthode B de Rust prend 0,62 fois le temps de PyTorch, et la chaîne complète 0,55 fois.
+- Sur Metal, la jointe passe de 283 s (P4 bis, opérateur sur CPU) à 259 s.
+- Sur CPU seul, la jointe est plus lente qu'en P4 bis (1 756 s contre 1 295 s). La différence vient de l'opérateur :
+  644 s contre 70 s. Depuis P4 ter, l'opérateur tourne sur le dispositif, donc ici sur le backend CPU de Burn, au lieu
+  de `ModeleCpr` (rustfft). Le démarrage ne change pas (211 + 396 s contre 229 + 467 s). Pour un usage sur CPU seul,
+  il faudrait revenir à `ModeleCpr` quand le dispositif est le CPU. Cette piste est notée, pas faite.
+
+**Critère 5 rapporté** (sans seuil). P5 est terminée : critères 1, 2 (amendé), 3 (amendé), 4 (tenu avec réserves) et 5.

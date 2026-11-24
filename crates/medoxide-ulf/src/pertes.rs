@@ -266,6 +266,19 @@ impl<T: Reel> Donnees<T> {
     }
 }
 
+/// Pénalité de flexion (`bending_penalty`) : Σ_axes moyenne((∂²b0 / h²)²), différences finies d'ordre 2.
+pub fn lissage<T: Reel>(d: &Donnees<T>, b0: &Tensor<3>) -> Tensor<1> {
+    (0..3)
+        .map(|axe| {
+            let n = d.dims[axe];
+            let tranche = |a: usize, b: usize| b0.clone().narrow(axe, a, b - a);
+            let diff2 = tranche(2, n) - tranche(1, n - 1) * 2.0 + tranche(0, n - 2);
+            moyenne(aplatir(diff2 * (1.0 / d.espacement_mm[axe].powi(2))).powi_scalar(2))
+        })
+        .reduce(|a, b| a + b)
+        .unwrap()
+}
+
 /// Les cinq termes non pondérés, chacun de forme (1).
 pub struct Termes {
     pub fidelite: Tensor<1>,
@@ -309,15 +322,7 @@ pub fn evaluer<T: Reel>(d: &Donnees<T>, u_re: &Tensor<3>, u_im: &Tensor<3>, b0: 
     let abs_u = module(u_re.clone(), u_im.clone());
     let image = (d.lncc(abs_u.clone(), abs_c_reg.clone().detach()) + d.lncc(abs_u, abs_c_inv.clone().detach())).neg();
     let terme_b0 = d.lncc(abs_c_reg, abs_c_inv).neg();
-    let lissage = (0..3)
-        .map(|axe| {
-            let n = d.dims[axe];
-            let tranche = |a: usize, b: usize| b0.clone().narrow(axe, a, b - a);
-            let diff2 = tranche(2, n) - tranche(1, n - 1) * 2.0 + tranche(0, n - 2);
-            moyenne(aplatir(diff2 * (1.0 / d.espacement_mm[axe].powi(2))).powi_scalar(2))
-        })
-        .reduce(|a, b| a + b)
-        .unwrap();
+    let lissage = lissage(d, b0);
     let u2 = u_re.clone() * u_re.clone() + u_im.clone() * u_im.clone();
     let n: usize = d.dims.iter().product();
     let support = moyenne(aplatir(u2 * d.hors_support.clone())) * (n as f64 / d.n_hors_support as f64);
@@ -362,5 +367,56 @@ impl Coupure {
         // les termes calculés avec −b0 contribuent avec le signe opposé
         let gb0 = gb_reg - gb_inv + gc_reg - gc_inv;
         (gu_reg.add(&gu_inv), gb0)
+    }
+}
+
+/// Coupure du graphe de la méthode B (champ seul) : feuilles à la sortie de Aᴴ(+b0)k_reg et Aᴴ(−b0)k_inv.
+pub struct CoupureB0 {
+    feuilles: [(Tensor<3>, Tensor<3>); 2],
+    atk_reg: Complexe<3>,
+    atk_inv: Complexe<3>,
+}
+
+/// Méthode B (`compare_methods.estimate_inr`, docs/ULF.md, P5) : termes non pondérés `b0` = −LNCC(|Aᴴ(+b0)k_reg|,
+/// |Aᴴ(−b0)k_inv|) et `lissage`, et la coupure du graphe. Les k-space sont ceux de `donnees`, normalisés : la LNCC ne
+/// dépend pas de l'échelle (plancher compris), alors que fmi passe les k-space bruts.
+pub fn evaluer_b0<T: Reel>(d: &Donnees<T>, b0: &Tensor<3>) -> (Tensor<1>, Tensor<1>, CoupureB0) {
+    let op = &d.operateur;
+    let b0d = b0.clone().detach();
+    let (c_reg, atk_reg) = op.adjoint_et_pondere(&d.k_reg_d, &b0d);
+    let (c_inv, atk_inv) = op.adjoint_et_pondere(&d.k_inv_d, &b0d.neg());
+    let feuille = |z: &Complexe<3>| {
+        (
+            z.re.clone().detach().require_grad(),
+            z.im.clone().detach().require_grad(),
+        )
+    };
+    let feuilles = [feuille(&c_reg), feuille(&c_inv)];
+    let abs = |f: &(Tensor<3>, Tensor<3>)| module(f.0.clone(), f.1.clone());
+    let terme_b0 = d.lncc(abs(&feuilles[0]), abs(&feuilles[1])).neg();
+    (
+        terme_b0,
+        lissage(d, b0),
+        CoupureB0 {
+            feuilles,
+            atk_reg,
+            atk_inv,
+        },
+    )
+}
+
+impl CoupureB0 {
+    /// Contribution du modèle CPR au gradient de la perte par rapport à b0.
+    pub fn gradient<T: Reel>(&self, d: &Donnees<T>, grads: &Gradients) -> Tensor<3> {
+        let lire = |f: &(Tensor<3>, Tensor<3>)| {
+            let g = |t: &Tensor<3>| {
+                t.grad(grads)
+                    .map_or_else(|| Tensor::zeros(d.dims, (&d.device, d.dtype)), Tensor::from_inner)
+            };
+            Complexe::new(g(&f.0), g(&f.1))
+        };
+        let [g_reg, g_inv] = self.feuilles.each_ref().map(lire);
+        let op = &d.operateur;
+        op.gradient_adjoint_b0(&self.atk_reg, &g_reg) - op.gradient_adjoint_b0(&self.atk_inv, &g_inv)
     }
 }

@@ -45,6 +45,15 @@ impl ConfigGrille {
         }
     }
 
+    /// Grille du champ de la méthode B (`compare_methods.B0_INR_CONFIG` par défaut, hors surcharges de
+    /// `b0_sensitivity`) : 8 niveaux, résolution 2 → 16 (docs/ULF.md, P5).
+    pub fn champ_b() -> Self {
+        Self {
+            facteur: 8f64.powf(1.0 / 7.0),
+            ..Self::champ_p1()
+        }
+    }
+
     /// Grille de l'image de P1 (`compare_methods.U_INR_CONFIG`) : 16 niveaux, résolution de base 16, facteur 2.
     pub fn image_p1() -> Self {
         Self {
@@ -337,8 +346,21 @@ pub fn diffuser(x: Tensor<1>, n: usize) -> Tensor<1> {
 /// Moyenne d'un vecteur en deux niveaux de sommes (blocs de 1 024, complétés par des zéros) : l'erreur d'arrondi
 /// d'une somme séquentielle de n valeurs croît comme n · ε, ce qui en `f32` sur 595 125 voxels donnait au champ un
 /// écart de 8,8e-5 au float64 (PyTorch, qui somme par blocs : 1,4e-6 ; ici 6,9e-7). Forme (1).
+///
+/// Les valeurs sont décalées de la première (détachée) avant la somme : moyenne(x) = x₀ + moyenne(x − x₀), exact en
+/// arithmétique exacte, même gradient. Sans ce décalage, la sortie presque constante du réseau du champ à
+/// l'initialisation de fmi (0,12 ± 2e-6) perdait sa moyenne à 5e-7 près en `f32`, que le centrage de [`ChampB0::b0`]
+/// changeait en un décalage de B0 de 0,35 Hz (PyTorch `f32` : 0,006 Hz ; docs/ULF.md, P5, critère 3). En `f64`, le
+/// décalage n'est pas fait : le calcul y sert à suivre PyTorch à l'arrondi près, et le centrage amplifie aussi l'écart
+/// entre deux sommes exactes à l'ulp (le pas joint de P4 bis sur sub000_yz sortait à 2 fois son plancher).
 pub fn moyenne(x: Tensor<1>) -> Tensor<1> {
     let n = x.dims()[0];
+    let x0 = if x.dtype() == DType::F64 {
+        Tensor::<1>::zeros([1], (&x.device(), x.dtype()))
+    } else {
+        x.clone().slice(0..1).detach()
+    };
+    let x = x - diffuser(x0.clone(), n);
     let complet = n.div_ceil(BLOC) * BLOC;
     let x = if complet > n {
         let zeros = Tensor::<1>::zeros([complet - n], (&x.device(), x.dtype()));
@@ -348,7 +370,7 @@ pub fn moyenne(x: Tensor<1>) -> Tensor<1> {
     };
     // Multiplication par 1/n plutôt que division par n : au retour, burn-autodiff 0.22.1 calcule l'inverse d'un
     // diviseur scalaire en f32 (`float_div_scalar`), ce qui limite le gradient à environ 1e-8 relatif, même en f64.
-    x.reshape([complet / BLOC, BLOC]).sum_dim(1).sum_dim(0).reshape([1]) * (1.0 / n as f64)
+    x.reshape([complet / BLOC, BLOC]).sum_dim(1).sum_dim(0).reshape([1]) * (1.0 / n as f64) + x0
 }
 
 /// Champ B0 (Hz) = offset + amplitude · forme (`utils_cpr.INRField`) :

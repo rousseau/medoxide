@@ -5,6 +5,7 @@ lisible par Rust.
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py synthetique <medoxide>/crates/medoxide-ulf/tests/donnees/jointe_synthetique.h5
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py p1 <inputs.npz> <sortie.h5>   # un plan de P1
     PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py entrees <inputs.npz> <sortie.h5>   # entrées seules (critère 5)
+    PYTHONPATH=. uv run python <medoxide>/scripts/cas_jointe.py methode_b synthetique|<inputs.npz> <sortie.h5>   # P5, critère 2
 
 Reprend `compare_methods.estimate_joint` (sans RED) en float64 sur CPU, réseaux initialisés par fmi (graine 0, tables
 dans ± 1e-4) :
@@ -185,7 +186,7 @@ def plancher(chemin):
         print(f"plancher écrit ({defaut} threads contre 1) : {chemin}")
 
 
-def synthetique(sortie):
+def donnees_synthetiques():
     rng = np.random.default_rng(20261123)
     dims = (32, 24, 16)
     espacement = (2.0, 2.0, 3.0)
@@ -201,7 +202,11 @@ def synthetique(sortie):
     k_reg = cprmod.time_segmented_cpr_adjoint(u_vrai, t, b0_vrai, 0.0, 0) + bruit()
     k_inv = cprmod.time_segmented_cpr_adjoint(u_vrai, t, -b0_vrai, 0.0, 0) + bruit()
     b0_init = 0.8 * b0_vrai + 5 * rng.standard_normal(dims)
-    ecrire(sortie, SYNTHETIQUE, k_reg, k_inv, temps, espacement, b0_init, (12.5, 108.0))
+    return k_reg, k_inv, temps, espacement, b0_init, (12.5, 108.0)
+
+
+def synthetique(sortie):
+    ecrire(sortie, SYNTHETIQUE, *donnees_synthetiques())
 
 
 def p1(entrees, sortie):
@@ -229,5 +234,163 @@ def entrees(entrees_npz, sortie):
     print(f"écrit : {sortie}")
 
 
+N_PAS_B = 2
+
+
+def methode_b(source, sortie):
+    """Méthode B (`compare_methods.estimate_inr`, docs/ULF.md, P5, critère 2), float64 sur CPU, champ initialisé par fmi
+    (graine 0) : `source` vaut `synthetique` (cas versionné, grille du champ de cas_inr.SYNTHETIQUE) ou un `inputs.npz`
+    de P1 (grille de la méthode B, cas_inr.P1_B).
+
+    Contenu : entrées comme `p1` (sans `b0_init`) ; `champ_config` ; `etat_<e>/champ/...` après e pas (e = 0 … N_PAS_B) ;
+    `pertes_b/{b0,smooth,scalaires,totale}` avant chaque pas ; `grad_b0` : gradient de b0 + W_SMOOTH · lissage par
+    rapport à b0 (Hz) à l'état 0 ; `plancher_pytorch/etat_<e>/champ/<paramètre>` : écart entre le calcul par défaut et le
+    calcul à un thread."""
+    from cas_inr import P1_B
+    if source == "synthetique":
+        k_reg, k_inv, temps, espacement, _, bornes = donnees_synthetiques()
+        config = SYNTHETIQUE["champ"]
+    else:
+        checkpointer()
+        i = np.load(source)
+        t = i["time_array"]
+        temps = t[:, 0, 0]
+        assert np.allclose(t, temps[:, None, None]), "temps non constant le long des axes de phase"
+        k_reg, k_inv, espacement, bornes = i["k_reg"], i["k_inv"], i["spacing_mm"].tolist(), i["b0_bounds"].tolist()
+        config = P1_B["champ"]
+    dims = tuple(k_reg.shape)
+    k_reg_t, k_inv_t = torch.tensor(k_reg), torch.tensor(k_inv)
+    t = torch.tensor(np.broadcast_to(np.asarray(temps)[:, None, None], dims).copy())
+    sigma = [cm.LNCC_SIGMA_MM / h for h in espacement]
+
+    def pertes(b0):
+        terme = utils_cpr.self_consistency_loss(b0, k_reg_t, k_inv_t, t, mode=cm.B0_LOSS_MODE, lncc_sigma_vox=sigma)
+        return terme, utils_cpr.bending_penalty(b0, espacement)
+
+    def pas(n_pas):
+        field = utils_cpr.INRField(**config, b0_min_hz=bornes[0], b0_max_hz=bornes[1], seed=0)
+        opt = torch.optim.Adam(field.param_groups(lr=cm.LR, scalar_lr=cm.SCALAR_LR))
+        sched = cm.cosine_schedule(opt, cm.N_ITER_INR)
+        etats, bilans = [parametres(field.net, field)], []
+        for _ in range(n_pas):
+            opt.zero_grad()
+            b0 = field.b0(dims)
+            terme, smooth = pertes(b0)
+            loss = terme + cm.W_SMOOTH * smooth + cm.W_SCALAR_PENALTY * field.scalar_penalty()
+            loss.backward()
+            opt.step()
+            sched.step()
+            bilans.append((terme.item(), smooth.item(), field.scalar_penalty().item(), loss.item()))
+            etats.append(parametres(field.net, field))
+        return field, etats, bilans
+
+    with h5py.File(sortie, "w") as f:
+        for nom, v in dict(k_reg=np.asarray(k_reg), k_inv=np.asarray(k_inv), temps=np.asarray(temps, dtype=np.float64),
+                           espacement_mm=np.asarray(espacement, dtype=np.float64),
+                           bornes_b0=np.asarray(bornes, dtype=np.float64)).items():
+            f.create_dataset(nom, data=v)
+        g = f.create_group("champ_config")
+        for k, v in config.items():
+            g.attrs[k] = v
+        f.attrs["n_pas"], f.attrs["n_iter"] = N_PAS_B, cm.N_ITER_INR
+        f.attrs["w_smooth"], f.attrs["w_scalaires"] = cm.W_SMOOTH, cm.W_SCALAR_PENALTY
+
+        field = utils_cpr.INRField(**config, b0_min_hz=bornes[0], b0_max_hz=bornes[1], seed=0)
+        ecrire_etat(f, 0, champ=field)
+        b0 = field.b0(dims).detach().requires_grad_()
+        terme, smooth = pertes(b0)
+        (terme + cm.W_SMOOTH * smooth).backward()
+        f.create_dataset("b0_etat_0", data=b0.detach().numpy())
+        f.create_dataset("grad_b0", data=b0.grad.numpy())
+
+        defaut = torch.get_num_threads()
+        _, etats, bilans = pas(N_PAS_B)
+        for e in range(1, N_PAS_B + 1):
+            g = f.create_group(f"etat_{e}/champ")
+            for k, v in etats[e].items():
+                forme = f[f"etat_0/champ/{k}"].shape
+                g.create_dataset(k, data=v.numpy().reshape(forme))
+        for j, nom in enumerate(("b0", "smooth", "scalaires", "totale")):
+            f.create_dataset(f"pertes_b/{nom}", data=np.asarray([b[j] for b in bilans]))
+        torch.set_num_threads(1)
+        _, etats1, _ = pas(N_PAS_B)
+        torch.set_num_threads(defaut)
+        for e in range(1, N_PAS_B + 1):
+            for k in etats[e]:
+                v = float((etats[e][k] - etats1[e][k]).norm() / etats[e][k].norm())
+                f.create_dataset(f"plancher_pytorch/etat_{e}/champ/{k}", data=v)
+        print(f"pertes avant chaque pas : {bilans}")
+    print(f"écrit : {sortie}")
+
+
+def sensibilite_b(chemin, n_ulp="4"):
+    """Sensibilité de PyTorch lui-même à un écart d'un ulp sur la sortie du réseau du champ. À l'initialisation de fmi,
+    cette sortie est presque constante (écart-type 2e-6 pour une moyenne de 0,12) : le centrage de `INRField.b0`
+    amplifie environ 1e5 fois l'arrondi de chaque valeur, et un autre code (autre ordre des produits du MLP, autre
+    `tanh`) arrondit autrement. Mêmes pas que `methode_b`, la sortie du réseau étant multipliée par 1 + n_ulp · r · 2⁻⁵³
+    (r = ±1, tirage fixe ; 4 par défaut, qui écarte le b0 initial d'environ 1,9e-11, un peu plus que l'écart de Rust,
+    1,5e-11). Écrit `sensibilite_pytorch/etat_<e>/champ/<paramètre>` (écart relatif au calcul par défaut) et
+    `sensibilite_pytorch/b0_etat_0`, dans un fichier existant. Diagnostic du critère 2 de P5 (docs/ULF.md)."""
+    with h5py.File(chemin, "a") as f:
+        config = {k: (v.item() if hasattr(v, "item") else v) for k, v in f["champ_config"].attrs.items()}
+        k_reg, k_inv = torch.tensor(f["k_reg"][()]), torch.tensor(f["k_inv"][()])
+        temps, espacement = f["temps"][()], f["espacement_mm"][()].tolist()
+        bornes = f["bornes_b0"][()].tolist()
+        n_pas = int(f.attrs["n_pas"])
+        if "sensibilite_pytorch" in f:
+            del f["sensibilite_pytorch"]
+        dims = tuple(k_reg.shape)
+        if dims[0] > 64:
+            checkpointer()
+        t = torch.tensor(np.broadcast_to(np.asarray(temps)[:, None, None], dims).copy())
+        sigma = [cm.LNCC_SIGMA_MM / h for h in espacement]
+        gen = torch.Generator().manual_seed(1)
+        signe = (torch.randint(0, 2, dims, generator=gen, dtype=torch.float64) * 2 - 1) * float(n_ulp)
+        b0_defaut = utils_cpr.INRField.b0
+
+        def b0_permute(self, shape):
+            forme = torch.tanh(utils_cpr._eval_net(self.net, shape)[0] * (1 + signe * 2.0 ** -53))
+            forme = forme - forme.mean()
+            forme = forme / torch.sqrt(forme.square().mean().detach() + 1e-6)
+            return self.offset_hz() + self.amplitude_hz() * forme
+
+        def pas(permute):
+            utils_cpr.INRField.b0 = b0_permute if permute else b0_defaut
+            try:
+                field = utils_cpr.INRField(**config, b0_min_hz=bornes[0], b0_max_hz=bornes[1], seed=0)
+                b0_0 = field.b0(dims).detach().clone()
+                opt = torch.optim.Adam(field.param_groups(lr=cm.LR, scalar_lr=cm.SCALAR_LR))
+                sched = cm.cosine_schedule(opt, cm.N_ITER_INR)
+                etats = [parametres(field.net, field)]
+                for _ in range(n_pas):
+                    opt.zero_grad()
+                    b0 = field.b0(dims)
+                    terme = utils_cpr.self_consistency_loss(b0, k_reg, k_inv, t, mode=cm.B0_LOSS_MODE,
+                                                            lncc_sigma_vox=sigma)
+                    loss = (terme + cm.W_SMOOTH * utils_cpr.bending_penalty(b0, espacement)
+                            + cm.W_SCALAR_PENALTY * field.scalar_penalty())
+                    loss.backward()
+                    opt.step()
+                    sched.step()
+                    etats.append(parametres(field.net, field))
+                return b0_0, etats
+            finally:
+                utils_cpr.INRField.b0 = b0_defaut
+
+        (b0_a, a), (b0_b, b) = pas(False), pas(True)
+        ref = torch.tensor(f["b0_etat_0"][()])
+        assert torch.equal(b0_a, ref), "le calcul par défaut ne redonne pas le fichier"
+        f.create_dataset("sensibilite_pytorch/b0_etat_0", data=float((b0_a - b0_b).norm() / b0_a.norm()))
+        f["sensibilite_pytorch"].attrs["n_ulp"] = float(n_ulp)
+        for e in range(1, n_pas + 1):
+            for k in a[e]:
+                v = float((a[e][k] - b[e][k]).norm() / a[e][k].norm())
+                f.create_dataset(f"sensibilite_pytorch/etat_{e}/champ/{k}", data=v)
+        pire = max((float(f[f"sensibilite_pytorch/etat_{e}/champ/{k}"][()]), e, k)
+                   for e in range(1, n_pas + 1) for k in a[e])
+        print(f"{chemin} : b0 initial {float(f['sensibilite_pytorch/b0_etat_0'][()]):.2e}, pire paramètre {pire}")
+
+
 if __name__ == "__main__":
-    {"synthetique": synthetique, "p1": p1, "plancher": plancher, "entrees": entrees}[sys.argv[1]](*sys.argv[2:])
+    {"synthetique": synthetique, "p1": p1, "plancher": plancher, "entrees": entrees,
+     "methode_b": methode_b, "sensibilite_b": sensibilite_b}[sys.argv[1]](*sys.argv[2:])
