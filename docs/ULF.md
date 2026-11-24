@@ -935,3 +935,66 @@ Lecture :
   il faudrait revenir à `ModeleCpr` quand le dispositif est le CPU. Cette piste est notée, pas faite.
 
 **Critère 5 rapporté** (sans seuil). P5 est terminée : critères 1, 2 (amendé), 3 (amendé), 4 (tenu avec réserves) et 5.
+
+## P6 : entrées de l'étape 1 depuis les fichiers ISMRMRD (conception, 2026-11-24)
+
+### Ce qu'on porte
+
+Construction des entrées de la méthode à partir d'une paire de fichiers (référence : fmi `cb7174b`, `mo_joint.context`
+→ `utils_io.load_pair` et `denoise_joint.Context`). C'est ce que P1 a écrit dans `inputs.npz` :
+- **Lecture** : le k-space brut de reg et de inv (format fmi, inv déjà retourné le long de la lecture à l'écriture),
+  avec le lecteur de P3 (`medoxide-ismrmrd`, identique au bit près à h5py), passé en `f64`.
+- **Écho** (`echo_position`) : énergie moyenne |k|² par échantillon de lecture (moyenne sur les deux axes de phase),
+  maximum de son logarithme, affiné par une parabole sur les trois points autour du maximum (position sous-pixel).
+- **Fenêtre de Tukey** (`symmetric_readout_window`, `readout_window`) :
+  - demi-largeur commune h = min sur reg et inv de min(e, n − 1 − e), où e est la position de l'écho ;
+  - pour chaque acquisition, w(i) = ½ − ½ cos(π · clamp((h − |i − e|) / 6, 0, 1)) ;
+  - k fenêtré = k · w le long de la lecture.
+- **Temps** (`tse_time_array`, `symmetric_time=True`, `readout_padding` = 500 µs) :
+  - pas = dwell + 500e-6 / n ;
+  - t_i = i · pas − t_{n/2} ;
+  - dwell = `dwellTime` (ms) · 1e-3, lu dans l'en-tête de reg.
+- **Bornes de l'amplitude de B0** (`b0_bounds_hz`) : min = 1 / (2π (t_{n−1} − t_0 + dwell)), max = 1 / (2 dwell).
+- **Espacement** : 1e3 · FOV / n par axe. FOV = `encodedSpace/fieldOfView_mm` · 1e-3, en **`f32`** comme dans fmi,
+  arrondi qu'on reproduit.
+- **Masque de l'objet** (évaluation, pas la méthode) : moyenne des magnitudes de Aᴴ(0) k_reg et Aᴴ(0) k_inv,
+  seuillée à 0,2 × son maximum. Le masque de support des pertes est déjà porté (`pertes::masque_support`).
+- **Champ de départ** : la méthode B de Rust (P5), à la place du `b0_warm_start` de P1.
+
+Le code va dans un module `medoxide-ulf::entrees`, et `medoxide-ulf` dépend désormais de `medoxide-ismrmrd`. Un
+exemple `ulf_paire <reg.h5> <inv.h5> <sortie.h5>` enchaîne la lecture, les entrées, la méthode B et la jointe. Il
+vérifie que les deux fichiers ont le même plan, la même matrice, le même FOV et le même dwell, et des polarités
+opposées ; sinon, il refuse.
+
+Hors de P6 :
+- le format Spinloop à lecture inversée (aucun fichier réel ; le retournement serait à faire à la lecture) ;
+- le modèle GNL ;
+- le modèle de bruit (σ, sert à l'évaluation) ;
+- l'orientation entre plans (étape 2).
+
+### Critères (écrits avant le code)
+
+Références :
+- les `inputs.npz` de P1 (six plans, sub000 et subB, calculés à `cb7174b` depuis les fichiers du catalogue `mo_data`) ;
+- les positions d'écho et la demi-largeur, recalculées par `utils_io` sur ces mêmes fichiers (script
+  `scripts/cas_entrees.py`).
+
+1. **Écho et fenêtre** :
+   - positions d'écho à ≤ 1e-9 échantillon ;
+   - demi-largeur égale à ≤ 1e-9 ;
+   - k-space fenêtré à ≤ 1e-12 (écart relatif L2) de `k_reg` et `k_inv` des `inputs.npz`, en `f64`.
+2. **Temps, bornes, espacement** : `time_array`, `b0_bounds` et `spacing_mm` à ≤ 1e-12 (relatif) des `inputs.npz`.
+3. **Masque de l'objet** : identique voxel pour voxel au `mask` des `inputs.npz`. Un voxel qui diffère n'est toléré
+   que si sa valeur est à moins de 1e-9 (relatif) du seuil ; chaque cas toléré est rapporté.
+4. **Bout en bout** (`ulf_paire`, `f32`, CUDA sur la RTX, six plans) : les données qui entrent dans `Donnees`
+   (k-space en `f32`, temps, espacement, bornes) sont égales à celles qu'on obtient depuis les `inputs.npz`, à
+   l'arrondi `f32` près (≤ 1e-6 relatif). Le B0 final de la chaîne doit être dans la dispersion des cinq chaînes de
+   Rust du critère 4 de P5 : à moins du plus grand écart entre deux d'entre elles, de leur moyenne. Sa LNCC et son
+   écart aux données doivent être dans leur [min, max].
+5. **Tests sans données réelles** (dépôt public) : une paire synthétique écrite par l'écrivain de fmi
+   (`write_hdf5_file`, un fichier inv retourné), versionnée avec les valeurs attendues de `utils_io`. Les critères 1
+   à 3 sur données réelles s'activent avec une variable d'environnement (`MEDOXIDE_ULF_P1_ENTREES` : fichiers et
+   `inputs.npz` hors dépôt). Aucun fichier de subB dans le dépôt.
+6. **Plateformes** : compilation et tests sur macOS arm64 et Linux x86_64 (RTX).
+
+Mutations à noter : demi-largeur prise sur une seule acquisition ; parabole omise ; padding du temps omis ; FOV en `f64`.
