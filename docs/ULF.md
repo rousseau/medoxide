@@ -1032,3 +1032,6 @@ chaîne depuis les fichiers ne change rien à ce que reçoit la méthode. Le cal
 l'ordre des additions atomiques sur GPU diffère d'une exécution à l'autre). Sa LNCC sur sub000_xy dépasse de 1e-4 le
 maximum des cinq autres, dans le sens d'une meilleure correction. **Non tenu tel qu'écrit sur ce seul point ; suite à
 décider.**
+
+**Critère 6 : tenu.** Tests de `tests/entrees.rs` passés sur macOS arm64 et sur Linux x86_64 (RTX, calcul
+`1124-091938-medoxide-p6-tests`, cas synthétique ; les fichiers réels n'y ont servi qu'au critère 4).
