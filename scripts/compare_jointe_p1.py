@@ -32,8 +32,8 @@ import torch
 
 import compare_methods as cm
 import utils_cpr
+from plans_ulf import option_plans
 
-PLANS = [(s, p) for s in ("sub000", "subB") for p in ("xy", "yz", "zx")]
 
 
 def ecart_brut(k_reg, k_inv, t, mask, b0, u):
@@ -127,7 +127,7 @@ def main():
     p.add_argument("--suffixe", default="")
     p.add_argument("--graines", required=True)
     p.add_argument("--p1", required=True)
-    p.add_argument("--plans", default=",".join(f"{s}_{q}" for s, q in PLANS))
+    option_plans(p)
     p.add_argument("--sortie")
     p.add_argument("--dispersion", help="suffixes de sorties Rust séparés par des virgules (graines)")
     args = p.parse_args()

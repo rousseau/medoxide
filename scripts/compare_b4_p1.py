@@ -24,8 +24,8 @@ import numpy as np
 import torch
 
 from compare_jointe_p1 import ecart_brut, lncc
+from plans_ulf import option_plans
 
-PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 N = 5
 
 
@@ -95,7 +95,7 @@ def main():
     p.add_argument("--pytorch", required=True)
     p.add_argument("--graines", required=True)
     p.add_argument("--p1", required=True)
-    p.add_argument("--plans", default=",".join(PLANS))
+    option_plans(p)
     p.add_argument("--sortie")
     args = p.parse_args()
     tout = {}

@@ -24,8 +24,8 @@ import numpy as np
 import torch
 
 from compare_jointe_p1 import ecart_brut, lncc
+from plans_ulf import option_plans
 
-PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 
 
 def rms(a, b, m):
@@ -90,7 +90,7 @@ def main():
     p = argparse.ArgumentParser()
     for n in ("--paires", "--chaines", "--graines", "--p1"):
         p.add_argument(n, required=True)
-    p.add_argument("--plans", default=",".join(PLANS))
+    option_plans(p)
     p.add_argument("--sortie")
     args = p.parse_args()
     tout = {}

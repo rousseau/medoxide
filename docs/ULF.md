@@ -12,6 +12,9 @@ critère chiffré **écrit avant le code**.
 - Référence Python : fmi `feat/seg-sr` @ `cb7174b` ; sorties de l'étape 1 (méthode jointe B0 + image, réglage
   finest32, fantôme sub000 et subB) sur Garage (`spinloop/references/`), dont des opérateurs de test en
   complex128.
+- Sujets : `sub000` (fantôme) et `subB` sont des libellés de ce document ; les identifiants des données
+  restent hors dépôt. Les scripts de comparaison les lisent dans `MEDOXIDE_ULF_SUJETS` (séparés par des virgules,
+  `scripts/plans_ulf.py`), ou prennent `--plans`.
 - Précision mesurée : en complex64, le modèle direct et son adjoint s'écartent de 2,3–2,8e-7 du complex128 ; l'étape 1
   peut tourner en `f32` (wgpu, Metal).
 - Essais hors medoxide (`oxide/bench/ulf-essais.md`) : FFT 3D de toute taille sur GPU par Bluestein au-dessus de

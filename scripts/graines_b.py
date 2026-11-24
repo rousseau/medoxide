@@ -31,8 +31,8 @@ import utils_cpr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cas_pertes import checkpointer, cprmod  # noqa: E402
+from plans_ulf import option_plans  # noqa: E402
 
-PLANS = [f"{s}_{q}" for s in ("sub000", "subB") for q in ("xy", "yz", "zx")]
 
 
 def methode_b(entrees, graine, f32, device, perturbation=0):
@@ -82,7 +82,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--p1", required=True)
     p.add_argument("--sortie", required=True)
-    p.add_argument("--plans", default=",".join(PLANS))
+    option_plans(p)
     p.add_argument("--f32-seulement", type=int)
     p.add_argument("--perturbations", type=int)
     args = p.parse_args()
