@@ -172,6 +172,11 @@ fn verifier_paire(reg: &Acquisition, inv: &Acquisition) -> Result<(), ErreurEntr
     if !inv.lecture_retournee_a_l_ecriture {
         return refus("inv n'a pas été retourné le long de la lecture à l'écriture".into());
     }
+    if reg.phases_retournees_a_l_ecriture != inv.phases_retournees_a_l_ecriture {
+        return refus(
+            "axes de phase retournés à l'écriture dans un seul des deux fichiers (invert_ph_polarity)".into(),
+        );
+    }
     if reg.plan != inv.plan {
         return refus(format!("plans différents : {:?}, {:?}", reg.plan, inv.plan));
     }

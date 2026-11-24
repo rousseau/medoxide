@@ -116,9 +116,39 @@ fn entrees_comme_fmi_plans_p1() {
 #[test]
 fn paire_incoherente_refusee() {
     let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/donnees/entrees_synthetique");
+    let refus = |reg: &Path, inv: &Path| depuis_fichiers(reg, inv).unwrap_err().to_string();
     // deux fois reg : polarités non opposées
-    let r = depuis_fichiers(&d.join("reg.h5"), &d.join("reg.h5"));
-    assert!(r.is_err());
+    let e = refus(&d.join("reg.h5"), &d.join("reg.h5"));
+    assert!(e.contains("polarités"), "{e}");
     // reg et inv échangés
-    assert!(depuis_fichiers(&d.join("inv.h5"), &d.join("reg.h5")).is_err());
+    let e = refus(&d.join("inv.h5"), &d.join("reg.h5"));
+    assert!(e.contains("polarités"), "{e}");
+    // inv dont l'écrivain a aussi retourné les axes de phase (invert_ph_polarity), reg non
+    let inv = medoxide_ismrmrd::lire(&d.join("inv.h5")).unwrap();
+    let ligne = "<userParameterString><name>invert_ro_polarity</name><value>True</value></userParameterString>";
+    assert!(inv.xml.contains(ligne));
+    let xml: hdf5::types::VarLenUnicode = inv
+        .xml
+        .replace(
+            ligne,
+            &format!(
+                "{ligne}<userParameterString><name>invert_ph_polarity</name><value>True</value></userParameterString>"
+            ),
+        )
+        .parse()
+        .unwrap();
+    let dossier = std::env::temp_dir().join(format!("medoxide-ulf-entrees-{}", std::process::id()));
+    std::fs::create_dir_all(&dossier).unwrap();
+    let chemin = dossier.join("inv_phases.h5");
+    let f = hdf5::File::create(&chemin).unwrap();
+    f.new_dataset::<hdf5::types::VarLenUnicode>()
+        .create("xml_header")
+        .unwrap()
+        .write_scalar(&xml)
+        .unwrap();
+    f.new_dataset_builder().with_data(&inv.kspace).create("kspace").unwrap();
+    drop(f);
+    let e = refus(&d.join("reg.h5"), &chemin);
+    assert!(e.contains("invert_ph_polarity"), "{e}");
+    std::fs::remove_dir_all(&dossier).unwrap();
 }

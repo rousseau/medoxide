@@ -75,6 +75,17 @@ provenance. Les axes (`axes`, `plane`) sont rendus tels quels : la convention co
   demandait 1e-6 : l'égalité exacte tient parce que la moyenne est faite comme en Python (somme en `f64`, division,
   conversion en `f32`).
 
+### Correction après relecture (2026-11-24)
+
+L'écrivain de fmi (`write_hdf5_file`) lit deux paramètres, chacun faux s'il est absent : `invert_ro_polarity` (retourne
+la lecture) et `invert_ph_polarity` (retourne les deux axes de phase, `np.flip(axis=(1, 2))`). Le lecteur refusait un
+fichier sans `invert_ro_polarity` et ignorait `invert_ph_polarity`. Désormais, un paramètre absent vaut faux, une valeur
+autre que `True` / `False` est refusée, et `Acquisition::phases_retournees_a_l_ecriture` signale le retournement des
+phases ; les entrées de l'étape 1 (P6) refusent une paire où un seul des deux fichiers l'a subi. Aucun des fichiers réels
+de P1 ne porte `invert_ph_polarity`. Tests : `tests/fixtures.rs` (paramètres absents, phases retournées, valeur
+inconnue) et `paire_incoherente_refusee` de medoxide-ulf, qui vérifie aussi le motif du refus ; trois mutations
+(absent refusé, phases ignorées, contrôle de paire retiré) les font échouer.
+
 ## P4 : étape 1, modèle direct et adjoint (`medoxide-ulf`)
 
 ### Ce qu'on porte
