@@ -16,6 +16,15 @@
 //! - `Aᴴ(b0) k [x₀] = Σᵢ conj(cᵢ(x₀)) · exp(+2iπ b0[x₀] tᵢ) · F₁₂⁻¹(k[i])`.
 //!
 //! fmi fait une FFT 3D complète par échantillon de lecture ; le résultat est le même (vérifié par les tests de parité).
+//!
+//! **Gradients** (estimation jointe, docs/ULF.md P4 bis, critère 2). Pour une perte réelle L et une sortie complexe y, on
+//! note g = ∂L/∂Re y + i ∂L/∂Im y (la convention de PyTorch), de sorte que dL = Re(conj(g) dy). Avec l'adjoint pondéré
+//! par le temps `Aₜᴴ(b0) k = Σᵢ tᵢ F⁻¹(Mᵢ k) exp(+2iπ b0 tᵢ)` :
+//!
+//! - pour y = A(b0) u : ∂L/∂u = Aᴴ(b0) g et ∂L/∂b0 = Re(−2iπ · u · conj(Aₜᴴ(b0) g)) ;
+//! - pour z = Aᴴ(b0) k : ∂L/∂b0 = Re(2iπ · conj(g) · Aₜᴴ(b0) k).
+//!
+//! `Aᴴ` et `Aₜᴴ` se calculent dans la même passe ([`ModeleCpr::adjoint_et_pondere`]).
 //! Les sommes sont faites dans un ordre fixe : le résultat ne dépend pas du nombre de fils.
 
 use std::sync::Arc;
@@ -31,6 +40,9 @@ use rustfft::{Fft, FftNum, FftPlanner};
 pub trait Reel: FftNum + Float + FloatConst {}
 
 impl<T: FftNum + Float + FloatConst> Reel for T {}
+
+/// Une coupe de la grille, rangée ligne par ligne.
+type Coupe<T> = Vec<Complex<T>>;
 
 /// FFT 2D centrée et normalisée (÷ √(N₁N₂)) d'une coupe `[N₁, N₂]` rangée ligne par ligne.
 struct Fft2Centree<T: Reel> {
@@ -164,6 +176,55 @@ impl<T: Reel> ModeleCpr<T> {
     ///
     /// Panique si une forme diffère de celle de la grille.
     pub fn adjoint(&self, k: &Array3<Complex<T>>, b0: &Array3<T>) -> Array3<Complex<T>> {
+        self.adjoints(k, b0, false).0
+    }
+
+    /// `Aᴴ(b0) k` et l'adjoint pondéré par le temps `Aₜᴴ(b0) k = Σᵢ tᵢ F⁻¹(Mᵢ k) exp(+2iπ b0 tᵢ)`, en une passe.
+    ///
+    /// Panique si une forme diffère de celle de la grille.
+    pub fn adjoint_et_pondere(
+        &self,
+        k: &Array3<Complex<T>>,
+        b0: &Array3<T>,
+    ) -> (Array3<Complex<T>>, Array3<Complex<T>>) {
+        let (a, at) = self.adjoints(k, b0, true);
+        (a, at.expect("adjoint pondéré demandé"))
+    }
+
+    /// Gradients de L pour y = A(b0) u, connaissant g = ∂L/∂y : (∂L/∂u, ∂L/∂b0).
+    pub fn gradient_direct(
+        &self,
+        u: &Array3<Complex<T>>,
+        b0: &Array3<T>,
+        g: &Array3<Complex<T>>,
+    ) -> (Array3<Complex<T>>, Array3<T>) {
+        self.verifier("image", u.shape());
+        let (ahg, athg) = self.adjoint_et_pondere(g, b0);
+        // Re(−2iπ w) = 2π Im(w), w = u · conj(Aₜᴴ g)
+        let deux_pi = T::TAU();
+        let gb0 = ndarray::Zip::from(u)
+            .and(&athg)
+            .map_collect(|u, a| deux_pi * (*u * a.conj()).im);
+        (ahg, gb0)
+    }
+
+    /// Gradient de L par rapport à b0 pour z = Aᴴ(b0) k, connaissant g = ∂L/∂z et `atk` = Aₜᴴ(b0) k (second résultat
+    /// de [`ModeleCpr::adjoint_et_pondere`], calculé avec z) : Re(2iπ · conj(g) · Aₜᴴ k) = −2π Im(conj(g) · Aₜᴴ k).
+    pub fn gradient_adjoint_b0(&self, atk: &Array3<Complex<T>>, g: &Array3<Complex<T>>) -> Array3<T> {
+        self.verifier("gradient", g.shape());
+        self.verifier("adjoint pondéré", atk.shape());
+        let deux_pi = T::TAU();
+        ndarray::Zip::from(g)
+            .and(atk)
+            .map_collect(|g, a| -deux_pi * (g.conj() * *a).im)
+    }
+
+    fn adjoints(
+        &self,
+        k: &Array3<Complex<T>>,
+        b0: &Array3<T>,
+        pondere: bool,
+    ) -> (Array3<Complex<T>>, Option<Array3<Complex<T>>>) {
         self.verifier("k-space", k.shape());
         self.verifier("b0", b0.shape());
         let [n0, n1, n2] = self.dims;
@@ -181,24 +242,34 @@ impl<T: Reel> ModeleCpr<T> {
             })
             .collect();
         // chaque coupe x₀ de l'image somme les N₀ lignes dans l'ordre de i : résultat indépendant du nombre de fils
-        let coupes: Vec<Vec<Complex<T>>> = (0..n0)
+        let zero = Complex::new(T::zero(), T::zero());
+        let coupes: Vec<(Coupe<T>, Coupe<T>)> = (0..n0)
             .into_par_iter()
             .map(|x0| {
                 let debut = x0 * coupe;
                 let b = &b0[debut..debut + coupe];
-                let mut s = vec![Complex::new(T::zero(), T::zero()); coupe];
+                let mut s = vec![zero; coupe];
+                let mut st = vec![zero; if pondere { coupe } else { 0 }];
                 for (i, p) in lignes.iter().enumerate() {
                     let c = self.ligne[i * n0 + x0].conj();
-                    let phase = T::TAU() * self.temps[i];
-                    for ((sj, pj), bj) in s.iter_mut().zip(p).zip(b) {
+                    let ti = self.temps[i];
+                    let phase = T::TAU() * ti;
+                    for (j, (pj, bj)) in p.iter().zip(b).enumerate() {
                         let (sin, cos) = (phase * *bj).sin_cos();
-                        *sj = *sj + c * *pj * Complex::new(cos, sin);
+                        let terme = c * *pj * Complex::new(cos, sin);
+                        s[j] = s[j] + terme;
+                        if pondere {
+                            st[j] = st[j] + terme * ti;
+                        }
                     }
                 }
-                s
+                (s, st)
             })
             .collect();
-        Array3::from_shape_vec((n0, n1, n2), coupes.concat()).unwrap()
+        let (s, st): (Vec<_>, Vec<_>) = coupes.into_iter().unzip();
+        let image = Array3::from_shape_vec((n0, n1, n2), s.concat()).unwrap();
+        let ponderee = pondere.then(|| Array3::from_shape_vec((n0, n1, n2), st.concat()).unwrap());
+        (image, ponderee)
     }
 }
 
