@@ -529,6 +529,9 @@ critère devient :
 l'écart aux données de sub000 xy (+0,5 %, 3,2 écarts-types sur trois graines), noté. Les LNCC hors enveloppe de 1e-4 au
 plus restent notées.
 
+Recalcul du point 2 : `scripts/compare_jointe_p1.py --dispersion _cuda,_wgpu_g1,_wgpu_g2` (différence des moyennes
+rapportée à √(s²_Rust/3 + s²_PyTorch/3), jugée à moins de 2 écarts-types).
+
 ### Résultat du critère 6 (2026-11-22) : durées
 
 Plan sub000 xy (subB yz pour la seconde mesure CUDA), méthode complète en `f32` (`jointe_p1`, durées par phase dans
@@ -905,7 +908,8 @@ décider.**
 **Décision (2026-11-23, François) : critère 4 tenu, avec réserves.** L'amendement a été décidé après la mesure. 4a est
 jugé sur la médiane des 25 paires croisées Rust × PyTorch, rapportée à la médiane des paires de PyTorch : tenu sur les
 six plans (5,4–17,7 Hz contre 5,1–20,3). L'écart aux données est jugé sur la différence des moyennes des chaînes
-rapportée à son écart-type : à moins d'un écart-type sur cinq plans.
+rapportée à son écart-type : à moins d'un écart-type sur cinq plans. Recalcul : lignes « retenu » de
+`scripts/compare_b4_p1.py` (4a : médiane des paires croisées dans [m/2, 2m] ; écart-type √(s²_Rust/5 + s²_PyTorch/5)).
 
 Réserves notées :
 - sur sub000_zx, Rust colle mieux aux données que PyTorch (−0,29 %, −2,6 écarts-types) ;

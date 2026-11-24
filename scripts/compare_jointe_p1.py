@@ -15,6 +15,12 @@ Critères (écrits avant le code, docs/ULF.md) :
 - LNCC reg / inv après correction et écart aux données rapporté au bruit dans l'enveloppe (min, max) des graines 0, 1,
   2 et du calcul float32 de PyTorch.
 
+`--dispersion _cuda,_wgpu_g1,_wgpu_g2` juge le critère 5 amendé, point 2 (décision de François du 2026-11-22) : sorties
+de Rust à trois graines de Burn contre les graines 0, 1, 2 de PyTorch (float64). Imprimés : RMS de B0 entre graines de
+chaque côté, RMS entre les B0 moyens, et pour la LNCC et l'écart aux données la différence des moyennes rapportée à son
+écart-type (√(s²_Rust/n + s²_PyTorch/n)) ; jugée tenue à moins de 2 écarts-types, comme dans docs/ULF.md (l'écart aux
+données de sub000 xy, à 3,2, y est noté).
+
 Les métriques sont celles de b0_sensitivity.metrics (pair_criteria de compare_methods ; écart aux données en magnitude,
 dans l'objet, rapporté au bruit σ). σ n'est pas dans les fichiers : il est tiré du calcul float32 de PyTorch, dont u et b0
 sont enregistrés (σ = écart brut / écart rapporté de son json). Contrôles : la LNCC recalculée de ce calcul redonne son
@@ -103,22 +109,54 @@ def plan(args, sujet, nom_plan):
     return res
 
 
+def z(a, b):
+    """Différence des moyennes de a et b rapportée à son écart-type (variances empiriques)."""
+    a, b = np.asarray(a), np.asarray(b)
+    return float((a.mean() - b.mean()) / np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b)))
+
+
 def dispersion(args, suffixes):
-    """B0 : RMS dans l'objet entre sorties de Rust (graines) deux à deux, et entre graines de PyTorch ; moyenne des
-    sorties de Rust à la graine 0 de PyTorch (écart systématique éventuel), rapportée à celle d'une graine."""
+    """Critère 5 amendé, point 2 : B0 entre graines de chaque côté et entre moyennes ; LNCC et écart aux données des
+    graines de Rust (recalculés) contre ceux des graines de PyTorch (leurs json), en écarts-types de la différence."""
+    tout = {}
     for nom in args.plans.split(","):
         sujet, q = nom.split("_")
-        m = np.load(Path(args.p1) / sujet / q / "inputs.npz")["mask"]
+        i = np.load(Path(args.p1) / sujet / q / "inputs.npz")
+        m = i["mask"]
+        k_reg, k_inv = torch.tensor(i["k_reg"]), torch.tensor(i["k_inv"])
+        t, mask, esp = torch.tensor(i["time_array"]), torch.tensor(m), i["spacing_mm"].tolist()
         g = Path(args.graines) / sujet / q
-        py = [np.load(g / f"{n}.npz")["b0_hz"].astype(np.float64) for n in ("inr32", "inr32_s1", "inr32_s2")]
-        ru = []
+        noms_py = ("inr32", "inr32_s1", "inr32_s2")
+        py = [np.load(g / f"{n}.npz")["b0_hz"].astype(np.float64) for n in noms_py]
+        json_py = [json.loads((g / f"{n}.json").read_text()) for n in noms_py]
+        f32 = np.load(g / "inr32_f32.npz")
+        sigma = ecart_brut(k_reg, k_inv, t, mask, torch.tensor(f32["b0_hz"]).double(),
+                           torch.tensor(f32["u"]).to(torch.complex128)) \
+            / json.loads((g / "inr32_f32.json").read_text())["misfit_over_noise"]
+        ru, lncc_ru, ecart_ru = [], [], []
         for suf in suffixes:
             with h5py.File(Path(args.rust) / f"{nom}{suf}.h5") as f:
-                ru.append(f["b0_hz"][()])
-        paires = lambda xs: [rms(xs[i], xs[j], m) for i in range(len(xs)) for j in range(i + 1, len(xs))]  # noqa: E731
-        moy_ru, moy_py = sum(ru) / len(ru), sum(py) / len(py)
-        print(f"{nom} : entre graines Rust {np.round(paires(ru), 2).tolist()} Hz, PyTorch {np.round(paires(py), 2).tolist()}"
-              f" Hz | moyenne Rust − moyenne PyTorch {rms(moy_ru, moy_py, m):.2f} Hz", flush=True)
+                b0, u = f["b0_hz"][()], f["u"][()]
+            ru.append(b0)
+            lncc_ru.append(lncc(k_reg, k_inv, t, torch.tensor(b0), mask, esp))
+            ecart_ru.append(ecart_brut(k_reg, k_inv, t, mask, torch.tensor(b0), torch.tensor(u)) / sigma)
+        lncc_py = [j["crit_lncc"] for j in json_py]
+        ecart_py = [j["misfit_over_noise"] for j in json_py]
+        paires = lambda xs: [rms(xs[a], xs[b], m) for a in range(len(xs)) for b in range(a + 1, len(xs))]  # noqa: E731
+        r = {
+            "b0_paires_rust_hz": paires(ru), "b0_paires_pytorch_hz": paires(py),
+            "b0_moyennes_hz": rms(sum(ru) / len(ru), sum(py) / len(py), m),
+            "lncc_rust": lncc_ru, "lncc_pytorch": lncc_py, "lncc_z": z(lncc_ru, lncc_py),
+            "ecart_rust": ecart_ru, "ecart_pytorch": ecart_py, "ecart_z": z(ecart_ru, ecart_py),
+        }
+        r["lncc_ok"], r["ecart_ok"] = abs(r["lncc_z"]) <= 2, abs(r["ecart_z"]) <= 2
+        tout[nom] = r
+        ok = lambda b: "ok" if b else "HORS"  # noqa: E731
+        print(f"{nom} : B0 entre graines Rust {np.round(r['b0_paires_rust_hz'], 2).tolist()} Hz, PyTorch "
+              f"{np.round(r['b0_paires_pytorch_hz'], 2).tolist()} Hz, moyennes {r['b0_moyennes_hz']:.2f} Hz | LNCC "
+              f"{r['lncc_z']:+.1f} écart-type {ok(r['lncc_ok'])} | écart aux données {r['ecart_z']:+.1f} écart-type "
+              f"({100 * (np.mean(ecart_ru) / np.mean(ecart_py) - 1):+.2f} %) {ok(r['ecart_ok'])}", flush=True)
+    return tout
 
 
 def main():
@@ -132,7 +170,9 @@ def main():
     p.add_argument("--dispersion", help="suffixes de sorties Rust séparés par des virgules (graines)")
     args = p.parse_args()
     if args.dispersion:
-        dispersion(args, args.dispersion.split(","))
+        tout = dispersion(args, args.dispersion.split(","))
+        if args.sortie:
+            Path(args.sortie).write_text(json.dumps(tout, indent=1))
         return
     tout = {}
     for nom in args.plans.split(","):

@@ -13,6 +13,15 @@ PyTorch, cinq de chaque côté, sur les six plans de P1.
 
 Les LNCC et écarts aux données de PyTorch sont ceux de ses json (même code que le recalcul : contrôlé à 1e-16 et 4e-9 par
 `compare_jointe_p1.py`) ; ceux de Rust sont recalculés.
+
+Deux jugements sont imprimés :
+- **tel qu'écrit** (avant la mesure) : 4a = chaîne 0 de Rust contre chaîne 0 de PyTorch, au plus le plus grand RMS entre
+  deux chaînes de PyTorch ; 4b = LNCC et écart aux données médians de Rust dans [min, max] de PyTorch, médiane des paires
+  de Rust dans [m/2, 2m], RMS entre les B0 moyens ≤ m (m = médiane des dix paires de PyTorch) ;
+- **retenu** (décision de François du 2026-11-23, « tenu avec réserves ») : 4a = médiane des 25 RMS croisés Rust × PyTorch
+  dans [m/2, 2m] ; écart aux données = différence des moyennes des deux côtés rapportée à son écart-type
+  (√(s²_Rust/5 + s²_PyTorch/5)), à moins d'un écart-type. La LNCC, la dispersion et les moyennes de B0 restent jugées
+  comme écrit ; l'écart-type réduit de la LNCC est aussi imprimé.
 """
 
 import argparse
@@ -31,6 +40,12 @@ N = 5
 
 def rms(a, b, m):
     return float(np.sqrt(np.mean((a - b)[m] ** 2)))
+
+
+def z(a, b):
+    """Différence des moyennes de a et b rapportée à son écart-type (variances empiriques)."""
+    a, b = np.asarray(a), np.asarray(b)
+    return float((a.mean() - b.mean()) / np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b)))
 
 
 def paires(xs, m):
@@ -80,12 +95,18 @@ def plan(args, nom):
         "4b_mediane_paires_rust_hz": float(np.median(p_ru)),
         "4b_mediane_paires_pytorch_hz": med,
         "4b_moyennes_hz": rms(sum(ru) / N, sum(py) / N, m),
+        "4a_croisees_hz": [rms(a, b, m) for a in ru for b in py],
+        "4b_ecart_z": z(ecart_ru, ecart_py),
+        "4b_lncc_z": z(lncc_ru, lncc_py),
     }
+    r["4a_mediane_croisees_hz"] = float(np.median(r["4a_croisees_hz"]))
     r["4a_ok"] = r["4a_rms_hz"] <= r["4a_seuil_hz"]
     r["4b_lncc_ok"] = min(lncc_py) <= float(np.median(lncc_ru)) <= max(lncc_py)
     r["4b_ecart_ok"] = min(ecart_py) <= float(np.median(ecart_ru)) <= max(ecart_py)
     r["4b_dispersion_ok"] = med / 2 <= r["4b_mediane_paires_rust_hz"] <= 2 * med
     r["4b_moyennes_ok"] = r["4b_moyennes_hz"] <= med
+    r["4a_retenu_ok"] = med / 2 <= r["4a_mediane_croisees_hz"] <= 2 * med
+    r["4b_ecart_retenu_ok"] = abs(r["4b_ecart_z"]) <= 1
     return r
 
 
@@ -109,6 +130,10 @@ def main():
               f"{max(r['4b_ecart_pytorch']):.4f}] {ok(r['4b_ecart_ok'])}, paires {r['4b_mediane_paires_rust_hz']:.2f} / "
               f"{r['4b_mediane_paires_pytorch_hz']:.2f} Hz {ok(r['4b_dispersion_ok'])}, moyennes "
               f"{r['4b_moyennes_hz']:.2f} Hz {ok(r['4b_moyennes_ok'])}", flush=True)
+        print(f"{' ' * len(nom)}   retenu : 4a croisées {r['4a_mediane_croisees_hz']:.2f} Hz [m/2, 2m] = "
+              f"[{r['4b_mediane_paires_pytorch_hz'] / 2:.2f}, {2 * r['4b_mediane_paires_pytorch_hz']:.2f}] "
+              f"{ok(r['4a_retenu_ok'])} | écart aux données {r['4b_ecart_z']:+.1f} écart-type "
+              f"{ok(r['4b_ecart_retenu_ok'])} | LNCC {r['4b_lncc_z']:+.1f} écart-type", flush=True)
     if args.sortie:
         Path(args.sortie).write_text(json.dumps(tout, indent=1))
 
